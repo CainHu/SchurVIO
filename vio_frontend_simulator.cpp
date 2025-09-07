@@ -6,7 +6,7 @@
 #include <iostream>
 
 std::random_device rd;
-std::mt19937 VIOFrontendSimulator::random_generator_(rd());
+std::mt19937 VIOFrontendSimulator::random_generator_(0123);
 
 // 生成圆环形分布的特征点
 void VIOFrontendSimulator::generateCircularFeatures() {
@@ -97,12 +97,12 @@ std::vector<State> VIOFrontendSimulator::generateGroundTruth() const {
         // 模拟IMU偏置缓慢变化（随机游走）
         std::normal_distribution<double> ba_noise(0, imu_acc_bias_noise_std_ * sqrt(dt));
         std::normal_distribution<double> bg_noise(0, imu_gyro_bias_noise_std_ * sqrt(dt));
-//        current.ba.x() += ba_noise(random_generator_);
-//        current.ba.y() += ba_noise(random_generator_);
-//        current.ba.z() += ba_noise(random_generator_);
-//        current.bg.x() += bg_noise(random_generator_);
-//        current.bg.y() += bg_noise(random_generator_);
-//        current.bg.z() += bg_noise(random_generator_);
+        current.ba.x() += ba_noise(random_generator_);
+        current.ba.y() += ba_noise(random_generator_);
+        current.ba.z() += ba_noise(random_generator_);
+        current.bg.x() += bg_noise(random_generator_);
+        current.bg.y() += bg_noise(random_generator_);
+        current.bg.z() += bg_noise(random_generator_);
 
         ground_truth.push_back(current);
     }
@@ -187,10 +187,10 @@ std::vector<CameraData> VIOFrontendSimulator::generateCameraData(const std::vect
                     continue;
                 }
 
-//                // 添加噪声
-//                std::normal_distribution<double> noise(0, camera_noise_std_);
-//                uv.x() += noise(random_generator_);
-//                uv.y() += noise(random_generator_);
+                // 添加噪声
+                std::normal_distribution<double> noise(0, camera_noise_std_);
+                uv.x() += noise(random_generator_);
+                uv.y() += noise(random_generator_);
 
 //                // 添加到观测数据
 //                data.measurements.emplace(id, uv);

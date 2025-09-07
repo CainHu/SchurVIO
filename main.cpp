@@ -82,8 +82,12 @@ int main() {
             gt_idx++;
         }
 
-        std::cout << "POS: GT = " << ground_truth[gt_idx].p.transpose() << ", EST = " << ekf.state_.position.transpose() << std::endl;
         std::cout << "QUAT: GT = " << ground_truth[gt_idx].q << ", EST = " << ekf.state_.orientation << std::endl;
+        std::cout << "POS: GT = " << ground_truth[gt_idx].p.transpose() << ", EST = " << ekf.state_.position.transpose() << std::endl;
+        std::cout << "VEL: GT = " << ground_truth[gt_idx].v.transpose() << ", EST = " << ekf.state_.velocity.transpose() << std::endl;
+        std::cout << "BG: EST = " << ekf.state_.gyro_bias.transpose() << std::endl;
+        std::cout << "BA: EST = " << ekf.state_.accel_bias.transpose() << std::endl;
+        std::cout << "G: EST = " << ekf.state_.gravity.transpose() << std::endl;
 
         for (auto &it : cam_data.measurements) {
             const auto id = it.first;

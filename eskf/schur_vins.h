@@ -91,7 +91,7 @@ namespace slam {
 
         constexpr static size_t LMK_SIZE = 3;
 
-        constexpr static TYPE uv_var = TYPE(0.01);
+        constexpr static TYPE uv_var = TYPE(1.);
         constexpr static TYPE lmk_var = TYPE(0.01);
 
         Eigen::VectorXd Rll_;

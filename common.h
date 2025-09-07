@@ -122,8 +122,8 @@ namespace slam {
         constexpr static double STB_P_INIT = 1e-0;
         constexpr static double STB_V_INIT = 1e-1;
         constexpr static double STB_BG_INIT = 5e-2;
-        constexpr static double STB_BA_INIT = 1e-1;
-        constexpr static double STB_G_INIT = 1e-0;
+        constexpr static double STB_BA_INIT = 5e-1;
+        constexpr static double STB_G_INIT = 1e-1;
 
         constexpr static double STB_Q_PROC = 4e-2;
         constexpr static double STB_P_PROC = 3e-3;
