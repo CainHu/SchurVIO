@@ -9,7 +9,8 @@
 #include "feature.h"
 
 namespace slam {
-    using CameraMsg = std::array<cv::Mat, N_CAMERA>;
+//    using CameraMsg = std::array<cv::Mat, N_CAMERA>;
+    using CameraMsg = std::array<void *, N_CAMERA>;
     using Landmark2FeatureMsg = std::unordered_map<LandmarkID, FeatureMsg *>;
 
     class Frame {

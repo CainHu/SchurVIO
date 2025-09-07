@@ -6,7 +6,7 @@
 #define VINSEKF_SCHUR_VINS_H
 
 #include "../common.h"
-#include "../data_structure/map.h"
+//#include "../data_structure/map.h"
 
 namespace slam {
     constexpr static auto operator""_s(unsigned long long s) {
@@ -40,7 +40,7 @@ namespace slam {
     class SchurVINS {
     public:
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
-        explicit SchurVINS(Map &map);
+        explicit SchurVINS();
 
         // 处理IMU数据(预测步骤)
         void processIMU(const IMUData &imu_data);
@@ -65,7 +65,6 @@ namespace slam {
 
 //    private:
     public:
-        Map &map_;
         INSState state_;
 
         Vec3 gyro_corr_;
@@ -85,14 +84,17 @@ namespace slam {
         size_t latest_free_sfw_idx_{0};
         std::vector<size_t> free_sfw_idx_;
         std::vector<std::pair<AugState, CameraData>> sfw_;
-        std::unordered_map<size_t, Vec3> lmk_;
-        Eigen::Matrix<TYPE, COV_SIZE, COV_SIZE> cov_;
+        std::unordered_map<size_t, LmkState> lmk_;
+        Eigen::MatrixXd cov_;
 
         ExtState ext_;
 
         constexpr static size_t LMK_SIZE = 3;
 
         constexpr static TYPE uv_var = TYPE(0.01);
+        constexpr static TYPE lmk_var = TYPE(0.01);
+
+        Eigen::VectorXd Rll_;
     };
 }
 

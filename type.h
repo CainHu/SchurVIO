@@ -32,7 +32,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
-#include <opencv2/opencv.hpp>
+//#include <opencv2/opencv.hpp>
 
 namespace slam {
     constexpr static uint8_t N_CAMERA = 1;

@@ -34,19 +34,19 @@ private:
     double imu_gyro_noise_std_ = 0.01;  // 陀螺仪噪声标准差(rad/s)
     double imu_acc_bias_noise_std_ = 0.001;  // 加速度计偏置噪声标准差(m/s²)
     double imu_gyro_bias_noise_std_ = 0.001;  // 陀螺仪偏置噪声标准差(rad/s)
-    double camera_fx_ = 460.0;  // 相机内参
-    double camera_fy_ = 460.0;
-    double camera_cx_ = 320.0;
-    double camera_cy_ = 240.0;
+    double camera_fx_ = 230.0;  // 相机内参
+    double camera_fy_ = 230.0;
+    double camera_cx_ = 320.0*4;
+    double camera_cy_ = 240.0*4;
     double camera_noise_std_ = 1.0;  // 相机测量噪声标准差(像素)
     double trajectory_radius_ = 5.0;  // 轨迹半径(m)
     double trajectory_speed_ = 1.0;  // 运动速度(m/s)
-    double trajectory_duration_ = 20.0;  // 轨迹持续时间(s)
+    double trajectory_duration_ = 40.0;  // 轨迹持续时间(s)
 
     // 特征点参数（环形分布）
-    size_t num_features_ = 200;  // 特征点总数
-    std::vector<double> ring_radii_ = {8.0, 10.0, 12.0};  // 多个同心圆环的半径(m)
-    Eigen::Vector3d ring_center_ = Eigen::Vector3d(0, 0, 1.5);  // 圆环中心位置(默认在地面上方1.5m)
+    size_t num_features_ = 10000;  // 特征点总数
+    std::vector<double> ring_radii_ = {6.0, 8.0, 10.0, 12.0};  // 多个同心圆环的半径(m)
+    Eigen::Vector3d ring_center_ = Eigen::Vector3d(0, 0, 0.);  // 圆环中心位置(默认在地面上方1.5m)
     double ring_min_theta_ = 0;  // 角度范围（弧度）
     double ring_max_theta_ = 2 * M_PI;
     double ring_min_phi_ = -M_PI/6;  // 极角范围（略微向上和向下，避免完全在同一平面）

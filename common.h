@@ -91,7 +91,7 @@ namespace slam {
             velocity.setZero();
             gyro_bias.setZero();
             accel_bias.setZero();
-            gravity.setZero();
+            gravity = Vec3(0., 0., 9.81);
 
             var_proc.segment<3>(Q) = Vec3::Constant(STB_Q_PROC * STB_Q_PROC);
             var_proc.segment<3>(P) = Vec3::Constant(STB_P_PROC * STB_P_PROC);
@@ -153,6 +153,14 @@ namespace slam {
     struct ExtState {
         Quat q_ic = Quat::Identity();
         Vec3 t_ic = Vec3::Zero();
+    };
+
+    // 路标
+    struct LmkState {
+        Vec3 position;
+        Mat3_3 cov = Mat3_3::Identity();
+
+        void updateState(const Vec3 &&dx) { position += dx; }
     };
 
     template <typename F>

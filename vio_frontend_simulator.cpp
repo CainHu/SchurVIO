@@ -10,6 +10,7 @@ std::mt19937 VIOFrontendSimulator::random_generator_(rd());
 
 // 生成圆环形分布的特征点
 void VIOFrontendSimulator::generateCircularFeatures() {
+    size_t id = 0;
     feature_positions_.clear();
     feature_positions_.reserve(num_features_ << 1);
 
@@ -43,7 +44,9 @@ void VIOFrontendSimulator::generateCircularFeatures() {
 
             // 平移到圆环中心
             Eigen::Vector3d pos = ring_center_ + Eigen::Vector3d(x, y, z);
-            feature_positions_.emplace(i, pos);
+            feature_positions_.emplace(id++, pos);
+
+//            std::cout << "pos = " << pos.transpose() << std::endl;
         }
     }
 }
@@ -94,12 +97,12 @@ std::vector<State> VIOFrontendSimulator::generateGroundTruth() const {
         // 模拟IMU偏置缓慢变化（随机游走）
         std::normal_distribution<double> ba_noise(0, imu_acc_bias_noise_std_ * sqrt(dt));
         std::normal_distribution<double> bg_noise(0, imu_gyro_bias_noise_std_ * sqrt(dt));
-        current.ba.x() += ba_noise(random_generator_);
-        current.ba.y() += ba_noise(random_generator_);
-        current.ba.z() += ba_noise(random_generator_);
-        current.bg.x() += bg_noise(random_generator_);
-        current.bg.y() += bg_noise(random_generator_);
-        current.bg.z() += bg_noise(random_generator_);
+//        current.ba.x() += ba_noise(random_generator_);
+//        current.ba.y() += ba_noise(random_generator_);
+//        current.ba.z() += ba_noise(random_generator_);
+//        current.bg.x() += bg_noise(random_generator_);
+//        current.bg.y() += bg_noise(random_generator_);
+//        current.bg.z() += bg_noise(random_generator_);
 
         ground_truth.push_back(current);
     }
@@ -131,7 +134,7 @@ std::vector<ImuData> VIOFrontendSimulator::generateImuData(const std::vector<Sta
                                                          acc_noise(random_generator_));
 
         // 计算理想角速度（机体坐标系）
-        Eigen::Quaterniond dq = curr.q * prev.q.inverse();
+        Eigen::Quaterniond dq = prev.q.inverse() * curr.q;
         Eigen::Vector3d gyro_ideal = 2.0 * dq.vec() / dt;
         if (dq.w() < 0) gyro_ideal = -gyro_ideal;  // 确保最短路径
         // 添加偏置和噪声
@@ -176,17 +179,18 @@ std::vector<CameraData> VIOFrontendSimulator::generateCameraData(const std::vect
                 if (P_c.z() <= 0) continue;
 
                 // 投影到图像平面
-                Eigen::Vector2d uv = (K * (P_c.head<3>() / P_c.z())).head<2>();
+                Eigen::Vector2d uv = (K * (P_c / P_c.z())).head<2>();
 
                 // 检查是否在图像范围内 (假设图像大小640x480)
                 if (uv.x() < 0 || uv.x() >= 2. * camera_cx_ || uv.y() < 0 || uv.y() >= 2. * camera_cy_) {
+//                    std::cout << "uv: " << uv.transpose() << std::endl;
                     continue;
                 }
 
-                // 添加噪声
-                std::normal_distribution<double> noise(0, camera_noise_std_);
-                uv.x() += noise(random_generator_);
-                uv.y() += noise(random_generator_);
+//                // 添加噪声
+//                std::normal_distribution<double> noise(0, camera_noise_std_);
+//                uv.x() += noise(random_generator_);
+//                uv.y() += noise(random_generator_);
 
 //                // 添加到观测数据
 //                data.measurements.emplace(id, uv);
