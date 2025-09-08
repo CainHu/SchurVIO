@@ -1,4 +1,5 @@
 #include "vio_frontend_simulator.h"
+#include "vio_frontend_simulator1.h"
 #include "eskf/schur_vins.h"
 #include <iostream>
 
@@ -27,6 +28,22 @@ public:
 #endif
 
 int main() {
+
+
+#if 0
+    // 创建模拟器
+    VIOFrontendSimulator1 simulator;
+
+    // 配置模拟器参数
+    simulator.setImuNoise(0.01, 0.01, 0.001, 0.001);  // IMU噪声参数
+
+    // 配置轨迹：半径5m，速度1m/s，持续20s
+    simulator.setTrajectoryParams(10.0, 1.0, 20.0);
+
+    // 配置环形特征点：3个同心圆环，半径分别为3m、5m、7m，共200个特征点
+    std::vector<double> ring_radii = {3.0, 5.0, 7.0};
+    simulator.setCircularFeaturesParams(200, ring_radii, Eigen::Vector3d(0, 0, 1.5));
+#else
     // 创建模拟器
     VIOFrontendSimulator simulator;
 
@@ -39,6 +56,7 @@ int main() {
     // 配置环形特征点：3个同心圆环，半径分别为8m、10m、12m，共200个特征点
     std::vector<double> ring_radii = {8.0, 10.0, 12.0};
     simulator.setCircularFeaturesParams(200, ring_radii, Eigen::Vector3d(0, 0, 1.5));
+#endif
 
     // 生成模拟数据
     std::vector<ImuData> imu_data;
@@ -64,6 +82,7 @@ int main() {
     // 初始化EKF后端
 //    slam::Map map;
     static slam::SchurVINS ekf;
+    ekf.setQPV(ground_truth[0].q, ground_truth[0].p, ground_truth[0].v);
 
     // 处理数据
     size_t cam_idx = 0;
@@ -78,7 +97,7 @@ int main() {
         }
 //        std::cout << "1 = " << imu_data[imu_idx].timestamp << ", 2 = " << cam_data.timestamp << std::endl;
 
-        while (gt_idx < ground_truth.size() && static_cast<slam::Tus>(ground_truth[gt_idx].timestamp * 1e6) < cam_data.timestamp) {
+        while (gt_idx < ground_truth.size() && ground_truth[gt_idx].timestamp < cam_data.timestamp) {
             gt_idx++;
         }
 

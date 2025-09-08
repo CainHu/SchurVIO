@@ -118,18 +118,18 @@ namespace slam {
         constexpr static int G = BA + 3;
         constexpr static int SIZE = G + 3;
 
-        constexpr static double STB_Q_INIT = 1e-1;
+        constexpr static double STB_Q_INIT = 3e-2;
         constexpr static double STB_P_INIT = 1e-0;
         constexpr static double STB_V_INIT = 1e-1;
-        constexpr static double STB_BG_INIT = 5e-2;
-        constexpr static double STB_BA_INIT = 5e-1;
-        constexpr static double STB_G_INIT = 1e-1;
+        constexpr static double STB_BG_INIT = 5e-3;
+        constexpr static double STB_BA_INIT = 5e-2;
+        constexpr static double STB_G_INIT = 1e-2;
 
         constexpr static double STB_Q_PROC = 4e-2;
         constexpr static double STB_P_PROC = 3e-3;
         constexpr static double STB_V_PROC = 2e-1;
-        constexpr static double STB_BG_PROC = 5e-3;
-        constexpr static double STB_BA_PROC = 1e-2;
+        constexpr static double STB_BG_PROC = 1e-3;
+        constexpr static double STB_BA_PROC = 1e-3;
         constexpr static double STB_G_PROC = 1e-3;
     };
 
@@ -158,7 +158,7 @@ namespace slam {
     // 路标
     struct LmkState {
         Vec3 position;
-        Mat3_3 cov = Mat3_3::Identity();
+        Mat3_3 cov = Mat3_3::Identity() * 1e-3;
 
         void updateState(const Vec3 &&dx) { position += dx; }
     };

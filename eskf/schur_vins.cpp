@@ -22,10 +22,6 @@ SchurVINS::SchurVINS() {
     Rll_.resize(COV_SIZE);
     Rll_.setOnes();
     Rll_ *= uv_var;
-
-    state_.orientation = Quat(0., 0., 1., 0.);
-    state_.position = Vec3(5., 0., 1.);
-    state_.velocity = Vec3(0., 1., 0.);
 }
 
 void SchurVINS::processIMU(const slam::IMUData &imu_data) {
@@ -295,6 +291,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         return;
     }
 
+    std::cout << "ids.size() = " << ids.size() << std::endl;
+
 //    std::cout << "11111" << std::endl;
 
     // Hessian 矩阵
@@ -396,7 +394,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 //    std::cout << "4444444" << std::endl;
 
 
-
+#if 1
     std::cout << "Update State" << std::endl;
     // [[ 更新 State ]]
     // 对 H 使用特征分解: H = V * λ * V^T
@@ -479,12 +477,15 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         // Step-0: 过滤掉特征值为0的值
         int zero_end = 0;
         for (; zero_end < LMK_SIZE; ++zero_end) {
-            if (es.eigenvalues()(zero_end) > 1e-6) {
+            if (es.eigenvalues()(zero_end) > 1e-3) {
                 break;
             }
         }
 //        while (zero_end < LMK_SIZE && es.eigenvalues()(zero_end) < 1e-6) {
 //            ++zero_end;
+//        }
+//        if (zero_end != 0) {
+//            std::cerr << "zero_end = " << zero_end << ", eigen value = " << es.eigenvalues().transpose() << std::endl;
 //        }
         if (zero_end == LMK_SIZE) {
             std::cerr << "id = " << id << ", eigen value = " << es.eigenvalues().transpose() << std::endl;
@@ -522,91 +523,91 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 
 
 
-
-//    // 更新 state
-//    // 量测方程为 gp = Hpp * x + Hpp * n
-//    VecX dx_p;
-//    {
-////        const auto R = uv_var / dt;
-////        MatXX HP = Hpp * cov_;
-////
-////        MatXX S = cov_;
-////        S.diagonal().array() += R;
-////        S.triangularView<Eigen::Upper>() = Hpp * S.selfadjointView<Eigen::Upper>() * Hpp.transpose();
-////        S.diagonal().array() += 1e-3 * R;
-////        S.triangularView<Eigen::StrictlyLower>() = S.triangularView<Eigen::StrictlyUpper>().transpose();
-////
-////
-//////    Eigen::SelfAdjointEigenSolver<decltype(S)> es(S);
-//////    MatXX KT = es.eigenvectors() * ((es.eigenvalues().array() > 0.).select(es.eigenvalues().array().inverse(), 0.).matrix().asDiagonal() * es.eigenvectors().transpose() * HP);
-////
-////        MatXX KT = S.inverse() * HP;
-//////    MatXX KT = S.fullPivLu().solve(HP);
-////
-////        cov_ -= KT.transpose() * HP;
-////        cov_ = 0.5 * (cov_ + cov_.transpose());
-////
-////        dx_p = KT.transpose() * gp;
-////        updateState(dx_p);
-//////        std::cout << "dx = " << dx_p.transpose() << std::endl;
-//
+#else
+    // 更新 state
+    // 量测方程为 gp = Hpp * x + Hpp * n
+    VecX dx_p;
+    {
 //        const auto R = uv_var / dt;
-//        MatXX PHT = cov_ * Hpp;
-//        MatXX S = PHT;
-//        S.diagonal().array() += R;
-//        MatXX KT = S.inverse() * cov_;
+//        MatXX HP = Hpp * cov_;
 //
-//        cov_ -= PHT * KT;
+//        MatXX S = cov_;
+//        S.diagonal().array() += R;
+//        S.triangularView<Eigen::Upper>() = Hpp * S.selfadjointView<Eigen::Upper>() * Hpp.transpose();
+//        S.diagonal().array() += 1e-3 * R;
+//        S.triangularView<Eigen::StrictlyLower>() = S.triangularView<Eigen::StrictlyUpper>().transpose();
+//
+//
+////    Eigen::SelfAdjointEigenSolver<decltype(S)> es(S);
+////    MatXX KT = es.eigenvectors() * ((es.eigenvalues().array() > 0.).select(es.eigenvalues().array().inverse(), 0.).matrix().asDiagonal() * es.eigenvectors().transpose() * HP);
+//
+//        MatXX KT = S.inverse() * HP;
+////    MatXX KT = S.fullPivLu().solve(HP);
+//
+//        cov_ -= KT.transpose() * HP;
 //        cov_ = 0.5 * (cov_ + cov_.transpose());
 //
 //        dx_p = KT.transpose() * gp;
 //        updateState(dx_p);
-//    }
-//
-//    gl -= Hpl.transpose() * dx_p;
-//    // 更新 landmark
-//    // 量测方程为 gl = Hll * x + Hll * n
-//    for (size_t i = 0; i < ids.size(); ++i) {
-//        auto id = ids[i];
-//        auto index = i * LMK_SIZE;
-//
-//        auto &&el = gl.segment<3>(index);
-//        auto &&cov = lmk_[id].cov;
-//        auto &&hll = Hll.block<3, 3>(index, index);
-//
-////        const auto R = uv_var / dt;
-////        MatXX HP = hll * cov;
-////
-////        MatXX S = cov;
-////        S.diagonal().array() += R;
-////        S.triangularView<Eigen::Upper>() = hll * S.selfadjointView<Eigen::Upper>() * hll.transpose();
-////        S.diagonal().array() += 1e-3 * R;
-////        S.triangularView<Eigen::StrictlyLower>() = S.triangularView<Eigen::StrictlyUpper>().transpose();
-////
-////        MatXX KT = S.inverse() * HP;
-//////    MatXX KT = S.fullPivLu().solve(HP);
-////
-////        cov -= KT.transpose() * HP;
-////        cov = 0.5 * (cov + cov.transpose());
-////
-////        VecX dx_l = KT.transpose() * el;
-//
+////        std::cout << "dx = " << dx_p.transpose() << std::endl;
+
+        const auto R = uv_var / dt;
+        MatXX PHT = cov_ * Hpp;
+        MatXX S = PHT;
+        S.diagonal().array() += R;
+        MatXX KT = S.inverse() * cov_;
+
+        cov_ -= PHT * KT;
+        cov_ = 0.5 * (cov_ + cov_.transpose());
+
+        dx_p = KT.transpose() * gp;
+        updateState(dx_p);
+    }
+
+    gl -= Hpl.transpose() * dx_p;
+    // 更新 landmark
+    // 量测方程为 gl = Hll * x + Hll * n
+    for (size_t i = 0; i < ids.size(); ++i) {
+        auto id = ids[i];
+        auto index = i * LMK_SIZE;
+
+        auto &&el = gl.segment<3>(index);
+        auto &&cov = lmk_[id].cov;
+        auto &&hll = Hll.block<3, 3>(index, index);
+
 //        const auto R = uv_var / dt;
-//        MatXX PHT = cov * hll;
+//        MatXX HP = hll * cov;
 //
-//        MatXX S = PHT;
+//        MatXX S = cov;
 //        S.diagonal().array() += R;
-//        MatXX KT = S.inverse() * cov;
+//        S.triangularView<Eigen::Upper>() = hll * S.selfadjointView<Eigen::Upper>() * hll.transpose();
+//        S.diagonal().array() += 1e-3 * R;
+//        S.triangularView<Eigen::StrictlyLower>() = S.triangularView<Eigen::StrictlyUpper>().transpose();
 //
-//        cov -= PHT * KT;
+//        MatXX KT = S.inverse() * HP;
+////    MatXX KT = S.fullPivLu().solve(HP);
+//
+//        cov -= KT.transpose() * HP;
 //        cov = 0.5 * (cov + cov.transpose());
 //
 //        VecX dx_l = KT.transpose() * el;
-//
-//        lmk_[id].updateState(dx_l);
-////        std::cout << "id = " << id << ", dx_l = " << dx_l.transpose() << std::endl;
-//    }
 
+        const auto R = uv_var / dt;
+        MatXX PHT = cov * hll;
+
+        MatXX S = PHT;
+        S.diagonal().array() += R;
+        MatXX KT = S.inverse() * cov;
+
+        cov -= PHT * KT;
+        cov = 0.5 * (cov + cov.transpose());
+
+        VecX dx_l = KT.transpose() * el;
+
+        lmk_[id].updateState(dx_l);
+//        std::cout << "id = " << id << ", dx_l = " << dx_l.transpose() << std::endl;
+    }
+#endif
 
 
     // 移除一帧
@@ -627,4 +628,10 @@ void SchurVINS::updateState(auto &&dx) {
         sfw_[n].first.orientation = (vec2quat(Eigen::Map<Vec3>(dx.data() + I::SIZE + n * A::SIZE + A::Q)) * sfw_[n].first.orientation).normalized();
         sfw_[n].first.position += Eigen::Map<Vec3>(dx.data() + I::SIZE + n * A::SIZE + A::P);
     }
+}
+
+void SchurVINS::setQPV(const Quat &q, const Vec3 &p, const Vec3 &v) {
+    state_.orientation = q;
+    state_.position = p;
+    state_.velocity = v;
 }

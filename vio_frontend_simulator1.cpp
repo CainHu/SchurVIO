@@ -1,22 +1,21 @@
 //
-// Created by 许家仁 on 2025/8/24.
+// Created by Cain on 2025/9/8.
 //
 
-#include "vio_frontend_simulator.h"
-#include <iostream>
+#include "vio_frontend_simulator1.h"
 
 static std::random_device rd;
-std::mt19937 VIOFrontendSimulator::random_generator_(0123);
+std::mt19937 VIOFrontendSimulator1::random_generator_(0123);
 
 // 生成圆环形分布的特征点
-void VIOFrontendSimulator::generateCircularFeatures() {
+void VIOFrontendSimulator1::generateCircularFeatures() {
     size_t id = 0;
     feature_positions_.clear();
     feature_positions_.reserve(num_features_ << 1);
 
     // 如果没有指定圆环半径，默认添加一个
     if (ring_radii_.empty()) {
-        ring_radii_.push_back(10.0);
+        ring_radii_.push_back(0.5 * trajectory_radius_);
     }
 
     // 计算每个圆环应分配的特征点数量
@@ -32,15 +31,14 @@ void VIOFrontendSimulator::generateCircularFeatures() {
         for (size_t i = 0; i < count; ++i) {
             // 随机角度（也可以均匀分布）
             std::uniform_real_distribution<double> dist_theta(ring_min_theta_, ring_max_theta_);
-            std::uniform_real_distribution<double> dist_phi(ring_min_phi_, ring_max_phi_);
-
             double theta = dist_theta(random_generator_);  // 方位角（绕z轴）
-            double phi = dist_phi(random_generator_);      // 极角（偏离xy平面）
 
             // 球坐标转笛卡尔坐标
-            double x = radius * cos(theta) * cos(phi);
-            double y = radius * sin(theta) * cos(phi);
-            double z = radius * sin(phi);
+            double x = radius * cos(theta);
+            double y = radius * sin(theta);
+
+            std::uniform_real_distribution<double> dist_z(radius * tan(ring_min_phi_), radius * tan(ring_max_phi_));
+            double z = dist_z(random_generator_);
 
             // 平移到圆环中心
             Eigen::Vector3d pos = ring_center_ + Eigen::Vector3d(x, y, z);
@@ -52,7 +50,7 @@ void VIOFrontendSimulator::generateCircularFeatures() {
 }
 
 // 生成真实轨迹（圆周运动）
-std::vector<State> VIOFrontendSimulator::generateGroundTruth() const {
+std::vector<State> VIOFrontendSimulator1::generateGroundTruth() const {
     std::vector<State> ground_truth;
 
     double total_time = trajectory_duration_;
@@ -85,14 +83,14 @@ std::vector<State> VIOFrontendSimulator::generateGroundTruth() const {
 
         // 更新姿态（始终面向运动方向）
         Eigen::Vector3d forward_dir(-sin(angle), cos(angle), 0.0);  // 前进方向
-        Eigen::Vector3d down_dir(0.0, 0.0, 1.0);  // 向下方向
+        Eigen::Vector3d down_dir(0.0, 0.0, 1.0);  // 向上方向
         Eigen::Vector3d right_dir = down_dir.cross(forward_dir).normalized();
 
         // 构建旋转矩阵
         Eigen::Matrix3d R;
-        R.col(0) = forward_dir;
-        R.col(1) = down_dir;
-        R.col(2) = -right_dir;
+        R.col(0) = down_dir;
+        R.col(1) = forward_dir;
+        R.col(2) = right_dir;
         current.q = Eigen::Quaterniond(R);
 
         // 模拟IMU偏置缓慢变化（随机游走）
@@ -112,7 +110,7 @@ std::vector<State> VIOFrontendSimulator::generateGroundTruth() const {
 }
 
 // 生成IMU测量数据
-std::vector<ImuData> VIOFrontendSimulator::generateImuData(const std::vector<State>& ground_truth) const {
+std::vector<ImuData> VIOFrontendSimulator1::generateImuData(const std::vector<State>& ground_truth) const {
     std::vector<ImuData> imu_data;
 
     // 重力加速度
@@ -153,7 +151,7 @@ std::vector<ImuData> VIOFrontendSimulator::generateImuData(const std::vector<Sta
 }
 
 // 生成相机测量数据
-std::vector<CameraData> VIOFrontendSimulator::generateCameraData(const std::vector<State>& ground_truth) const {
+std::vector<CameraData> VIOFrontendSimulator1::generateCameraData(const std::vector<State>& ground_truth) const {
     std::vector<CameraData> camera_data;
 
     double camera_dt = 1.0 / camera_rate_;

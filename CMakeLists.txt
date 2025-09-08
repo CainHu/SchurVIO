@@ -62,7 +62,9 @@ add_executable(VinsEKF main.cpp
         eskf/schur_vins.cpp
         eskf/schur_vins.h
         common.h
-#        multi_fusion.h
+        vio_frontend_simulator1.cpp
+        vio_frontend_simulator1.h
+        #        multi_fusion.h
 #        multi_fusion2.h
 )
 

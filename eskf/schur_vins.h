@@ -47,6 +47,8 @@ namespace slam {
 
         void processFrame(const CameraData &cam_data, const std::unordered_map<size_t, Vec3> &lmk_map);
 
+    void setQPV(const Quat &q, const Vec3 &p, const Vec3 &v);
+
     protected:
         // 状态预测
         void predict(const IMUData& imu_data, double dt);
@@ -91,7 +93,7 @@ namespace slam {
 
         constexpr static size_t LMK_SIZE = 3;
 
-        constexpr static TYPE uv_var = TYPE(1.);
+        constexpr static TYPE uv_var = TYPE(0.5);
         constexpr static TYPE lmk_var = TYPE(0.01);
 
         Eigen::VectorXd Rll_;

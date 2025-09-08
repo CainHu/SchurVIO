@@ -10,22 +10,13 @@
 #include <random>
 #include <cmath>
 #include "common.h"
-
-// 状态结构体：位置、姿态、速度、IMU偏置
-struct State {
-    uint64_t timestamp;
-    Eigen::Vector3d p;  // 位置
-    Eigen::Quaterniond q;  // 姿态（w,x,y,z）
-    Eigen::Vector3d v;  // 速度
-    Eigen::Vector3d ba;  // 加速度计偏置
-    Eigen::Vector3d bg;  // 陀螺仪偏置
-};
+#include "vio_frontend_simulator.h"
 
 using ImuData = slam::IMUData;
 using CameraData = slam::CameraData;
 
 // VIO前端模拟器类
-class VIOFrontendSimulator {
+class VIOFrontendSimulator1 {
 private:
     // 模拟器参数
     double imu_rate_ = 200.0;  // IMU采样频率(Hz)
@@ -40,18 +31,18 @@ private:
     double camera_fx_ = camera_cx_ / std::tan(0.5 * fov_);
     double camera_fy_ = camera_cy_ / std::tan(0.5 * fov_);
     double camera_noise_std_ = 1.0;  // 相机测量噪声标准差(像素)
-    double trajectory_radius_ = 5.0;  // 轨迹半径(m)
+    double trajectory_radius_ = 10.0;  // 轨迹半径(m)
     double trajectory_speed_ = 1.0;  // 运动速度(m/s)
     double trajectory_duration_ = 120.0;  // 轨迹持续时间(s)
 
     // 特征点参数（环形分布）
-    size_t num_features_ = 10000;  // 特征点总数
-    std::vector<double> ring_radii_ = {6.0, 8.0, 10.0, 12.0};  // 多个同心圆环的半径(m)
+    size_t num_features_ = 3000;  // 特征点总数
+    std::vector<double> ring_radii_ = {3.0, 5.0, 7.0};  // 多个同心圆环的半径(m)
     Eigen::Vector3d ring_center_ = Eigen::Vector3d(0, 0, 0.);  // 圆环中心位置(默认在地面上方1.5m)
     double ring_min_theta_ = 0;  // 角度范围（弧度）
     double ring_max_theta_ = 2 * M_PI;
-    double ring_min_phi_ = -M_PI/6;  // 极角范围（略微向上和向下，避免完全在同一平面）
-    double ring_max_phi_ = M_PI/6;
+    double ring_min_phi_ = -M_PI/3;  // 极角范围（略微向上和向下，避免完全在同一平面）
+    double ring_max_phi_ = M_PI/3;
 
     std::unordered_map<size_t, Eigen::Vector3d> feature_positions_; // 特征点3D位置
 
@@ -70,7 +61,7 @@ private:
     void generateCircularFeatures();
 
 public:
-    VIOFrontendSimulator() {
+    VIOFrontendSimulator1() {
         // 生成特征点
         generateCircularFeatures();
     }
