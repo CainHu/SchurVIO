@@ -8,7 +8,7 @@
 
 using namespace slam;
 
-SchurVINS::SchurVINS() {
+SchurVINS::SchurVINS(slam::Map &map) : map_(map) {
     sfw_.resize(WIN_SIZE);
     free_sfw_idx_.resize(WIN_SIZE);
     for (size_t i = 0; i < WIN_SIZE; ++i) {
@@ -211,9 +211,17 @@ void SchurVINS::pushFrame(const CameraData &cam_data) {
         throw std::invalid_argument("no free space in sfw");
     }
 
-    std::cout << "Input" << std::endl;
+    if (free_sfw_idx_.size() < WIN_SIZE) {
+        if (sfw_[latest_free_sfw_idx_].first.timestamp + 500000 > cam_data.timestamp) {
+            std::cout << "Not Key Frame" << std::endl;
+            return;
+        }
+    }
+
+    std::cout << "Key Frame" << std::endl;
     std::cout << "q = " << state_.orientation << std::endl;
     std::cout << "p = " << state_.position.transpose() << std::endl;
+
     const auto idx = free_sfw_idx_.back();
     latest_free_sfw_idx_ = idx;
     sfw_[idx].first = AugState {
@@ -252,7 +260,49 @@ const auto &SchurVINS::popFrame() {
 }
 
 void SchurVINS::updateMap(const slam::CameraData &cam_data) {
+    // Create Frame
+    auto frame = map_.pool_frm.allocate();
+    frame->timestamp = cam_data.timestamp;
+    frame->id = cam_data.timestamp;
+//    frame->ordering = 0
+    for (const auto &meas : cam_data.measurements) {
+        // Create Feature
+        auto fet = map_.pool_fet.allocate();
+        fet->un_pt = slam::Vec3(meas.second.x(), meas.second.y(), 1);
 
+        // Add { Camera ID, Frame } to Feature
+        fet->camera_id = 0;
+        fet->frame = frame;
+
+        // Create Feature Message
+        const auto lmk_id = meas.first;
+        auto msg = map_.pool_msg.allocate();
+        (*msg)[0] = fet;
+
+        // Add { Landmark ID, Feature Message } to Frame
+        frame->lmk2msg.emplace(lmk_id, msg);
+
+        // Add Frame to Frames
+        map_.frm_stm.emplace_back(frame);
+        map_.frm_slw.emplace_back(frame);
+
+        // Add New Landmark to Map
+        if (auto it = map_.lmk_map.find(lmk_id); it == map_.lmk_map.end()) {
+            auto lmk = map_.pool_lmk.allocate();
+            map_.lmk_map.emplace(lmk_id, lmk);
+
+            // Select Anchor Frame
+            lmk->anchor_fet = fet;
+        }
+
+        // Add { Frame ID, Feature Message } to Landmark
+        auto lmk = map_.lmk_map[lmk_id];
+        lmk->frm2msg.emplace(cam_data.timestamp, msg);
+
+        // Add { Landmark ID, Landmark } to Feature
+        fet->landmark_id = lmk_id;
+        fet->landmark = lmk;
+    }
 }
 
 void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_map<size_t, Vec3> &lmk_map, const double dt) {
@@ -416,7 +466,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         // Step-0: 过滤掉特征值为0的值
         int zero_end = 0;
         for (; zero_end < COV_SIZE; ++zero_end) {
-            if (es.eigenvalues()(zero_end) > 1e-6) {
+            if (es.eigenvalues()(zero_end) > 1e-6 * es.eigenvalues()(COV_SIZE - 1)) {
                 break;
             }
         }
@@ -424,7 +474,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 //            ++zero_end;
 //        }
 //        std::cout << "ev = " << es.eigenvalues().transpose() << std::endl;
-//        std::cout << "zero_end = " << zero_end << std::endl;
+        std::cout << "State Update: zero_end = " << zero_end << std::endl;
         if (zero_end == COV_SIZE) {
             std::cerr << "eigen value = " << es.eigenvalues().transpose() << std::endl;
         }
@@ -477,16 +527,16 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         // Step-0: 过滤掉特征值为0的值
         int zero_end = 0;
         for (; zero_end < LMK_SIZE; ++zero_end) {
-            if (es.eigenvalues()(zero_end) > 1e-3) {
+            if (es.eigenvalues()(zero_end) > 1e-6 * es.eigenvalues()(LMK_SIZE - 1)) {
                 break;
             }
         }
 //        while (zero_end < LMK_SIZE && es.eigenvalues()(zero_end) < 1e-6) {
 //            ++zero_end;
 //        }
-//        if (zero_end != 0) {
-//            std::cerr << "zero_end = " << zero_end << ", eigen value = " << es.eigenvalues().transpose() << std::endl;
-//        }
+        if (zero_end != 0) {
+            std::cerr << "zero_end = " << zero_end << ", eigen value = " << es.eigenvalues().transpose() << std::endl;
+        }
         if (zero_end == LMK_SIZE) {
             std::cerr << "id = " << id << ", eigen value = " << es.eigenvalues().transpose() << std::endl;
         }

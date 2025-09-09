@@ -29,7 +29,7 @@ namespace slam {
         T* allocate() {
             if (free_idx_.empty()) {
                 std::cout << "Memory over." << std::endl;
-                data_.emplace_back({});
+                data_.emplace_back(T());
                 return &data_.back();
             } else {
                 const size_t idx = free_idx_.back();

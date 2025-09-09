@@ -80,8 +80,8 @@ int main() {
     std::cout << "v:\n" << ground_truth[0].v << std::endl;
 
     // 初始化EKF后端
-//    slam::Map map;
-    static slam::SchurVINS ekf;
+    slam::Map map;
+    static slam::SchurVINS ekf(map);
     ekf.setQPV(ground_truth[0].q, ground_truth[0].p, ground_truth[0].v);
 
     // 处理数据
@@ -89,6 +89,27 @@ int main() {
     size_t imu_idx = 0;
     size_t gt_idx = 0;
     for (const auto& cam_data : camera_data) {
+        // 创建 frame
+        auto frame = map.pool_frm.allocate();
+        for (const auto &meas : cam_data.measurements) {
+            auto fet = map.pool_fet.allocate();
+            fet->un_pt = slam::Vec3(meas.second.x(), meas.second.y(), 1);
+
+            auto msg = map.pool_msg.allocate();
+            (*msg)[0] = fet;
+
+            auto id = meas.first;
+            frame->lmk2msg.emplace(meas.first, msg);
+
+            map.frm_stm.emplace_back(frame);
+            map.frm_slw.emplace_back(frame);
+
+            if (auto it = map.lmk_map.find(id); it == map.lmk_map.end()) {
+                auto lmk = map.pool_lmk.allocate();
+                map.lmk_map.emplace(id, lmk);
+            }
+        }
+
         // 处理两个相机帧之间的所有IMU数据
 //        std::cout << "1 = " << imu_data[imu_idx].timestamp << ", 2 = " << cam_data.timestamp << std::endl;
         while (imu_idx < imu_data.size() && imu_data[imu_idx].timestamp < cam_data.timestamp) {

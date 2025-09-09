@@ -6,7 +6,15 @@
 #define VINSEKF_SCHUR_VINS_H
 
 #include "../common.h"
-//#include "../data_structure/map.h"
+#include "../data_structure/map.h"
+
+/*
+ * 开发日志:
+ * 1. 滑窗中，相邻两帧不能过小，不然会导致估计极度不准确
+ * 2. 若仿真中的bg, ba真的为随机游走，估计的 vel 质量会很差
+ * 3. 对 ekf 中的噪声 std 十分敏感
+ * 4. 特征点若使用 Global Position 来参数化, Hll 的条件数会比较大，因为深度相比平移，更难估计
+ * */
 
 namespace slam {
     constexpr static auto operator""_s(unsigned long long s) {
@@ -40,7 +48,7 @@ namespace slam {
     class SchurVINS {
     public:
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
-        explicit SchurVINS();
+        explicit SchurVINS(slam::Map &map);
 
         // 处理IMU数据(预测步骤)
         void processIMU(const IMUData &imu_data);
@@ -93,10 +101,12 @@ namespace slam {
 
         constexpr static size_t LMK_SIZE = 3;
 
-        constexpr static TYPE uv_var = TYPE(0.5);
+        constexpr static TYPE uv_var = TYPE(2);
         constexpr static TYPE lmk_var = TYPE(0.01);
 
         Eigen::VectorXd Rll_;
+
+        slam::Map &map_;
     };
 }
 

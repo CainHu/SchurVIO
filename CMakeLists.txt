@@ -46,17 +46,17 @@ endif()
 #)
 
 add_executable(VinsEKF main.cpp
-#        data_structure/frame.cpp
-#        data_structure/frame.h
-#        data_structure/landmark.cpp
-#        data_structure/landmark.h
-#        data_structure/feature.cpp
-#        data_structure/feature.h
-#        data_structure/map.cpp
-#        data_structure/map.h
         type.h
-#        data_structure/pool.cpp
-#        data_structure/pool.h
+        data_structure/frame.cpp
+        data_structure/frame.h
+        data_structure/landmark.cpp
+        data_structure/landmark.h
+        data_structure/feature.cpp
+        data_structure/feature.h
+        data_structure/map.cpp
+        data_structure/map.h
+        data_structure/pool.cpp
+        data_structure/pool.h
         vio_frontend_simulator.cpp
         vio_frontend_simulator.h
         eskf/schur_vins.cpp

@@ -74,7 +74,7 @@ namespace slam {
         FrameID    id{};
         FrameOrder ordering{};
 
-        Landmark2FeatureMsg lmk2fet;
+        Landmark2FeatureMsg lmk2msg;
         CameraMsg           cam2img;
 
         std::array<TYPE, DIM> state{};     // q, t, v, ba, bg, g

@@ -41,7 +41,7 @@ namespace slam {
         Mat3_3 cov_position;
 
         Feature         *anchor_fet{};
-        Frame2FeatureMsg frm2fet;
+        Frame2FeatureMsg frm2msg;
 
         Map *map{};
     };

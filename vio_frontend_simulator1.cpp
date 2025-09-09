@@ -94,14 +94,14 @@ std::vector<State> VIOFrontendSimulator1::generateGroundTruth() const {
         current.q = Eigen::Quaterniond(R);
 
         // 模拟IMU偏置缓慢变化（随机游走）
-        std::normal_distribution<double> ba_noise(0, imu_acc_bias_noise_std_ * sqrt(dt));
-        std::normal_distribution<double> bg_noise(0, imu_gyro_bias_noise_std_ * sqrt(dt));
-        current.ba.x() += ba_noise(random_generator_);
-        current.ba.y() += ba_noise(random_generator_);
-        current.ba.z() += ba_noise(random_generator_);
-        current.bg.x() += bg_noise(random_generator_);
-        current.bg.y() += bg_noise(random_generator_);
-        current.bg.z() += bg_noise(random_generator_);
+        std::normal_distribution<double> ba_noise(0, imu_acc_bias_noise_std_ * dt);
+        std::normal_distribution<double> bg_noise(0, imu_gyro_bias_noise_std_ * dt);
+//        current.ba.x() += ba_noise(random_generator_);
+//        current.ba.y() += ba_noise(random_generator_);
+//        current.ba.z() += ba_noise(random_generator_);
+//        current.bg.x() += bg_noise(random_generator_);
+//        current.bg.y() += bg_noise(random_generator_);
+//        current.bg.z() += bg_noise(random_generator_);
 
         ground_truth.push_back(current);
     }
@@ -203,6 +203,13 @@ std::vector<CameraData> VIOFrontendSimulator1::generateCameraData(const std::vec
                         (uv.y() - camera_cy_) / camera_fy_
                 };
                 data.measurements.emplace(id, un_pt);
+
+//                // 添加归一化平面的数据
+//                Eigen::Vector2d un_pt {
+//                        (uv.x() - camera_cx_) / camera_fx_,
+//                        (uv.y() - camera_cy_) / camera_fy_
+//                };
+//                data.measurements.emplace(id, Eigen::Vector2d(P_c.x() / P_c.z(), P_c.y() / P_c.z()));
             }
 
             camera_data.push_back(data);

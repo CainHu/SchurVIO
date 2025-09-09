@@ -8,14 +8,14 @@
 using namespace slam;
 
 bool Landmark::delete_frame(FrameID frame_id) {
-    auto iter = frm2fet.find(frame_id);
-    if (iter == frm2fet.end()) {
+    auto iter = frm2msg.find(frame_id);
+    if (iter == frm2msg.end()) {
         return false;
     }
 
-    frm2fet.erase(iter);
+    frm2msg.erase(iter);
 
-    if (frm2fet.empty()) {
+    if (frm2msg.empty()) {
         anchor_fet = nullptr;
         return true;
     }

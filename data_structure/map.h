@@ -22,6 +22,8 @@ namespace slam {
         Map() = default;
         ~Map() = default;
 
+        Landmark *addLandmark(LandmarkID id);
+
         constexpr static size_t N_MSG = 100000;
         constexpr static size_t N_FET = 1000000;
         constexpr static size_t N_FRM = 1000;

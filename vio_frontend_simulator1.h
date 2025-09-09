@@ -24,7 +24,7 @@ private:
     double imu_acc_noise_std_ = 0.02;  // 加速度计噪声标准差(m/s²)
     double imu_gyro_noise_std_ = 0.01;  // 陀螺仪噪声标准差(rad/s)
     double imu_acc_bias_noise_std_ = 0.001;  // 加速度计偏置噪声标准差(m/s²)
-    double imu_gyro_bias_noise_std_ = 0.0005;  // 陀螺仪偏置噪声标准差(rad/s)
+    double imu_gyro_bias_noise_std_ = 0.0001;  // 陀螺仪偏置噪声标准差(rad/s)
     double fov_ = 2. * M_PI / 3.;
     double camera_cx_ = 320.0; // 相机内参
     double camera_cy_ = 320.0;

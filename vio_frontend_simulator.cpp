@@ -98,12 +98,12 @@ std::vector<State> VIOFrontendSimulator::generateGroundTruth() const {
         // 模拟IMU偏置缓慢变化（随机游走）
         std::normal_distribution<double> ba_noise(0, imu_acc_bias_noise_std_ * sqrt(dt));
         std::normal_distribution<double> bg_noise(0, imu_gyro_bias_noise_std_ * sqrt(dt));
-        current.ba.x() += ba_noise(random_generator_);
-        current.ba.y() += ba_noise(random_generator_);
-        current.ba.z() += ba_noise(random_generator_);
-        current.bg.x() += bg_noise(random_generator_);
-        current.bg.y() += bg_noise(random_generator_);
-        current.bg.z() += bg_noise(random_generator_);
+//        current.ba.x() += ba_noise(random_generator_);
+//        current.ba.y() += ba_noise(random_generator_);
+//        current.ba.z() += ba_noise(random_generator_);
+//        current.bg.x() += bg_noise(random_generator_);
+//        current.bg.y() += bg_noise(random_generator_);
+//        current.bg.z() += bg_noise(random_generator_);
 
         ground_truth.push_back(current);
     }
