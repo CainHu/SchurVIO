@@ -101,8 +101,8 @@ int main() {
             auto id = meas.first;
             frame->lmk2msg.emplace(meas.first, msg);
 
-            map.frm_stm.emplace_back(frame);
-            map.frm_slw.emplace_back(frame);
+            map.frm_lst.emplace_back(frame);
+            map.frm_deq.emplace_back(frame);
 
             if (auto it = map.lmk_map.find(id); it == map.lmk_map.end()) {
                 auto lmk = map.pool_lmk.allocate();

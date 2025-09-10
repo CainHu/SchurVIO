@@ -283,20 +283,22 @@ void SchurVINS::updateMap(const slam::CameraData &cam_data) {
         frame->lmk2msg.emplace(lmk_id, msg);
 
         // Add Frame to Frames
-        map_.frm_stm.emplace_back(frame);
-        map_.frm_slw.emplace_back(frame);
+        map_.frm_lst.emplace_back(frame);
+        map_.frm_deq.emplace_back(frame);
 
         // Add New Landmark to Map
+        Landmark *lmk;
         if (auto it = map_.lmk_map.find(lmk_id); it == map_.lmk_map.end()) {
-            auto lmk = map_.pool_lmk.allocate();
+            lmk = map_.pool_lmk.allocate();
             map_.lmk_map.emplace(lmk_id, lmk);
 
             // Select Anchor Frame
             lmk->anchor_fet = fet;
+        } else {
+            lmk = it->second;
         }
 
         // Add { Frame ID, Feature Message } to Landmark
-        auto lmk = map_.lmk_map[lmk_id];
         lmk->frm2msg.emplace(cam_data.timestamp, msg);
 
         // Add { Landmark ID, Landmark } to Feature

@@ -10,10 +10,12 @@
 #include "frame.h"
 #include "landmark.h"
 #include "pool.h"
+#include "sliding_window.h"
 
 namespace slam {
-    using FrameSlidingWindow = std::deque<Frame *>;
-    using FrameStream = std::list<Frame *>;
+    using FrameDeque = std::deque<Frame *>;
+    using FrameList = std::list<Frame *>;
+    using FrameVector = std::vector<Frame *>;
     using LandmarkMap = std::unordered_map<LandmarkID, Landmark *>;
 
     struct Map {
@@ -24,6 +26,7 @@ namespace slam {
 
         Landmark *addLandmark(LandmarkID id);
 
+        constexpr static size_t N_WIN = 7;
         constexpr static size_t N_MSG = 100000;
         constexpr static size_t N_FET = 1000000;
         constexpr static size_t N_FRM = 1000;
@@ -37,8 +40,11 @@ namespace slam {
         std::array<Quat, N_CAMERA> q_ic;
         std::array<Vec3, N_CAMERA> t_ic;
 
-        FrameSlidingWindow frm_slw;
-        FrameStream frm_stm;
+        FrameDeque frm_deq;
+        FrameList frm_lst;
+        FrameVector frm_vec;
+
+        SlidingWindow sfw {N_WIN};
         LandmarkMap lmk_map;
     };
 }
