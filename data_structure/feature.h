@@ -20,6 +20,19 @@ namespace slam {
 
         bool is_outlier{false};
 
+        void reset() {
+            landmark_id = 0;
+            camera_id = 0;
+
+            track_cnt = 0;
+            pt.setZero();
+            un_pt.setZero();
+            field_speed.setZero();
+
+            landmark = nullptr;
+            frame = nullptr;
+        }
+
         LandmarkID landmark_id{};
         CameraID   camera_id{};
 

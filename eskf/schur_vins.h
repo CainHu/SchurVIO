@@ -63,7 +63,7 @@ namespace slam {
 
         //
         void pushFrame(const CameraData &cam_data);
-        const auto & popFrame();
+        void popFrame();
 
         // 更新 map
         void updateMap(const CameraData &cam_data);
@@ -91,10 +91,10 @@ namespace slam {
 
         constexpr static size_t WIN_SIZE = 7;
         constexpr static size_t COV_SIZE = INSState::SIZE + WIN_SIZE * AugState::SIZE;
-        size_t latest_free_sfw_idx_{0};
-        std::vector<size_t> free_sfw_idx_;
-        std::vector<std::pair<AugState, CameraData>> sfw_;
-        std::unordered_map<size_t, LmkState> lmk_;
+//        size_t latest_free_sfw_idx_{0};
+//        std::vector<size_t> free_sfw_idx_;
+//        std::vector<std::pair<AugState, CameraData>> sfw_;
+//        std::unordered_map<size_t, LmkState> lmk_;
         Eigen::MatrixXd cov_;
 
         ExtState ext_;

@@ -16,7 +16,7 @@ namespace slam {
             frm_win.resize(win_size);
             free_idx.resize(win_size);
             for (size_t i = 0; i < win_size; ++i) {
-                free_idx.emplace_back(i);
+                free_idx[i] = win_size - i - 1;
             }
         }
 
@@ -24,15 +24,6 @@ namespace slam {
             if (free_idx.empty()) {
                 throw std::invalid_argument("no free space in sfw");
             }
-
-            // TODO: 完善选择 KeyFrame 的策略
-            if (free_idx.size() < win_size) {
-                if (frm_win[latest_idx]->timestamp + 500000 > frame->timestamp) {
-                    std::cout << "Not Key Frame" << std::endl;
-                    return false;
-                }
-            }
-            std::cout << "Key Frame" << std::endl;
 
             const auto idx = free_idx.back();
             latest_idx = idx;
@@ -50,7 +41,13 @@ namespace slam {
         }
 
         [[nodiscard]] bool isFull() const { return free_idx.empty(); }
+        [[nodiscard]] size_t getWindowSize() const { return win_size; }
+        [[nodiscard]] size_t getLatestIndex() const { return latest_idx; }
         [[nodiscard]] Frame *getLatestFrame() const { return frm_win[latest_idx]; }
+        [[nodiscard]] size_t size() const { return frm_win.size() - free_idx.size(); }
+        [[nodiscard]] bool empty() const { return free_idx.size() == frm_win.size(); }
+
+        KeyFrame * operator[](size_t i) { return frm_win.at(i); }
 
         size_t latest_idx{};
         size_t win_size;

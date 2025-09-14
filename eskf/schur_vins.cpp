@@ -9,11 +9,11 @@
 using namespace slam;
 
 SchurVINS::SchurVINS(slam::Map &map) : map_(map) {
-    sfw_.resize(WIN_SIZE);
-    free_sfw_idx_.resize(WIN_SIZE);
-    for (size_t i = 0; i < WIN_SIZE; ++i) {
-        free_sfw_idx_.emplace_back(i);
-    }
+//    sfw_.resize(WIN_SIZE);
+//    free_sfw_idx_.resize(WIN_SIZE);
+//    for (size_t i = 0; i < WIN_SIZE; ++i) {
+//        free_sfw_idx_.emplace_back(i);
+//    }
 
     cov_.resize(COV_SIZE, COV_SIZE);
     cov_.setZero();
@@ -207,32 +207,41 @@ void SchurVINS::predict(const slam::IMUData &imu_data, const double dt) {
 void SchurVINS::pushFrame(const CameraData &cam_data) {
     using A = AugState;
 
-    if (free_sfw_idx_.empty()) {
-        throw std::invalid_argument("no free space in sfw");
+//    if (free_sfw_idx_.empty()) {
+//        throw std::invalid_argument("no free space in sfw");
+//    }
+//
+//    if (free_sfw_idx_.size() < WIN_SIZE) {
+//        if (sfw_[latest_free_sfw_idx_].first.timestamp + 500000 > cam_data.timestamp) {
+//            std::cout << "Not Key Frame" << std::endl;
+//            return;
+//        }
+//    }
+//
+//    std::cout << "Key Frame" << std::endl;
+//    std::cout << "q = " << state_.orientation << std::endl;
+//    std::cout << "p = " << state_.position.transpose() << std::endl;
+//
+//    const auto idx = free_sfw_idx_.back();
+//    latest_free_sfw_idx_ = idx;
+//    sfw_[idx].first = AugState {
+//        .timestamp = state_.timestamp,
+//        .orientation = state_.orientation,
+//        .position = state_.position,
+//    };
+//    sfw_[idx].second = cam_data;
+//    free_sfw_idx_.pop_back();
+
+    if (!map_.pushImageInfo(cam_data)) {
+        return;
     }
-
-    if (free_sfw_idx_.size() < WIN_SIZE) {
-        if (sfw_[latest_free_sfw_idx_].first.timestamp + 500000 > cam_data.timestamp) {
-            std::cout << "Not Key Frame" << std::endl;
-            return;
-        }
-    }
-
-    std::cout << "Key Frame" << std::endl;
-    std::cout << "q = " << state_.orientation << std::endl;
-    std::cout << "p = " << state_.position.transpose() << std::endl;
-
-    const auto idx = free_sfw_idx_.back();
-    latest_free_sfw_idx_ = idx;
-    sfw_[idx].first = AugState {
-        .timestamp = state_.timestamp,
-        .orientation = state_.orientation,
-        .position = state_.position,
-    };
-    sfw_[idx].second = cam_data;
-    free_sfw_idx_.pop_back();
+    auto frm = map_.getWinLatestFrame();
+    frm->timestamp = state_.timestamp;
+    frm->q() = state_.orientation;
+    frm->p() = state_.position;
 
     // 增广状态
+    auto idx = map_.getWinLatestIndex();
     const auto i = INSState::SIZE + idx * A::SIZE;
     const auto j = (WIN_SIZE - (idx + 1)) * A::SIZE;
     if constexpr (CONFIG_DEBUG) {
@@ -252,59 +261,16 @@ void SchurVINS::pushFrame(const CameraData &cam_data) {
     std::cout << "Output" << std::endl;
 }
 
-const auto &SchurVINS::popFrame() {
-    // TODO: 加入选择策略
-    const auto idx = (latest_free_sfw_idx_ + 1) % WIN_SIZE;
-    free_sfw_idx_.emplace_back(idx);
-    return sfw_[idx];
+void SchurVINS::popFrame() {
+//    // TODO: 加入选择策略
+//    const auto idx = (latest_free_sfw_idx_ + 1) % WIN_SIZE;
+//    free_sfw_idx_.emplace_back(idx);
+//    return sfw_[idx];
+    map_.popFrame();
 }
 
 void SchurVINS::updateMap(const slam::CameraData &cam_data) {
-    // Create Frame
-    auto frame = map_.pool_frm.allocate();
-    frame->timestamp = cam_data.timestamp;
-    frame->id = cam_data.timestamp;
-//    frame->ordering = 0
-    for (const auto &meas : cam_data.measurements) {
-        // Create Feature
-        auto fet = map_.pool_fet.allocate();
-        fet->un_pt = slam::Vec3(meas.second.x(), meas.second.y(), 1);
 
-        // Add { Camera ID, Frame } to Feature
-        fet->camera_id = 0;
-        fet->frame = frame;
-
-        // Create Feature Message
-        const auto lmk_id = meas.first;
-        auto msg = map_.pool_msg.allocate();
-        (*msg)[0] = fet;
-
-        // Add { Landmark ID, Feature Message } to Frame
-        frame->lmk2msg.emplace(lmk_id, msg);
-
-        // Add Frame to Frames
-        map_.frm_lst.emplace_back(frame);
-        map_.frm_deq.emplace_back(frame);
-
-        // Add New Landmark to Map
-        Landmark *lmk;
-        if (auto it = map_.lmk_map.find(lmk_id); it == map_.lmk_map.end()) {
-            lmk = map_.pool_lmk.allocate();
-            map_.lmk_map.emplace(lmk_id, lmk);
-
-            // Select Anchor Frame
-            lmk->anchor_fet = fet;
-        } else {
-            lmk = it->second;
-        }
-
-        // Add { Frame ID, Feature Message } to Landmark
-        lmk->frm2msg.emplace(cam_data.timestamp, msg);
-
-        // Add { Landmark ID, Landmark } to Feature
-        fet->landmark_id = lmk_id;
-        fet->landmark = lmk;
-    }
 }
 
 void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_map<size_t, Vec3> &lmk_map, const double dt) {
@@ -315,26 +281,44 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     pushFrame(cam_data);
 
     // 滑窗不满，不进行更新
-    if (!free_sfw_idx_.empty()) {
+    if (!map_.isWinFull()) {
+        std::cout << "Sliding Window is not full" << std::endl;
         return;
     }
 
     // 处理 landmark
-    std::vector<size_t> ids;
-    ids.reserve(cam_data.measurements.size());
-    for (const auto &it : cam_data.measurements) {
+//    std::vector<size_t> ids;
+//    ids.reserve(cam_data.measurements.size());
+//    for (const auto &it : cam_data.measurements) {
+//        const auto id = it.first;
+//        if (lmk_.find(id) == lmk_.end()) {
+//            // TODO: 通过三角化初始化出 landmark 的初始位置
+//            if (const auto &j = lmk_map.find(id); j != lmk_map.end()) {
+//                LmkState lmk_state;
+//                lmk_state.position = j->second;
+//                lmk_.emplace(id, lmk_state);
+//            }
+//        } else {
+//            ids.emplace_back(id);
+//        }
+//    }
+    std::vector<std::pair<size_t, Landmark*>> ids;
+    ids.reserve(map_.lmk_map.size());
+    for (const auto &it : map_.lmk_map) {
         const auto id = it.first;
-        if (lmk_.find(id) == lmk_.end()) {
-            // TODO: 通过三角化初始化出 landmark 的初始位置
-            if (const auto &j = lmk_map.find(id); j != lmk_map.end()) {
-                LmkState lmk_state;
-                lmk_state.position = j->second;
-                lmk_.emplace(id, lmk_state);
+        auto lmk = it.second;
+        if (lmk->frm2msg.size() > 1) {
+//            std::cout << "lmk->frm2msg.size() = " << lmk->frm2msg.size() << std::endl;
+            ids.emplace_back(id, lmk);
+            // TODO: 三角化
+            if (!lmk->is_triangulated) {
+                lmk->position = lmk_map.at(id);
+                lmk->is_triangulated = true;
             }
-        } else {
-            ids.emplace_back(id);
         }
     }
+
+    std::cout << "There are " << ids.size() << "Triangulated Landmarks" << std::endl;
 
     if (ids.empty()) {
         // 移除一帧
@@ -342,8 +326,6 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 
         return;
     }
-
-    std::cout << "ids.size() = " << ids.size() << std::endl;
 
 //    std::cout << "11111" << std::endl;
 
@@ -365,36 +347,28 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 //    std::cout << "2222222" << std::endl;
 
     for (size_t i = 0; i < ids.size(); ++i) {
-        const auto id = ids[i];
-        // 遍历滑窗
-        for (size_t m = 0; m < sfw_.size(); ++m) {
-            const auto &frm = sfw_[m];
-            auto &&aug_state = frm.first;
-            auto &&meas = frm.second.measurements;
-            const auto &&it = meas.find(id);
-            if (it == meas.end()) {
-                continue;
-            }
+        const auto id = ids[i].first;
+        auto lmk = ids[i].second;
+        for (auto &it : lmk->frm2msg) {
+            const auto msg = it.second;
+            const auto fet = (*msg)[0];
+            const auto frm = fet->frame;
 
-            const auto Rwi = aug_state.orientation.toRotationMatrix();
+            const auto Rwi = frm->q().toRotationMatrix();
             const auto Ric = ext_.q_ic.toRotationMatrix();
-            const auto d_ij_w = lmk_[id].position - aug_state.position;
+            const auto d_ij_w = lmk->position - frm->p();
             const auto d_cj_i = Rwi.transpose() * d_ij_w - ext_.t_ic;
             const auto d_cj_c = Ric.transpose() * d_cj_i;
             const auto inv_d = TYPE(1) / d_cj_c.z();
             const auto inv_d2 = inv_d * inv_d;
             const auto est = d_cj_c.head<2>() * inv_d;
-            const auto err = it->second - est;
-
-//            std::cout << "landmark[" << id << "]: err = " << err.transpose();
-//            std::cout << ", gt = " << it->second.transpose();
-//            std::cout << ", est = " << est.transpose() << std::endl;
+            const auto err = fet->un_pt.head<2>() - est;
 
             Mat2_3 J;
             J << inv_d, TYPE(0), -d_cj_c.x() * inv_d2,
-                 TYPE(0), inv_d, -d_cj_c.y() * inv_d2;
+                    TYPE(0), inv_d, -d_cj_c.y() * inv_d2;
 
-            Mat2_3 J_lmk = J * (aug_state.orientation * ext_.q_ic).inverse().toRotationMatrix();
+            Mat2_3 J_lmk = J * (frm->q() * ext_.q_ic).inverse().toRotationMatrix();
 
             Mat2_6 J_pose;
             J_pose.leftCols<3>().noalias() = J_lmk * hat(d_ij_w);;
@@ -405,7 +379,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             J_ext.leftCols<3>().noalias() = -J_ext.rightCols<3>() * hat(d_cj_i);
 
             const size_t lmk_index = LMK_SIZE * i;
-            const size_t frm_index = INSState::SIZE + AugState::SIZE * m;
+            const size_t frm_index = INSState::SIZE + AugState::SIZE * frm->ordering;
 
             Hpp.block<6, 6>(frm_index, frm_index).triangularView<Eigen::Upper>() += J_pose.transpose() * J_pose;
 //            Hpp.block<6, 6>(frm_index, frm_index).triangularView<Eigen::StrictlyLower>() = Hpp.block<6, 6>(frm_index, frm_index).triangularView<Eigen::StrictlyUpper>().transpose();
@@ -418,6 +392,59 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             gp.segment<6>(frm_index) += J_pose.transpose() * err;
             gl.segment<3>(lmk_index) += J_lmk.transpose() * err;
         }
+//        // 遍历滑窗
+//        auto &sfw = map_.sfw;
+//        for (size_t m = 0; m < sfw; ++m) {
+//            const auto &frm = sfw[m];
+//            auto &&aug_state = frm->state;
+//            auto &&msg = frm->lmk2msg;
+//            const auto &&it = meas.find(id);
+//            if (it == meas.end()) {
+//                continue;
+//            }
+//
+//            const auto Rwi = aug_state.orientation.toRotationMatrix();
+//            const auto Ric = ext_.q_ic.toRotationMatrix();
+//            const auto d_ij_w = lmk_[id].position - aug_state.position;
+//            const auto d_cj_i = Rwi.transpose() * d_ij_w - ext_.t_ic;
+//            const auto d_cj_c = Ric.transpose() * d_cj_i;
+//            const auto inv_d = TYPE(1) / d_cj_c.z();
+//            const auto inv_d2 = inv_d * inv_d;
+//            const auto est = d_cj_c.head<2>() * inv_d;
+//            const auto err = it->second - est;
+//
+////            std::cout << "landmark[" << id << "]: err = " << err.transpose();
+////            std::cout << ", gt = " << it->second.transpose();
+////            std::cout << ", est = " << est.transpose() << std::endl;
+//
+//            Mat2_3 J;
+//            J << inv_d, TYPE(0), -d_cj_c.x() * inv_d2,
+//                 TYPE(0), inv_d, -d_cj_c.y() * inv_d2;
+//
+//            Mat2_3 J_lmk = J * (aug_state.orientation * ext_.q_ic).inverse().toRotationMatrix();
+//
+//            Mat2_6 J_pose;
+//            J_pose.leftCols<3>().noalias() = J_lmk * hat(d_ij_w);;
+//            J_pose.rightCols<3>().noalias() = -J_lmk;
+//
+//            Mat2_6 J_ext;
+//            J_ext.rightCols<3>().noalias() = -J * Ric.transpose();
+//            J_ext.leftCols<3>().noalias() = -J_ext.rightCols<3>() * hat(d_cj_i);
+//
+//            const size_t lmk_index = LMK_SIZE * i;
+//            const size_t frm_index = INSState::SIZE + AugState::SIZE * m;
+//
+//            Hpp.block<6, 6>(frm_index, frm_index).triangularView<Eigen::Upper>() += J_pose.transpose() * J_pose;
+////            Hpp.block<6, 6>(frm_index, frm_index).triangularView<Eigen::StrictlyLower>() = Hpp.block<6, 6>(frm_index, frm_index).triangularView<Eigen::StrictlyUpper>().transpose();
+//
+//            Hll.block<3, 3>(lmk_index, lmk_index).triangularView<Eigen::Upper>() += J_lmk.transpose() * J_lmk;
+////            Hll.block<3, 3>(lmk_index, lmk_index).triangularView<Eigen::StrictlyLower>() = Hll.block<3, 3>(lmk_index, lmk_index).triangularView<Eigen::StrictlyUpper>().transpose();
+//
+//            Hpl.block<6, 3>(frm_index, lmk_index) += J_pose.transpose() * J_lmk;
+//
+//            gp.segment<6>(frm_index) += J_pose.transpose() * err;
+//            gl.segment<3>(lmk_index) += J_lmk.transpose() * err;
+//        }
     }
     Hpp.triangularView<Eigen::StrictlyLower>() = Hpp.triangularView<Eigen::StrictlyUpper>().transpose();
     Hll.triangularView<Eigen::StrictlyLower>() = Hll.triangularView<Eigen::StrictlyUpper>().transpose();
@@ -513,13 +540,14 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     // [[ 更新 Landmark ]]
     gl -= Hpl.transpose() * dx_p;
     for (size_t i = 0; i < ids.size(); ++i) {
-        auto id = ids[i];
+        auto id = ids[i].first;
+        auto lmk = ids[i].second;
         auto index = i * LMK_SIZE;
 
         VecX dx_l(LMK_SIZE);
         dx_l.setZero();
 
-        auto &&cov = lmk_[id].cov;
+        auto &&cov = lmk->cov_position;
         auto &&hll = Hll.block<3, 3>(index, index);
         Eigen::SelfAdjointEigenSolver<Mat3_3> es(hll);
 
@@ -568,7 +596,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             dx_l += K * e;
         }
 
-        lmk_[id].updateState(dx_l);
+        lmk->position += dx_l;
+//        lmk_[id].updateState(dx_l);
 //        std::cout << "id = " << id << ", dx_l = " << dx_l.transpose() << std::endl;
     }
     std::cout << "Update Landmark Finished" << std::endl;
@@ -676,9 +705,10 @@ void SchurVINS::updateState(auto &&dx) {
     state_.gyro_bias += Eigen::Map<Vec3>(dx.data() + I::BG);
     state_.accel_bias += Eigen::Map<Vec3>(dx.data() + I::BA);
     state_.gravity += Eigen::Map<Vec3>(dx.data() + I::G);
-    for (size_t n = 0; n < sfw_.size(); ++n) {
-        sfw_[n].first.orientation = (vec2quat(Eigen::Map<Vec3>(dx.data() + I::SIZE + n * A::SIZE + A::Q)) * sfw_[n].first.orientation).normalized();
-        sfw_[n].first.position += Eigen::Map<Vec3>(dx.data() + I::SIZE + n * A::SIZE + A::P);
+    for (size_t n = 0; n < map_.sfw.size(); ++n) {
+        std::cout << "n = " << n << ", order = " << map_.sfw[n]->ordering << std::endl;
+        map_.sfw[n]->q() = (vec2quat(Eigen::Map<Vec3>(dx.data() + I::SIZE + n * A::SIZE + A::Q)) * map_.sfw[n]->q()).normalized();
+        map_.sfw[n]->p() += Eigen::Map<Vec3>(dx.data() + I::SIZE + n * A::SIZE + A::P);
     }
 }
 

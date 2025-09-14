@@ -11,6 +11,7 @@
 namespace slam {
 //    using CameraMsg = std::array<cv::Mat, N_CAMERA>;
     using CameraMsg = std::array<void *, N_CAMERA>;
+    std::unordered_multimap<LandmarkID, Feature>;
     using Landmark2FeatureMsg = std::unordered_map<LandmarkID, FeatureMsg *>;
 
     class Frame {
@@ -65,6 +66,24 @@ namespace slam {
         [[nodiscard]] auto ba() const { return Eigen::Map<const Vec3>(state.data() + BAX); }
         [[nodiscard]] auto g() const { return Eigen::Map<const Vec3>(state.data() + GX); }
 
+        void reset() {
+            is_initialized = false;
+            is_key_frame = false;
+
+            timestamp = 0;
+            id = 0;
+            ordering = 0;
+
+            lmk2msg.clear();
+//            cam2img
+
+            memset(state.data(), 0, state.size() * sizeof(TYPE));
+            state[QW] = 1.;
+            state_fej = state;
+
+            cov.setIdentity();
+        }
+
     public:
         bool is_initialized{false};
         bool is_key_frame{false};
@@ -79,6 +98,7 @@ namespace slam {
 
         std::array<TYPE, DIM> state{};     // q, t, v, ba, bg, g
         std::array<TYPE, DIM> state_fej{}; // q, t, v, ba, bg, g
+        Eigen::Matrix<TYPE, DIM, DIM> cov{Eigen::Matrix<TYPE, DIM, DIM>::Zero()};
     };
 
     using KeyFrame = Frame;

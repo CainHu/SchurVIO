@@ -29,6 +29,23 @@ namespace slam {
 
         [[nodiscard]] bool is_valid() const { return is_triangulated && !is_outlier && anchor_fet; }
 
+        void reset() {
+            is_triangulated = false;
+            is_outlier = false;
+
+            id = 0;
+            inv_depth = TYPE(0);
+            position.setZero();
+
+            var_ins_depth = TYPE(1);
+            cov_position.setIdentity();
+
+            anchor_fet = nullptr;
+            frm2msg.clear();
+
+            map = nullptr;
+        }
+
         bool is_triangulated{false};
         bool is_outlier{false};
 
@@ -37,8 +54,8 @@ namespace slam {
         TYPE inv_depth{};
         Vec3 position{};
 
-        TYPE var_ins_depth;
-        Mat3_3 cov_position;
+        TYPE var_ins_depth{TYPE(1)};
+        Mat3_3 cov_position{Mat3_3 ::Identity()};
 
         Feature         *anchor_fet{};
         Frame2FeatureMsg frm2msg;
