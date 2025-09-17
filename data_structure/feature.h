@@ -6,43 +6,29 @@
 #define VINSEKF_FEATURE_H
 
 #include "../type.h"
+#include "observation.h"
 
 namespace slam {
     class Landmark;
     class Frame;
     class Feature;
 
-    using FeatureMsg = std::array<Feature *, N_CAMERA>;
-
     class Feature {
     public:
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
 
-        bool is_outlier{false};
-
         void reset() {
-            landmark_id = 0;
-            camera_id = 0;
-
-            track_cnt = 0;
-            pt.setZero();
-            un_pt.setZero();
-            field_speed.setZero();
+            for (auto &o : obs) {
+                o = nullptr;
+            }
 
             landmark = nullptr;
             frame = nullptr;
         }
 
-        LandmarkID landmark_id{};
-        CameraID   camera_id{};
-
-        Count track_cnt{};
-        Vec2  pt{};
-        Vec3  un_pt{};
-        Vec2  field_speed{};
-
         Landmark *landmark{};
         Frame    *frame{};
+        std::array<Observation*, N_CAMERA> obs{};
     };
 }
 

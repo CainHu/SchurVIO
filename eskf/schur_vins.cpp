@@ -154,7 +154,7 @@ void SchurVINS::predict(const slam::IMUData &imu_data, const double dt) {
     const Vec3 nRdv = accel_corr_world_ * (-dt);
     const Mat3_3 nRdv_X = hat(nRdv);
     if constexpr (CONFIG_DEBUG) {
-        Mat18_18 AP;
+        Eigen::Matrix<TYPE, INSState::SIZE, INSState::SIZE> AP;
 
         AP.middleRows<3>(I::Q).noalias() = cov.middleRows<3>(I::Q)
                                            + nRdt * cov.middleRows<3>(I::BG);
@@ -162,8 +162,10 @@ void SchurVINS::predict(const slam::IMUData &imu_data, const double dt) {
                                            + dt * cov.middleRows<3>(I::V);
         AP.middleRows<3>(I::V).noalias() = cov.middleRows<3>(I::V)
                                            + nRdv_X * cov.middleRows<3>(I::Q)
-                                           + nRdt * cov.middleRows<3>(I::BA)
-                                           + dt * cov.middleRows<3>(I::G);
+                                           + nRdt * cov.middleRows<3>(I::BA);
+        if constexpr (INSState::ESTIMATE_GRAVITY) {
+            AP.middleRows<3>(I::V).noalias() += dt * cov.middleRows<3>(I::G);
+        }
         AP.middleRows<3>(I::BG).noalias() = cov.middleRows<3>(I::BG);
         AP.middleRows<3>(I::BA).noalias() = cov.middleRows<3>(I::BA);
         AP.middleRows<3>(I::G).noalias() = cov.middleRows<3>(I::G);
@@ -174,24 +176,32 @@ void SchurVINS::predict(const slam::IMUData &imu_data, const double dt) {
                                             + AP.middleCols<3>(I::V) * dt;
         cov.middleCols<3>(I::V).noalias() = AP.middleCols<3>(I::V)
                                             + AP.middleCols<3>(I::Q) * nRdv_X.transpose()
-                                            + AP.middleCols<3>(I::BA) * nRdt.transpose()
-                                            + AP.middleCols<3>(I::G) * dt;
+                                            + AP.middleCols<3>(I::BA) * nRdt.transpose();
+        if constexpr (INSState::ESTIMATE_GRAVITY) {
+            cov.middleCols<3>(I::V).noalias() += AP.middleCols<3>(I::G) * dt;
+        }
         cov.middleCols<3>(I::BG).noalias() = AP.middleCols<3>(I::BG);
         cov.middleCols<3>(I::BA).noalias() = AP.middleCols<3>(I::BA);
-        cov.middleCols<3>(I::G).noalias() = AP.middleCols<3>(I::G);
+        if constexpr (INSState::ESTIMATE_GRAVITY) {
+            cov.middleCols<3>(I::G).noalias() = AP.middleCols<3>(I::G);
+        }
 
         cov = 0.5 * (cov + cov.transpose());
     } else {
         cov.middleCols<3>(I::P).noalias() += cov.middleCols<3>(I::V) * dt;
         cov.middleCols<3>(I::V).noalias() += cov.middleCols<3>(I::Q) * nRdv_X.transpose()
-                                             + cov.middleCols<3>(I::BA) * nRdt.transpose()
-                                             + cov.middleCols<3>(I::G) * dt;
+                                             + cov.middleCols<3>(I::BA) * nRdt.transpose();
+        if constexpr (INSState::ESTIMATE_GRAVITY) {
+            cov.middleCols<3>(I::V).noalias() += cov.middleCols<3>(I::G) * dt;
+        }
         cov.middleCols<3>(I::Q).noalias() += cov.middleCols<3>(I::BG) * nRdt.transpose();
 
         cov.leftCols<9>().middleRows<3>(I::P).noalias() += dt * cov.leftCols<9>().middleRows<3>(I::V);
         cov.leftCols<9>().middleRows<3>(I::V).noalias() += nRdv_X * cov.leftCols<9>().middleRows<3>(I::Q)
-                                                           + nRdt * cov.leftCols<9>().middleRows<3>(I::BA)
-                                                           + dt * cov.leftCols<9>().middleRows<3>(I::G);
+                                                           + nRdt * cov.leftCols<9>().middleRows<3>(I::BA);
+        if constexpr (INSState::ESTIMATE_GRAVITY) {
+            cov.leftCols<9>().middleRows<3>(I::V).noalias() += dt * cov.leftCols<9>().middleRows<3>(I::G);
+        }
         cov.leftCols<9>().middleRows<3>(I::Q).noalias() += nRdt * cov.leftCols<9>().middleRows<3>(I::BG);
 
         cov.topRightCorner<9, I::SIZE - 9>().noalias() = cov.bottomLeftCorner<I::SIZE - 9, 9>().transpose();
@@ -307,8 +317,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     for (const auto &it : map_.lmk_map) {
         const auto id = it.first;
         auto lmk = it.second;
-        if (lmk->frm2msg.size() > 1) {
-//            std::cout << "lmk->frm2msg.size() = " << lmk->frm2msg.size() << std::endl;
+        if (lmk->frm2fet.size() > 1) {
+//            std::cout << "lmk->frm2fet.size() = " << lmk->frm2fet.size() << std::endl;
             ids.emplace_back(id, lmk);
             // TODO: 三角化
             if (!lmk->is_triangulated) {
@@ -318,7 +328,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         }
     }
 
-    std::cout << "There are " << ids.size() << "Triangulated Landmarks" << std::endl;
+    std::cout << "There are " << ids.size() << " Triangulated Landmarks" << std::endl;
 
     if (ids.empty()) {
         // 移除一帧
@@ -349,9 +359,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     for (size_t i = 0; i < ids.size(); ++i) {
         const auto id = ids[i].first;
         auto lmk = ids[i].second;
-        for (auto &it : lmk->frm2msg) {
-            const auto msg = it.second;
-            const auto fet = (*msg)[0];
+        for (auto &it : lmk->frm2fet) {
+            const auto fet = it.second;
+            const auto obs = fet->obs[0];
             const auto frm = fet->frame;
 
             const auto Rwi = frm->q().toRotationMatrix();
@@ -362,7 +372,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             const auto inv_d = TYPE(1) / d_cj_c.z();
             const auto inv_d2 = inv_d * inv_d;
             const auto est = d_cj_c.head<2>() * inv_d;
-            const auto err = fet->un_pt.head<2>() - est;
+            const auto err = obs->un_pt.head<2>() - est;
 
             Mat2_3 J;
             J << inv_d, TYPE(0), -d_cj_c.x() * inv_d2,
@@ -397,7 +407,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 //        for (size_t m = 0; m < sfw; ++m) {
 //            const auto &frm = sfw[m];
 //            auto &&aug_state = frm->state;
-//            auto &&msg = frm->lmk2msg;
+//            auto &&fet = frm->lmk2fet;
 //            const auto &&it = meas.find(id);
 //            if (it == meas.end()) {
 //                continue;
@@ -704,7 +714,9 @@ void SchurVINS::updateState(auto &&dx) {
     state_.velocity += Eigen::Map<Vec3>(dx.data() + I::V);
     state_.gyro_bias += Eigen::Map<Vec3>(dx.data() + I::BG);
     state_.accel_bias += Eigen::Map<Vec3>(dx.data() + I::BA);
-    state_.gravity += Eigen::Map<Vec3>(dx.data() + I::G);
+    if constexpr (INSState::ESTIMATE_GRAVITY) {
+        state_.gravity += Eigen::Map<Vec3>(dx.data() + I::G);
+    }
     for (size_t n = 0; n < map_.sfw.size(); ++n) {
         std::cout << "n = " << n << ", order = " << map_.sfw[n]->ordering << std::endl;
         map_.sfw[n]->q() = (vec2quat(Eigen::Map<Vec3>(dx.data() + I::SIZE + n * A::SIZE + A::Q)) * map_.sfw[n]->q()).normalized();

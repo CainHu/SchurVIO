@@ -10,7 +10,7 @@
 #include "frame.h"
 
 namespace slam {
-    using Frame2FeatureMsg = std::map<FrameID, FeatureMsg *>;
+    using Frame2FeatureMsg = std::map<FrameID, Feature *>;
 
     class Map;
 
@@ -27,7 +27,7 @@ namespace slam {
         bool pos2inv(const std::optional<Quat>& q_ic=std::nullopt, const std::optional<Vec3>& t_ic=std::nullopt);
         bool inv2pos(const std::optional<Quat>& q_ic=std::nullopt, const std::optional<Vec3>& t_ic=std::nullopt);
 
-        [[nodiscard]] bool is_valid() const { return is_triangulated && !is_outlier && anchor_fet; }
+        [[nodiscard]] bool is_valid() const { return is_triangulated && !is_outlier && anchor_obs; }
 
         void reset() {
             is_triangulated = false;
@@ -40,8 +40,8 @@ namespace slam {
             var_ins_depth = TYPE(1);
             cov_position.setIdentity();
 
-            anchor_fet = nullptr;
-            frm2msg.clear();
+            anchor_obs = nullptr;
+            frm2fet.clear();
 
             map = nullptr;
         }
@@ -57,8 +57,8 @@ namespace slam {
         TYPE var_ins_depth{TYPE(1)};
         Mat3_3 cov_position{Mat3_3 ::Identity()};
 
-        Feature         *anchor_fet{};
-        Frame2FeatureMsg frm2msg;
+        Observation *anchor_obs{};
+        Frame2FeatureMsg frm2fet;
 
         Map *map{};
     };

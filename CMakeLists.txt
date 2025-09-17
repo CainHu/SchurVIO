@@ -66,6 +66,8 @@ add_executable(VinsEKF main.cpp
         vio_frontend_simulator1.h
         data_structure/sliding_window.cpp
         data_structure/sliding_window.h
+        data_structure/observation.cpp
+        data_structure/observation.h
         #        multi_fusion.h
 #        multi_fusion2.h
 )

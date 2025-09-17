@@ -89,7 +89,7 @@ namespace slam {
         Tus imu_ts_{IMU_TS};
         Tus cam_ts_{CAM_TS};
 
-        constexpr static size_t WIN_SIZE = 7;
+        constexpr static size_t WIN_SIZE = Map::N_WIN;
         constexpr static size_t COV_SIZE = INSState::SIZE + WIN_SIZE * AugState::SIZE;
 //        size_t latest_free_sfw_idx_{0};
 //        std::vector<size_t> free_sfw_idx_;

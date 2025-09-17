@@ -63,59 +63,14 @@ namespace slam {
 
     // INS 状态
     struct INSState {
-        Tus timestamp{0};
-
-        Quat orientation; // 全局坐标系到机体坐标系的姿态
-        Vec3 position;    // 全局坐标系下的位置 (m)
-        Vec3 velocity;    // 全局坐标系下的速度 (m/s)
-
-        // IMU零偏
-        Vec3 gyro_bias;   // 陀螺仪零偏
-        Vec3 accel_bias;  // 加速度计零偏
-
-        // 重力向量
-        Vec3 gravity;
-
-        // 协方差矩阵
-        Mat18_18 cov;
-
-        // 过程方差
-        Vec18 var_proc;
-
-        // 初始方差
-        Vec18 var_init;
-
-        INSState() {
-            orientation.setIdentity();
-            position.setZero();
-            velocity.setZero();
-            gyro_bias.setZero();
-            accel_bias.setZero();
-            gravity = Vec3(0., 0., 9.81);
-
-            var_proc.segment<3>(Q) = Vec3::Constant(STB_Q_PROC * STB_Q_PROC);
-            var_proc.segment<3>(P) = Vec3::Constant(STB_P_PROC * STB_P_PROC);
-            var_proc.segment<3>(V) = Vec3::Constant(STB_V_PROC * STB_V_PROC);
-            var_proc.segment<3>(BG) = Vec3::Constant(STB_BG_PROC * STB_BG_PROC);
-            var_proc.segment<3>(BA) = Vec3::Constant(STB_BA_PROC * STB_BA_PROC);
-            var_proc.segment<3>(G) = Vec3::Constant(STB_G_PROC * STB_G_PROC);
-
-            var_init.segment<3>(Q) = Vec3::Constant(STB_Q_INIT * STB_Q_INIT);
-            var_init.segment<3>(P) = Vec3::Constant(STB_P_INIT * STB_P_INIT);
-            var_init.segment<3>(V) = Vec3::Constant(STB_V_INIT * STB_V_INIT);
-            var_init.segment<3>(BG) = Vec3::Constant(STB_BG_INIT * STB_BG_INIT);
-            var_init.segment<3>(BA) = Vec3::Constant(STB_BA_INIT * STB_BA_INIT);
-            var_init.segment<3>(G) = Vec3::Constant(STB_G_INIT * STB_G_INIT);
-
-            cov = var_init.asDiagonal();
-        }
+        constexpr static bool ESTIMATE_GRAVITY = false;
 
         constexpr static int Q = 0;
         constexpr static int P = Q + 3;
         constexpr static int V = P + 3;
         constexpr static int BG = V + 3;
         constexpr static int BA = BG + 3;
-        constexpr static int G = BA + 3;
+        constexpr static int G = BA + (ESTIMATE_GRAVITY ? 3 : 0);
         constexpr static int SIZE = G + 3;
 
         constexpr static double STB_Q_INIT = 3e-2;
@@ -131,6 +86,57 @@ namespace slam {
         constexpr static double STB_BG_PROC = 1e-1;
         constexpr static double STB_BA_PROC = 1e-1;
         constexpr static double STB_G_PROC = 1e-3;
+
+        Tus timestamp{0};
+
+        Quat orientation; // 全局坐标系到机体坐标系的姿态
+        Vec3 position;    // 全局坐标系下的位置 (m)
+        Vec3 velocity;    // 全局坐标系下的速度 (m/s)
+
+        // IMU零偏
+        Vec3 gyro_bias;   // 陀螺仪零偏
+        Vec3 accel_bias;  // 加速度计零偏
+
+        // 重力向量
+        Vec3 gravity;
+
+        // 协方差矩阵
+        Eigen::Matrix<TYPE, SIZE, SIZE> cov;
+
+        // 过程方差
+        Eigen::Vector<TYPE, SIZE> var_proc;
+
+        // 初始方差
+        Eigen::Vector<TYPE, SIZE> var_init;
+
+        INSState() {
+            orientation.setIdentity();
+            position.setZero();
+            velocity.setZero();
+            gyro_bias.setZero();
+            accel_bias.setZero();
+            gravity = Vec3(0., 0., 9.81);
+
+            var_proc.segment<3>(Q) = Vec3::Constant(STB_Q_PROC * STB_Q_PROC);
+            var_proc.segment<3>(P) = Vec3::Constant(STB_P_PROC * STB_P_PROC);
+            var_proc.segment<3>(V) = Vec3::Constant(STB_V_PROC * STB_V_PROC);
+            var_proc.segment<3>(BG) = Vec3::Constant(STB_BG_PROC * STB_BG_PROC);
+            var_proc.segment<3>(BA) = Vec3::Constant(STB_BA_PROC * STB_BA_PROC);
+            if constexpr (ESTIMATE_GRAVITY) {
+                var_proc.segment<3>(G) = Vec3::Constant(STB_G_PROC * STB_G_PROC);
+            }
+
+            var_init.segment<3>(Q) = Vec3::Constant(STB_Q_INIT * STB_Q_INIT);
+            var_init.segment<3>(P) = Vec3::Constant(STB_P_INIT * STB_P_INIT);
+            var_init.segment<3>(V) = Vec3::Constant(STB_V_INIT * STB_V_INIT);
+            var_init.segment<3>(BG) = Vec3::Constant(STB_BG_INIT * STB_BG_INIT);
+            var_init.segment<3>(BA) = Vec3::Constant(STB_BA_INIT * STB_BA_INIT);
+            if constexpr (ESTIMATE_GRAVITY) {
+                var_init.segment<3>(G) = Vec3::Constant(STB_G_INIT * STB_G_INIT);
+            }
+
+            cov = var_init.asDiagonal();
+        }
     };
 
 //    using State = INSState;

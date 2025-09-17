@@ -11,8 +11,7 @@
 namespace slam {
 //    using CameraMsg = std::array<cv::Mat, N_CAMERA>;
     using CameraMsg = std::array<void *, N_CAMERA>;
-    std::unordered_multimap<LandmarkID, Feature>;
-    using Landmark2FeatureMsg = std::unordered_map<LandmarkID, FeatureMsg *>;
+    using Landmark2FeatureMsg = std::unordered_map<LandmarkID, Feature *>;
 
     class Frame {
     public:
@@ -74,7 +73,7 @@ namespace slam {
             id = 0;
             ordering = 0;
 
-            lmk2msg.clear();
+            lmk2fet.clear();
 //            cam2img
 
             memset(state.data(), 0, state.size() * sizeof(TYPE));
@@ -93,7 +92,7 @@ namespace slam {
         FrameID    id{};
         FrameOrder ordering{};
 
-        Landmark2FeatureMsg lmk2msg;
+        Landmark2FeatureMsg lmk2fet;
         CameraMsg           cam2img;
 
         std::array<TYPE, DIM> state{};     // q, t, v, ba, bg, g

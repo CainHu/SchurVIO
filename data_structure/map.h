@@ -6,6 +6,7 @@
 #define VINSEKF_MAP_H
 
 #include "../type.h"
+#include "observation.h"
 #include "feature.h"
 #include "frame.h"
 #include "landmark.h"
@@ -53,19 +54,22 @@ namespace slam {
             for (const auto &meas : image_info.measurements) {
                 // Create Feature
                 auto fet = pool_fet.allocate();
-                fet->un_pt = Vec3(meas.second.x(), meas.second.y(), 1);
 
-                // Add { Camera ID, Frame } to Feature
-                fet->camera_id = 0;
+                // Add Frame to Feature
                 fet->frame = frame;
 
-                // Create Feature Message
-                const auto lmk_id = meas.first;
-                auto msg = pool_msg.allocate();
-                (*msg)[0] = fet;
+                // Create Observation and Add Feature to Observation
+                auto obs = pool_obs.allocate();
+                obs->un_pt = Vec3(meas.second.x(), meas.second.y(), 1);
+                obs->camera_id = 0;
+                obs->fet = fet;
 
-                // Add { Landmark ID, Feature Message } to Frame
-                frame->lmk2msg.emplace(lmk_id, msg);
+                // Add Observation to Feature
+                fet->obs[0] = obs;
+
+                // Add { Landmark ID, Feature } to Frame
+                const auto lmk_id = meas.first;
+                frame->lmk2fet.emplace(lmk_id, fet);
 
                 // Add New Landmark to Map
                 Landmark *lmk;
@@ -74,16 +78,15 @@ namespace slam {
                     lmk_map.emplace(lmk_id, lmk);
 
                     // Select Anchor Frame
-                    lmk->anchor_fet = fet;
+                    lmk->anchor_obs = obs;
                 } else {
                     lmk = it->second;
                 }
 
-                // Add { Frame ID, Feature Message } to Landmark
-                lmk->frm2msg.emplace(frame->id, msg);
+                // Add { Frame ID, Feature } to Landmark
+                lmk->frm2fet.emplace(frame->id, fet);
 
-                // Add { Landmark ID, Landmark } to Feature
-                fet->landmark_id = lmk_id;
+                // Add Landmark to Feature
                 fet->landmark = lmk;
             }
 
@@ -96,7 +99,7 @@ namespace slam {
 
             Frame *frm = sfw.popFrame();
             auto frm_id = frm->id;
-            for (auto &it : frm->lmk2msg) {
+            for (auto &it : frm->lmk2fet) {
                 LandmarkID lmk_id = it.first;
                 Landmark *lmk = lmk_map.at(lmk_id);
 
@@ -106,7 +109,7 @@ namespace slam {
                 }
 
                 // 如果 Landmark 不再与任何 Key Frame 关联，则删除 Landmark
-                if (lmk->frm2msg.empty()) {
+                if (lmk->frm2fet.empty()) {
                     std::cout << "Deleted Landmark ID = " << lmk_id << std::endl;
                     lmk_map.erase(lmk_id);
                     pool_lmk.deallocate(lmk, [](Landmark &landmark) {
@@ -114,16 +117,19 @@ namespace slam {
                     });
                 }
 
-                // 删除 Message
-                FeatureMsg *msg = it.second;
-                for (auto &fet : *msg) {
-                    // 删除 Feature
-                    pool_fet.deallocate(fet, [](Feature &feature) {
-                        feature.reset();
+                // 删除 Feature
+                Feature *fet = it.second;
+                for (auto &obs : fet->obs) {
+                    if (!obs) {
+                        continue;
+                    }
+                    // 删除 Observation
+                    pool_obs.deallocate(obs, [](Observation &observation) {
+                        observation.reset();
                     });
 
                 }
-                pool_msg.deallocate(msg);
+                pool_fet.deallocate(fet);
             }
 
             // 删除 Frame
@@ -138,12 +144,12 @@ namespace slam {
         [[nodiscard]] Frame *getWinLatestFrame() const { return sfw.getLatestFrame(); }
 
         constexpr static size_t N_WIN = 7;
-        constexpr static size_t N_MSG = 100000;
-        constexpr static size_t N_FET = 1000000;
-        constexpr static size_t N_FRM = 1000;
         constexpr static size_t N_LMK = 100000;
+        constexpr static size_t N_FRM = 1000;
+        constexpr static size_t N_FET = 1000 * N_FRM;
+        constexpr static size_t N_OBS = N_FET * N_CAMERA;
 
-        Pool<FeatureMsg> pool_msg{N_MSG};
+        Pool<Observation> pool_obs{N_OBS};
         Pool<Feature> pool_fet{N_FET};
         Pool<Frame> pool_frm{N_FRM};
         Pool<Landmark> pool_lmk{N_LMK};

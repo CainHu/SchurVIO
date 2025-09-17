@@ -30,7 +30,7 @@ public:
 int main() {
 
 
-#if 0
+#if 1
     // 创建模拟器
     VIOFrontendSimulator1 simulator;
 
@@ -89,26 +89,6 @@ int main() {
     size_t imu_idx = 0;
     size_t gt_idx = 0;
     for (const auto& cam_data : camera_data) {
-//        // 创建 frame
-//        auto frame = map.pool_frm.allocate();
-//        for (const auto &meas : cam_data.measurements) {
-//            auto fet = map.pool_fet.allocate();
-//            fet->un_pt = slam::Vec3(meas.second.x(), meas.second.y(), 1);
-//
-//            auto msg = map.pool_msg.allocate();
-//            (*msg)[0] = fet;
-//
-//            auto id = meas.first;
-//            frame->lmk2msg.emplace(meas.first, msg);
-//
-//            map.frm_lst.emplace_back(frame);
-//            map.frm_deq.emplace_back(frame);
-//
-//            if (auto it = map.lmk_map.find(id); it == map.lmk_map.end()) {
-//                auto lmk = map.pool_lmk.allocate();
-//                map.lmk_map.emplace(id, lmk);
-//            }
-//        }
 
         // 处理两个相机帧之间的所有IMU数据
 //        std::cout << "1 = " << imu_data[imu_idx].timestamp << ", 2 = " << cam_data.timestamp << std::endl;

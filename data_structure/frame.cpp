@@ -6,12 +6,12 @@
 
 using namespace slam;
 bool Frame::delete_landmark(LandmarkID lmk_id) {
-    auto it = lmk2msg.find(lmk_id);
-    if (it == lmk2msg.end()) {
+    auto it = lmk2fet.find(lmk_id);
+    if (it == lmk2fet.end()) {
         return false;
     }
 
-    lmk2msg.erase(it);
+    lmk2fet.erase(it);
 
     return true;
 }
