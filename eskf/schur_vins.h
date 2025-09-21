@@ -107,6 +107,9 @@ namespace slam {
         Eigen::VectorXd Rll_;
 
         slam::Map &map_;
+
+        size_t posterior_times_ = 0;
+        size_t t_cost_ = 0;
     };
 }
 

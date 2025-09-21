@@ -30,7 +30,7 @@ public:
 int main() {
 
 
-#if 1
+#if 0
     // 创建模拟器
     VIOFrontendSimulator1 simulator;
 
@@ -141,6 +141,11 @@ int main() {
         ekf.processIMU(imu_data[imu_idx]);
         imu_idx++;
     }
+
+    auto cost = static_cast<double>(ekf.t_cost_) / static_cast<double>(CLOCKS_PER_SEC);
+    std::cout << "posterior times = " << ekf.posterior_times_ << std::endl;
+    std::cout << "t_cost = " << cost << std::endl;
+    std::cout << "mean cost = " << cost / static_cast<double>(ekf.posterior_times_) << std::endl;
 
     std::cout << "数据处理完成" << std::endl;
     return 0;

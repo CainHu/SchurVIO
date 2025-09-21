@@ -337,7 +337,170 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         return;
     }
 
-//    std::cout << "11111" << std::endl;
+
+//#define USE_QR
+#define USE_SCHUR
+#if defined(USE_QR)
+    auto t1 = clock();
+
+    constexpr static size_t UV_SIZE = 2;
+    auto &&cov_p = cov_;
+    VecX dx_p(COV_SIZE);
+    VecX dx_l(LMK_SIZE);
+    MatXX J_POSE = MatXX::Zero(UV_SIZE * WIN_SIZE, AugState::SIZE * WIN_SIZE);
+    MatXX J_EXT(UV_SIZE * WIN_SIZE, AugState::SIZE);
+    MatXX J_LMK(UV_SIZE * WIN_SIZE, LMK_SIZE);
+    VecX ERR(UV_SIZE * WIN_SIZE);
+    std::vector<FrameOrder> pose_order;
+
+    // 遍历 landmark
+    for (size_t i = 0; i < ids.size(); ++i) {
+        const auto id = ids[i].first;
+        auto lmk = ids[i].second;
+        pose_order.clear();
+        dx_p.setZero();
+
+        // 遍历 landmark 的所有观测
+        for (auto &it : lmk->frm2fet) {
+            const auto fet = it.second;
+            const auto obs = fet->obs[0];
+            const auto frm = fet->frame;
+
+            const auto Rwi = frm->q().toRotationMatrix();
+            const auto Ric = ext_.q_ic.toRotationMatrix();
+            const auto d_ij_w = lmk->position - frm->p();
+            const auto d_cj_i = Rwi.transpose() * d_ij_w - ext_.t_ic;
+            const auto d_cj_c = Ric.transpose() * d_cj_i;
+            const auto inv_d = TYPE(1) / d_cj_c.z();
+            const auto inv_d2 = inv_d * inv_d;
+            const auto est = d_cj_c.head<2>() * inv_d;
+            const auto err = obs->un_pt.head<2>() - est;
+
+            Mat2_3 J;
+            J << inv_d, TYPE(0), -d_cj_c.x() * inv_d2,
+                    TYPE(0), inv_d, -d_cj_c.y() * inv_d2;
+
+            Mat2_3 J_lmk = J * (frm->q() * ext_.q_ic).inverse().toRotationMatrix();
+
+            Mat2_6 J_pose;
+            J_pose.leftCols<3>().noalias() = J_lmk * hat(d_ij_w);;
+            J_pose.rightCols<3>().noalias() = -J_lmk;
+
+            Mat2_6 J_ext;
+            J_ext.rightCols<3>().noalias() = -J * Ric.transpose();
+            J_ext.leftCols<3>().noalias() = -J_ext.rightCols<3>() * hat(d_cj_i);
+
+            const size_t row_start = UV_SIZE * pose_order.size();
+            const size_t col_start = AugState::SIZE * pose_order.size();
+            ERR.segment<2>(row_start) = err;
+            J_LMK.middleRows<2>(row_start) = J_lmk;
+            J_EXT.middleRows<2>(row_start) = J_ext;
+            J_POSE.block<2, AugState::SIZE>(row_start, col_start) = J_pose;
+
+            // 记录 J_POSE 中的 J_pose 在 state 中对应的 ordering
+            pose_order.emplace_back(frm->ordering);
+        }
+
+        // QR 分解
+        // Measurement Equation: [J_POSE, J_LMK] * [dxp; dxl] = e
+        // QR Decomposition: J_LMK = Q * [R; 0] * P^-1 = [Q1, Q2] * [R; 0] * P^-1
+        // We have:
+        //  Q1^T * [J_POSE, J_LMK] * dx = [Q1^T * J_POSE, R * P^-1] * [dxp; dxl]
+        //                              = Q1^T * J_POSE * dxp + R * P^-1 * dxl
+        //                              = Q1^T * e
+        // And,
+        //  Q2^T * [J_POSE, J_LMK] * dx = [Q2^T * J_POSE, 0] * [dxp; dxl]
+        //                              = Q2^T * J_POSE * dxp
+        //                              = Q2^T * e
+        // 1) Use "Q2^T * J_POSE * dxp = Q2^T * e" to update dxp
+        // 2) Then use "R * P^-1 * dxl = Q1^T * e - Q1^T * J_POSE * dxp" to update dxl
+        const size_t row_end = UV_SIZE * pose_order.size();
+        const size_t col_end = AugState::SIZE * pose_order.size();
+        auto &&J_lmk = J_LMK.topRows(row_end);
+        auto &&J_pose = J_POSE.topLeftCorner(row_end, col_end);
+        auto &&qr_lmk = J_lmk.colPivHouseholderQr();
+        auto &&Q = qr_lmk.householderQ();
+        auto &&R = qr_lmk.matrixR();
+        auto &&P = qr_lmk.colsPermutation();
+
+        // [Q1^T * e; Q2^T * e]
+        auto &&QTe = Q.transpose() * ERR.head(row_end);
+        auto &&Q1e = QTe.head(LMK_SIZE);
+        auto &&Q2e = QTe.tail(Q.cols() - LMK_SIZE);
+
+        // [Q1^T * J_POSE; Q2^T * J_POSE]
+        auto &&QTJp = Q.transpose() * J_pose;
+        auto &&Q1Jp = QTJp.topRows(LMK_SIZE);
+        auto &&Q2Jp = QTJp.bottomRows(Q.cols() - LMK_SIZE);
+
+        // 序贯更新 State
+        // Q2^T * J_POSE * dxp = Q2^T * e
+        for (size_t j = 0; j < Q2Jp.rows(); ++j) {
+            // 重构出量测矩阵 H
+            VecX hT = VecX::Zero(INSState::SIZE + AugState::SIZE * WIN_SIZE);
+            for (size_t k = 0; k < pose_order.size(); ++k) {
+                const size_t frm_index = INSState::SIZE + AugState::SIZE * pose_order[k];
+                hT.segment<AugState::SIZE>(frm_index) = Q2Jp.row(j).segment<AugState::SIZE>(AugState::SIZE * k).transpose();
+            }
+
+            TYPE r = uv_var / dt;
+            VecX PhT = cov_p * hT;
+            TYPE var = hT.dot(PhT) + r;
+            VecX K = PhT / var;
+            cov_p -= K * PhT.transpose();
+
+            PhT = cov_p * hT;
+            cov_p.triangularView<Eigen::Upper>() += (K * r - PhT) * K.transpose();
+            cov_p.triangularView<Eigen::StrictlyLower>() = cov_p.triangularView<Eigen::StrictlyUpper>().transpose();
+
+            // 修正 e
+            auto e = Q2e(j) - hT.dot( dx_p);
+            dx_p += K * e;
+        }
+        updateState(dx_p);
+
+        // 更新 Landmarks
+        // R * P^-1 * dxl = Q1^T * e - Q1^T * J_POSE * dxp
+        auto &&cov_l = lmk->cov_position;
+        dx_l.setZero();
+
+        // 计算 (Q1^T * e) - (Q1^T * J_POSE) * dxp -> (Q1^T * e)
+        VecX dxa = VecX::Zero(AugState::SIZE * pose_order.size());
+        for (size_t k = 0; k < pose_order.size(); ++k) {
+            const size_t frm_index = INSState::SIZE + AugState::SIZE * pose_order[k];
+            dxa.segment<AugState::SIZE>(AugState::SIZE * k) = dx_p.segment<AugState::SIZE>(frm_index);
+        }
+        Q1e -= Q1Jp * dxa;
+
+        // 计算 R * P^-1 -> RP
+        auto &&RP = R * P.inverse();
+        for (size_t j = 0; j < LMK_SIZE; ++j) {
+            auto &&hT = RP.row(j).transpose();
+
+            const auto r = uv_var / dt;
+            VecX PhT = cov_l * hT;
+            TYPE var = hT.dot(PhT) + r;
+            VecX K = PhT / var;
+            cov_l -= K * PhT.transpose();
+
+            PhT = cov_l * hT;
+            cov_l.triangularView<Eigen::Upper>() += (K * r - PhT) * K.transpose();
+            cov_l.triangularView<Eigen::StrictlyLower>() = cov_l.triangularView<Eigen::StrictlyUpper>().transpose();
+
+            // 修正 e
+            auto e = Q1e(j) - hT.dot(dx_l);
+            dx_l += K * e;
+        }
+        lmk->position += dx_l;
+    }
+//    std::cout << "Update Finished" << std::endl;
+
+    auto t2 = clock();
+    t_cost_ += t2 - t1;
+    ++posterior_times_;
+
+#elif defined(USE_SCHUR)
+    auto t1 = clock();
 
     // Hessian 矩阵
     const auto lmk_size = LMK_SIZE * ids.size();
@@ -354,11 +517,12 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     gp.setZero();
     gl.setZero();
 
-//    std::cout << "2222222" << std::endl;
-
+    // 遍历 landmarks
     for (size_t i = 0; i < ids.size(); ++i) {
         const auto id = ids[i].first;
         auto lmk = ids[i].second;
+
+        // 遍历 landmark 的 所有 observations
         for (auto &it : lmk->frm2fet) {
             const auto fet = it.second;
             const auto obs = fet->obs[0];
@@ -402,65 +566,11 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             gp.segment<6>(frm_index) += J_pose.transpose() * err;
             gl.segment<3>(lmk_index) += J_lmk.transpose() * err;
         }
-//        // 遍历滑窗
-//        auto &sfw = map_.sfw;
-//        for (size_t m = 0; m < sfw; ++m) {
-//            const auto &frm = sfw[m];
-//            auto &&aug_state = frm->state;
-//            auto &&fet = frm->lmk2fet;
-//            const auto &&it = meas.find(id);
-//            if (it == meas.end()) {
-//                continue;
-//            }
-//
-//            const auto Rwi = aug_state.orientation.toRotationMatrix();
-//            const auto Ric = ext_.q_ic.toRotationMatrix();
-//            const auto d_ij_w = lmk_[id].position - aug_state.position;
-//            const auto d_cj_i = Rwi.transpose() * d_ij_w - ext_.t_ic;
-//            const auto d_cj_c = Ric.transpose() * d_cj_i;
-//            const auto inv_d = TYPE(1) / d_cj_c.z();
-//            const auto inv_d2 = inv_d * inv_d;
-//            const auto est = d_cj_c.head<2>() * inv_d;
-//            const auto err = it->second - est;
-//
-////            std::cout << "landmark[" << id << "]: err = " << err.transpose();
-////            std::cout << ", gt = " << it->second.transpose();
-////            std::cout << ", est = " << est.transpose() << std::endl;
-//
-//            Mat2_3 J;
-//            J << inv_d, TYPE(0), -d_cj_c.x() * inv_d2,
-//                 TYPE(0), inv_d, -d_cj_c.y() * inv_d2;
-//
-//            Mat2_3 J_lmk = J * (aug_state.orientation * ext_.q_ic).inverse().toRotationMatrix();
-//
-//            Mat2_6 J_pose;
-//            J_pose.leftCols<3>().noalias() = J_lmk * hat(d_ij_w);;
-//            J_pose.rightCols<3>().noalias() = -J_lmk;
-//
-//            Mat2_6 J_ext;
-//            J_ext.rightCols<3>().noalias() = -J * Ric.transpose();
-//            J_ext.leftCols<3>().noalias() = -J_ext.rightCols<3>() * hat(d_cj_i);
-//
-//            const size_t lmk_index = LMK_SIZE * i;
-//            const size_t frm_index = INSState::SIZE + AugState::SIZE * m;
-//
-//            Hpp.block<6, 6>(frm_index, frm_index).triangularView<Eigen::Upper>() += J_pose.transpose() * J_pose;
-////            Hpp.block<6, 6>(frm_index, frm_index).triangularView<Eigen::StrictlyLower>() = Hpp.block<6, 6>(frm_index, frm_index).triangularView<Eigen::StrictlyUpper>().transpose();
-//
-//            Hll.block<3, 3>(lmk_index, lmk_index).triangularView<Eigen::Upper>() += J_lmk.transpose() * J_lmk;
-////            Hll.block<3, 3>(lmk_index, lmk_index).triangularView<Eigen::StrictlyLower>() = Hll.block<3, 3>(lmk_index, lmk_index).triangularView<Eigen::StrictlyUpper>().transpose();
-//
-//            Hpl.block<6, 3>(frm_index, lmk_index) += J_pose.transpose() * J_lmk;
-//
-//            gp.segment<6>(frm_index) += J_pose.transpose() * err;
-//            gl.segment<3>(lmk_index) += J_lmk.transpose() * err;
-//        }
     }
     Hpp.triangularView<Eigen::StrictlyLower>() = Hpp.triangularView<Eigen::StrictlyUpper>().transpose();
     Hll.triangularView<Eigen::StrictlyLower>() = Hll.triangularView<Eigen::StrictlyUpper>().transpose();
 
-//    std::cout << "3333333" << std::endl;
-
+    // 计算 schur 补
     MatXX tmp(COV_SIZE, LMK_SIZE);
     for (size_t i = 0; i < ids.size(); ++i) {
         auto index = i * LMK_SIZE;
@@ -480,11 +590,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     }
     Hpp.triangularView<Eigen::StrictlyLower>() = Hpp.triangularView<Eigen::StrictlyUpper>().transpose();
 
-//    std::cout << "4444444" << std::endl;
-
-
 #if 1
-    std::cout << "Update State" << std::endl;
+//    std::cout << "Update State" << std::endl;
     // [[ 更新 State ]]
     // 对 H 使用特征分解: H = V * λ * V^T
     // y = V * λ * V^T * x + V * λ * V^T * n
@@ -496,7 +603,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     VecX dx_p(COV_SIZE);
     dx_p.setZero();
     {
-        auto &&cov = cov_;
+        auto &&cov_p = cov_;
         Eigen::SelfAdjointEigenSolver<decltype(Hpp)> es(Hpp);
 
         auto &&ep = gp;
@@ -512,8 +619,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 //        while (es.eigenvalues()(zero_end) < 1e-6) {
 //            ++zero_end;
 //        }
-//        std::cout << "ev = " << es.eigenvalues().transpose() << std::endl;
-        std::cout << "State Update: zero_end = " << zero_end << std::endl;
+//        std::cout << "State Update: zero_end = " << zero_end << std::endl;
         if (zero_end == COV_SIZE) {
             std::cerr << "eigen value = " << es.eigenvalues().transpose() << std::endl;
         }
@@ -523,14 +629,14 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             const auto R = uv_var / es.eigenvalues()(zero_end) / dt;
             const auto hT = es.eigenvectors().col(zero_end);
 
-            VecX PhT = cov * hT;
+            VecX PhT = cov_p * hT;
             TYPE var = hT.dot(PhT) + R;
             VecX K = PhT / var;
-            cov -= K * PhT.transpose();
+            cov_p -= K * PhT.transpose();
 
-            PhT = cov * hT;
-            cov.triangularView<Eigen::Upper>() += (K * R - PhT) * K.transpose();
-            cov.triangularView<Eigen::StrictlyLower>() = cov.triangularView<Eigen::StrictlyUpper>().transpose();
+            PhT = cov_p * hT;
+            cov_p.triangularView<Eigen::Upper>() += (K * R - PhT) * K.transpose();
+            cov_p.triangularView<Eigen::StrictlyLower>() = cov_p.triangularView<Eigen::StrictlyUpper>().transpose();
 
 //            // 更新误差 Ve
 //            auto dx = K * (VTe(zero_end) / es.eigenvalues()(zero_end));
@@ -542,11 +648,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         }
     }
     updateState(dx_p);
-    std::cout << "Update State Finished" << std::endl;
-//    std::cout << "dx_p = " << dx_p.transpose() << std::endl;
+//    std::cout << "Update State Finished" << std::endl;
 
-
-    std::cout << "Update Landmark" << std::endl;
+//    std::cout << "Update Landmark" << std::endl;
     // [[ 更新 Landmark ]]
     gl -= Hpl.transpose() * dx_p;
     for (size_t i = 0; i < ids.size(); ++i) {
@@ -557,7 +661,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         VecX dx_l(LMK_SIZE);
         dx_l.setZero();
 
-        auto &&cov = lmk->cov_position;
+        auto &&cov_p = lmk->cov_position;
         auto &&hll = Hll.block<3, 3>(index, index);
         Eigen::SelfAdjointEigenSolver<Mat3_3> es(hll);
 
@@ -581,21 +685,19 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             std::cerr << "id = " << id << ", eigen value = " << es.eigenvalues().transpose() << std::endl;
         }
 
-//        std::cout << "id = " << id << ", zero_end = " << zero_end << std::endl;
-
         // Step-1: 序贯
         for (; zero_end < LMK_SIZE; ++zero_end) {
             const auto R = uv_var / es.eigenvalues()(zero_end) / dt;
             const auto hT = es.eigenvectors().col(zero_end);
 
-            VecX PhT = cov * hT;
+            VecX PhT = cov_p * hT;
             TYPE var = hT.dot(PhT) + R;
             VecX K = PhT / var;
-            cov -= K * PhT.transpose();
+            cov_p -= K * PhT.transpose();
 
-            PhT = cov * hT;
-            cov.triangularView<Eigen::Upper>() += (K * R - PhT) * K.transpose();
-            cov.triangularView<Eigen::StrictlyLower>() = cov.triangularView<Eigen::StrictlyUpper>().transpose();
+            PhT = cov_p * hT;
+            cov_p.triangularView<Eigen::Upper>() += (K * R - PhT) * K.transpose();
+            cov_p.triangularView<Eigen::StrictlyLower>() = cov_p.triangularView<Eigen::StrictlyUpper>().transpose();
 
 //            // 更新误差 Ve
 //            auto dx = K * (VTe(zero_end) / es.eigenvalues()(zero_end));
@@ -607,13 +709,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         }
 
         lmk->position += dx_l;
-//        lmk_[id].updateState(dx_l);
-//        std::cout << "id = " << id << ", dx_l = " << dx_l.transpose() << std::endl;
     }
-    std::cout << "Update Landmark Finished" << std::endl;
-
-
-
+//    std::cout << "Update Landmark Finished" << std::endl;
 #else
     // 更新 state
     // 量测方程为 gp = Hpp * x + Hpp * n
@@ -663,13 +760,13 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         auto index = i * LMK_SIZE;
 
         auto &&el = gl.segment<3>(index);
-        auto &&cov = lmk_[id].cov;
+        auto &&cov_p = lmk_[id].cov_p;
         auto &&hll = Hll.block<3, 3>(index, index);
 
 //        const auto R = uv_var / dt;
-//        MatXX HP = hll * cov;
+//        MatXX HP = hll * cov_p;
 //
-//        MatXX S = cov;
+//        MatXX S = cov_p;
 //        S.diagonal().array() += R;
 //        S.triangularView<Eigen::Upper>() = hll * S.selfadjointView<Eigen::Upper>() * hll.transpose();
 //        S.diagonal().array() += 1e-3 * R;
@@ -678,20 +775,20 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 //        MatXX KT = S.inverse() * HP;
 ////    MatXX KT = S.fullPivLu().solve(HP);
 //
-//        cov -= KT.transpose() * HP;
-//        cov = 0.5 * (cov + cov.transpose());
+//        cov_p -= KT.transpose() * HP;
+//        cov_p = 0.5 * (cov_p + cov_p.transpose());
 //
 //        VecX dx_l = KT.transpose() * el;
 
         const auto R = uv_var / dt;
-        MatXX PHT = cov * hll;
+        MatXX PHT = cov_p * hll;
 
         MatXX S = PHT;
         S.diagonal().array() += R;
-        MatXX KT = S.inverse() * cov;
+        MatXX KT = S.inverse() * cov_p;
 
-        cov -= PHT * KT;
-        cov = 0.5 * (cov + cov.transpose());
+        cov_p -= PHT * KT;
+        cov_p = 0.5 * (cov_p + cov_p.transpose());
 
         VecX dx_l = KT.transpose() * el;
 
@@ -700,6 +797,11 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     }
 #endif
 
+    auto t2 = clock();
+    t_cost_ += t2 - t1;
+    ++posterior_times_;
+
+#endif
 
     // 移除一帧
     popFrame();
@@ -718,7 +820,7 @@ void SchurVINS::updateState(auto &&dx) {
         state_.gravity += Eigen::Map<Vec3>(dx.data() + I::G);
     }
     for (size_t n = 0; n < map_.sfw.size(); ++n) {
-        std::cout << "n = " << n << ", order = " << map_.sfw[n]->ordering << std::endl;
+//        std::cout << "n = " << n << ", order = " << map_.sfw[n]->ordering << std::endl;
         map_.sfw[n]->q() = (vec2quat(Eigen::Map<Vec3>(dx.data() + I::SIZE + n * A::SIZE + A::Q)) * map_.sfw[n]->q()).normalized();
         map_.sfw[n]->p() += Eigen::Map<Vec3>(dx.data() + I::SIZE + n * A::SIZE + A::P);
     }
