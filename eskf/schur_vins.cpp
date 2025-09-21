@@ -340,19 +340,15 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 //    std::cout << "11111" << std::endl;
 
     // Hessian 矩阵
+    // TODO: 应该固定一个最大的 lmk_size, 这样就不需要重复创建矩阵 Hpl 与 Hll
     const auto lmk_size = LMK_SIZE * ids.size();
-    MatXX Hpp(COV_SIZE, COV_SIZE);
-    MatXX Hpl(COV_SIZE, lmk_size);
-    MatXX Hll(lmk_size, lmk_size);
-    Hpp.setZero();
-    Hpl.setZero();
-    Hll.setZero();
+    MatXX Hpp = MatXX::Zero(COV_SIZE, COV_SIZE);
+    MatXX Hpl = MatXX::Zero(COV_SIZE, lmk_size);
+    MatXX Hll = MatXX::Zero(lmk_size, lmk_size);
 
     // Gradient
-    VecX gp(COV_SIZE);
-    VecX gl(lmk_size);
-    gp.setZero();
-    gl.setZero();
+    VecX gp = VecX::Zero(COV_SIZE);
+    VecX gl = VecX::Zero(lmk_size);
 
 //    std::cout << "2222222" << std::endl;
 

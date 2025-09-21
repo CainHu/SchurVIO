@@ -21,6 +21,9 @@ bool Landmark::delete_frame(FrameID frame_id) {
     }
 
     // TODO: update anchor_obs
+    if (anchor_obs->fet->frame->id == frame_id) {
+        anchor_obs = frm2fet.begin()->second->obs[0];
+    }
 
     return true;
 }
