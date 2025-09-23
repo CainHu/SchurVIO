@@ -312,6 +312,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 //            ids.emplace_back(id);
 //        }
 //    }
+
+    size_t num_obs = 0;
     std::vector<std::pair<size_t, Landmark*>> ids;
     ids.reserve(map_.lmk_map.size());
     for (const auto &it : map_.lmk_map) {
@@ -320,6 +322,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         if (lmk->frm2fet.size() > 1) {
 //            std::cout << "lmk->frm2fet.size() = " << lmk->frm2fet.size() << std::endl;
             ids.emplace_back(id, lmk);
+            num_obs += lmk->frm2fet.size();
             // TODO: 三角化
             if (!lmk->is_triangulated) {
                 lmk->position = lmk_map.at(id);
@@ -338,27 +341,32 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     }
 
 
-//#define USE_QR
-#define USE_SCHUR
+#define USE_QR
+//#define USE_SCHUR
 #if defined(USE_QR)
     auto t1 = clock();
 
     constexpr static size_t UV_SIZE = 2;
-    auto &&cov_p = cov_;
-    VecX dx_p(COV_SIZE);
-    VecX dx_l(LMK_SIZE);
     MatXX J_POSE = MatXX::Zero(UV_SIZE * WIN_SIZE, AugState::SIZE * WIN_SIZE);
     MatXX J_EXT(UV_SIZE * WIN_SIZE, AugState::SIZE);
     MatXX J_LMK(UV_SIZE * WIN_SIZE, LMK_SIZE);
     VecX ERR(UV_SIZE * WIN_SIZE);
     std::vector<FrameOrder> pose_order;
+    pose_order.reserve(WIN_SIZE);
+
+    MatXX J_STATE = MatXX::Zero(UV_SIZE * num_obs, AugState::SIZE * WIN_SIZE);
+    VecX E_STATE = VecX::Zero(UV_SIZE * num_obs);
+
+    MatXX Q1Jp_s = MatXX::Zero(LMK_SIZE * ids.size(), AugState::SIZE * WIN_SIZE);
+    VecX Q1e_s = VecX::Zero(LMK_SIZE * ids.size());
+    MatXX RP_s = MatXX::Zero(LMK_SIZE * ids.size(), LMK_SIZE);
 
     // 遍历 landmark
+    size_t row_idx = 0;
     for (size_t i = 0; i < ids.size(); ++i) {
         const auto id = ids[i].first;
         auto lmk = ids[i].second;
         pose_order.clear();
-        dx_p.setZero();
 
         // 遍历 landmark 的所有观测
         for (auto &it : lmk->frm2fet) {
@@ -420,7 +428,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         auto &&J_pose = J_POSE.topLeftCorner(row_end, col_end);
         auto &&qr_lmk = J_lmk.colPivHouseholderQr();
         auto &&Q = qr_lmk.householderQ();
-        auto &&R = qr_lmk.matrixR();
+        const MatXX R = qr_lmk.matrixQR().topLeftCorner(LMK_SIZE, LMK_SIZE).template triangularView<Eigen::Upper>();
         auto &&P = qr_lmk.colsPermutation();
 
         // [Q1^T * e; Q2^T * e]
@@ -433,47 +441,68 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         auto &&Q1Jp = QTJp.topRows(LMK_SIZE);
         auto &&Q2Jp = QTJp.bottomRows(Q.cols() - LMK_SIZE);
 
-        // 序贯更新 State
-        // Q2^T * J_POSE * dxp = Q2^T * e
-        for (size_t j = 0; j < Q2Jp.rows(); ++j) {
-            // 重构出量测矩阵 H
-            VecX hT = VecX::Zero(INSState::SIZE + AugState::SIZE * WIN_SIZE);
-            for (size_t k = 0; k < pose_order.size(); ++k) {
-                const size_t frm_index = INSState::SIZE + AugState::SIZE * pose_order[k];
-                hT.segment<AugState::SIZE>(frm_index) = Q2Jp.row(j).segment<AugState::SIZE>(AugState::SIZE * k).transpose();
-            }
-
-            TYPE r = uv_var / dt;
-            VecX PhT = cov_p * hT;
-            TYPE var = hT.dot(PhT) + r;
-            VecX K = PhT / var;
-            cov_p -= K * PhT.transpose();
-
-            PhT = cov_p * hT;
-            cov_p.triangularView<Eigen::Upper>() += (K * r - PhT) * K.transpose();
-            cov_p.triangularView<Eigen::StrictlyLower>() = cov_p.triangularView<Eigen::StrictlyUpper>().transpose();
-
-            // 修正 e
-            auto e = Q2e(j) - hT.dot( dx_p);
-            dx_p += K * e;
+        // 存储 Augment State 对应的 Jacobian
+        for (size_t j = 0; j < pose_order.size(); ++j) {
+            J_STATE.block(row_idx, AugState::SIZE * pose_order[j], Q2Jp.rows(), AugState::SIZE) = Q2Jp.middleCols(AugState::SIZE * j, AugState::SIZE);
         }
-        updateState(dx_p);
+        E_STATE.segment(row_idx, Q2e.rows()) = Q2e;
 
-        // 更新 Landmarks
-        // R * P^-1 * dxl = Q1^T * e - Q1^T * J_POSE * dxp
+        // 存储 Landmark 相关的信息
+        for (size_t j = 0; j < pose_order.size(); ++j) {
+            Q1Jp_s.block(LMK_SIZE * i, AugState::SIZE * pose_order[j], Q1Jp.rows(), AugState::SIZE) = Q1Jp.middleCols(AugState::SIZE * j, AugState::SIZE);
+        }
+        Q1e_s.segment(LMK_SIZE * i, LMK_SIZE) = Q1e;
+        RP_s.middleRows(LMK_SIZE * i, LMK_SIZE) = R * P.inverse();
+
+        row_idx += Q2Jp.rows();
+    }
+//    std::cout << "Update Finished" << std::endl;
+
+    // 对 J_STATE 进行 QR 分解
+    auto qr = J_STATE.colPivHouseholderQr();
+//    auto Q_red = qr.householderQ() * MatXX::Identity(J_STATE.rows(), J_STATE.cols());
+    auto e_red = (qr.householderQ().transpose() * E_STATE).head(J_STATE.cols());
+    auto H_red = qr.matrixR() * qr.colsPermutation().inverse();
+
+    // 序贯更新 State
+    // Q2^T * J_POSE * dxp = Q2^T * e
+    auto &&cov_p = cov_;
+    VecX dx_p = VecX::Zero(COV_SIZE);
+    for (size_t j = 0; j < e_red.rows(); ++j) {
+        // 重构出量测矩阵 H
+        VecX hT = VecX::Zero(INSState::SIZE + AugState::SIZE * WIN_SIZE);
+        hT.tail(AugState::SIZE * WIN_SIZE) = H_red.row(j).transpose();
+
+        TYPE r = uv_var / dt;
+        VecX PhT = cov_p * hT;
+        TYPE var = hT.dot(PhT) + r;
+        VecX K = PhT / var;
+        cov_p -= K * PhT.transpose();
+
+        PhT = cov_p * hT;
+        cov_p.triangularView<Eigen::Upper>() += (K * r - PhT) * K.transpose();
+        cov_p.triangularView<Eigen::StrictlyLower>() = cov_p.triangularView<Eigen::StrictlyUpper>().transpose();
+
+        // 修正 e
+        auto e = e_red(j) - hT.dot( dx_p);
+        dx_p += K * e;
+    }
+    updateState(dx_p);
+
+    // 更新 Landmarks
+    // R * P^-1 * dxl = Q1^T * e - Q1^T * J_POSE * dxp
+    // 计算 (Q1^T * e) - (Q1^T * J_POSE) * dxp -> (Q1^T * e)
+    Q1e_s -= Q1Jp_s * dx_p.tail(AugState::SIZE * WIN_SIZE);
+    VecX dx_l = VecX::Zero(LMK_SIZE);
+    for (size_t i = 0; i < ids.size(); ++i) {
+        const auto id = ids[i].first;
+        auto lmk = ids[i].second;
+
         auto &&cov_l = lmk->cov_position;
         dx_l.setZero();
 
-        // 计算 (Q1^T * e) - (Q1^T * J_POSE) * dxp -> (Q1^T * e)
-        VecX dxa = VecX::Zero(AugState::SIZE * pose_order.size());
-        for (size_t k = 0; k < pose_order.size(); ++k) {
-            const size_t frm_index = INSState::SIZE + AugState::SIZE * pose_order[k];
-            dxa.segment<AugState::SIZE>(AugState::SIZE * k) = dx_p.segment<AugState::SIZE>(frm_index);
-        }
-        Q1e -= Q1Jp * dxa;
-
         // 计算 R * P^-1 -> RP
-        auto &&RP = R * P.inverse();
+        auto &&RP = RP_s.middleRows(i * LMK_SIZE, LMK_SIZE);
         for (size_t j = 0; j < LMK_SIZE; ++j) {
             auto &&hT = RP.row(j).transpose();
 
@@ -488,12 +517,12 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             cov_l.triangularView<Eigen::StrictlyLower>() = cov_l.triangularView<Eigen::StrictlyUpper>().transpose();
 
             // 修正 e
-            auto e = Q1e(j) - hT.dot(dx_l);
+            auto e = Q1e_s(i * LMK_SIZE + j) - hT.dot(dx_l);
             dx_l += K * e;
         }
         lmk->position += dx_l;
     }
-//    std::cout << "Update Finished" << std::endl;
+
 
     auto t2 = clock();
     t_cost_ += t2 - t1;
