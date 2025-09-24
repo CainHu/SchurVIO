@@ -348,9 +348,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 
     constexpr static size_t UV_SIZE = 2;
     MatXX J_POSE = MatXX::Zero(UV_SIZE * WIN_SIZE, AugState::SIZE * WIN_SIZE);
-    MatXX J_EXT(UV_SIZE * WIN_SIZE, AugState::SIZE);
-    MatXX J_LMK(UV_SIZE * WIN_SIZE, LMK_SIZE);
-    VecX ERR(UV_SIZE * WIN_SIZE);
+    MatXX J_EXT = MatXX::Zero(UV_SIZE * WIN_SIZE, AugState::SIZE);
+    MatXX J_LMK = MatXX::Zero(UV_SIZE * WIN_SIZE, LMK_SIZE);
+    VecX ERR = VecX::Zero(UV_SIZE * WIN_SIZE);
     std::vector<FrameOrder> pose_order;
     pose_order.reserve(WIN_SIZE);
 
@@ -428,7 +428,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         auto &&J_pose = J_POSE.topLeftCorner(row_end, col_end);
         auto &&qr_lmk = J_lmk.colPivHouseholderQr();
         auto &&Q = qr_lmk.householderQ();
-        const MatXX R = qr_lmk.matrixQR().topLeftCorner(LMK_SIZE, LMK_SIZE).template triangularView<Eigen::Upper>();
+        const MatXX R = qr_lmk.matrixR().topLeftCorner(LMK_SIZE, LMK_SIZE).template triangularView<Eigen::Upper>();
         auto &&P = qr_lmk.colsPermutation();
 
         // [Q1^T * e; Q2^T * e]
@@ -452,7 +452,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             Q1Jp_s.block(LMK_SIZE * i, AugState::SIZE * pose_order[j], Q1Jp.rows(), AugState::SIZE) = Q1Jp.middleCols(AugState::SIZE * j, AugState::SIZE);
         }
         Q1e_s.segment(LMK_SIZE * i, LMK_SIZE) = Q1e;
-        RP_s.middleRows(LMK_SIZE * i, LMK_SIZE) = R * P.inverse();
+        RP_s.middleRows(LMK_SIZE * i, LMK_SIZE) = R * P.transpose();
 
         row_idx += Q2Jp.rows();
     }
@@ -462,7 +462,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     auto qr = J_STATE.colPivHouseholderQr();
 //    auto Q_red = qr.householderQ() * MatXX::Identity(J_STATE.rows(), J_STATE.cols());
     auto e_red = (qr.householderQ().transpose() * E_STATE).head(J_STATE.cols());
-    auto H_red = qr.matrixR() * qr.colsPermutation().inverse();
+    const MatXX R_red = qr.matrixR().topLeftCorner(J_STATE.cols(), J_STATE.cols()).template triangularView<Eigen::Upper>();
+    auto H_red = R_red * qr.colsPermutation().transpose();
 
     // 序贯更新 State
     // Q2^T * J_POSE * dxp = Q2^T * e
