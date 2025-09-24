@@ -461,9 +461,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     // 对 J_STATE 进行 QR 分解
     auto qr = J_STATE.colPivHouseholderQr();
 //    auto Q_red = qr.householderQ() * MatXX::Identity(J_STATE.rows(), J_STATE.cols());
-    auto e_red = (qr.householderQ().transpose() * E_STATE).head(J_STATE.cols());
+    VecX e_red = (qr.householderQ().transpose() * E_STATE).head(J_STATE.cols());
     const MatXX R_red = qr.matrixR().topLeftCorner(J_STATE.cols(), J_STATE.cols()).template triangularView<Eigen::Upper>();
-    auto H_red = R_red * qr.colsPermutation().transpose();
+    const MatXX H_red = R_red * qr.colsPermutation().transpose();
 
     // 序贯更新 State
     // Q2^T * J_POSE * dxp = Q2^T * e

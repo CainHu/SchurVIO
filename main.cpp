@@ -30,7 +30,7 @@ public:
 int main() {
 
 
-#if 1
+#if 0
     // 创建模拟器
     VIOFrontendSimulator1 simulator;
 
