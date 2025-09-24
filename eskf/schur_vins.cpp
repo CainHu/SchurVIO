@@ -4,6 +4,8 @@
 
 #include "schur_vins.h"
 #include <Eigen/Eigenvalues>
+#include <Eigen/SparseCore>
+#include <Eigen/SparseQR>
 #include <algorithm>
 
 using namespace slam;
