@@ -343,8 +343,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     }
 
 
-#define USE_QR
-//#define USE_SCHUR
+//#define USE_QR
+#define USE_SCHUR
 #if defined(USE_QR)
     auto t1 = clock();
 
@@ -626,12 +626,16 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 //    std::cout << "Update State" << std::endl;
     // [[ 更新 State ]]
     // 对 H 使用特征分解: H = V * λ * V^T
-    // y = V * λ * V^T * x + V * λ * V^T * n
-    // V^T * y = λ * V^T * x + λ * V^T * n
-    // Cov[λ * V^T * n] = λ * V^T * Cov[n] * V * λ
+    // y = V * λ * V^T * x + V * sqrt(λ) * V^T * n
+    // V^T * y = λ * V^T * x + sqrt(λ) * V^T * n
+    // Cov[λ * V^T * n] = sqrt(λ) * V^T * Cov[n] * V * sqrt(λ)
     // 如果 Cov[n] = σ^2 * I,
-    // 则 Cov[λ * V^T * n] = (σ * λ)^2
-    // 所以 V^T * y = λ * V^T * x + λ * n, v ~ N[0, σ]
+    // 则 Cov[λ * V^T * n] = σ^2 * λ
+    // 所以 V^T * y = λ * V^T * x + sqrt(λ) * n, v ~ N[0, σ]
+    // 进一步有 λ^-1 * V^T * y = V^T * x + sqrt(λ)^-1 * n, n ~ N[0, σ]
+    // 记 w = sqrt(λ)^-1 * n, n ~ N[0, σ]
+    // 则有 Cov[w] = σ^2 * λ^-1
+    // 序贯 V.col(i)^T * y / λ(i) = V.col(i)^T * x + w(i), var[w] = σ^2 / λ(i)
     VecX dx_p(COV_SIZE);
     dx_p.setZero();
     {
