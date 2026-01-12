@@ -859,6 +859,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     }
 #endif
 
+    // TODO: 更新完后需要固定最老帧率，除非用的是FEJ或OC
+
     auto t2 = clock();
     t_cost_ += t2 - t1;
     ++posterior_times_;
