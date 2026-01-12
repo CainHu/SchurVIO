@@ -96,8 +96,8 @@ std::vector<State> VIOFrontendSimulator::generateGroundTruth() const {
         current.q = Eigen::Quaterniond(R);
 
         // 模拟IMU偏置缓慢变化（随机游走）
-        std::normal_distribution<double> ba_noise(0, imu_acc_bias_noise_std_ * sqrt(dt));
-        std::normal_distribution<double> bg_noise(0, imu_gyro_bias_noise_std_ * sqrt(dt));
+//        std::normal_distribution<double> ba_noise(0, imu_acc_bias_noise_std_ * sqrt(dt));
+//        std::normal_distribution<double> bg_noise(0, imu_gyro_bias_noise_std_ * sqrt(dt));
 //        current.ba.x() += ba_noise(random_generator_);
 //        current.ba.y() += ba_noise(random_generator_);
 //        current.ba.z() += ba_noise(random_generator_);
@@ -130,10 +130,11 @@ std::vector<ImuData> VIOFrontendSimulator::generateImuData(const std::vector<Sta
         // 计算理想加速度（机体坐标系）
         Eigen::Vector3d acc_ideal = curr.q.inverse() * ((curr.v - prev.v) / dt - g);
         // 添加偏置和噪声
-        std::normal_distribution<double> acc_noise(0, imu_acc_noise_std_);
-        data.accel = acc_ideal + curr.ba + Eigen::Vector3d(acc_noise(random_generator_),
-                                                           acc_noise(random_generator_),
-                                                           acc_noise(random_generator_));
+        data.accel = acc_ideal + curr.ba;
+        std::normal_distribution<double> acc_noise(0, imu_acc_noise_std_ / sqrt(imu_rate_));
+        data.accel += Eigen::Vector3d(acc_noise(random_generator_),
+                                      acc_noise(random_generator_),
+                                      acc_noise(random_generator_));
 
         // 计算理想角速度（机体坐标系）
         Eigen::Quaterniond dq = prev.q.inverse() * curr.q;
@@ -141,10 +142,11 @@ std::vector<ImuData> VIOFrontendSimulator::generateImuData(const std::vector<Sta
 //        if (dq.w() < 0) gyro_ideal = -gyro_ideal;  // 确保最短路径
         Eigen::Vector3d gyro_ideal = slam::quat2vec(dq) / dt;
         // 添加偏置和噪声
-        std::normal_distribution<double> gyro_noise(0, imu_gyro_noise_std_);
-        data.gyro = gyro_ideal + curr.bg + Eigen::Vector3d(gyro_noise(random_generator_),
-                                                           gyro_noise(random_generator_),
-                                                           gyro_noise(random_generator_));
+        data.gyro = gyro_ideal + curr.bg;
+        std::normal_distribution<double> gyro_noise(0, imu_gyro_noise_std_ / sqrt(imu_rate_));
+        data.gyro += Eigen::Vector3d(gyro_noise(random_generator_),
+                                     gyro_noise(random_generator_),
+                                     gyro_noise(random_generator_));
 
         imu_data.push_back(data);
     }

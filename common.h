@@ -73,19 +73,19 @@ namespace slam {
         constexpr static int G = BA + (ESTIMATE_GRAVITY ? 3 : 0);
         constexpr static int SIZE = G + 3;
 
-        constexpr static double STB_Q_INIT = 3e-2;
-        constexpr static double STB_P_INIT = 1e-0;
-        constexpr static double STB_V_INIT = 1e-1;
-        constexpr static double STB_BG_INIT = 5e-2;
-        constexpr static double STB_BA_INIT = 5e-1;
-        constexpr static double STB_G_INIT = 1e-2;
+        constexpr static double STB_Q_INIT = 3e-2 * 1e-1;
+        constexpr static double STB_P_INIT = 1e-0 * 1e-1;
+        constexpr static double STB_V_INIT = 1e-1 * 1e-1;
+        constexpr static double STB_BG_INIT = 5e-2 * 1e-1;
+        constexpr static double STB_BA_INIT = 5e-1 * 1e-1;
+        constexpr static double STB_G_INIT = 1e-2 * 1e-1;
 
-        constexpr static double STB_Q_PROC = 4e-2;
-        constexpr static double STB_P_PROC = 3e-3;
-        constexpr static double STB_V_PROC = 2e-1;
-        constexpr static double STB_BG_PROC = 1e-1;
-        constexpr static double STB_BA_PROC = 1e-1;
-        constexpr static double STB_G_PROC = 1e-3;
+        constexpr static double STB_Q_PROC = 4e-2 * 1e-1;
+        constexpr static double STB_P_PROC = 3e-3 * 1e-1;
+        constexpr static double STB_V_PROC = 2e-1 * 1e-1;
+        constexpr static double STB_BG_PROC = 1e-2 * 1e-1;
+        constexpr static double STB_BA_PROC = 1e-1 * 1e-1;
+        constexpr static double STB_G_PROC = 1e-3 * 1e-1;
 
         Tus timestamp{0};
 

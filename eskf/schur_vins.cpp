@@ -148,6 +148,7 @@ void SchurVINS::predict(const slam::IMUData &imu_data, const double dt) {
         // 姿态更新
         state_.orientation *= vec2quat(delta_ang);
         state_.orientation.normalize();
+
         Rnb_ = state_.orientation.toRotationMatrix();
     }
 
@@ -315,12 +316,27 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 //        }
 //    }
 
+//#define ONE_SHOT
+
     size_t num_obs = 0;
-    std::vector<std::pair<size_t, Landmark*>> ids;
-    ids.reserve(map_.lmk_map.size());
+    FrameID curr_frame_id = map_.getWinLatestFrame()->id;
+    static std::vector<std::pair<LandmarkID, Landmark*>> ids;
+    ids.resize(map_.lmk_map.size());
+    ids.clear();
     for (const auto &it : map_.lmk_map) {
         const auto id = it.first;
         auto lmk = it.second;
+#ifdef ONE_SHOT
+        if (auto iter = lmk->frm2fet.find(curr_frame_id); iter != lmk->frm2fet.end()) {
+            ids.emplace_back(id, lmk);
+            num_obs += 1;
+            // TODO: 三角化
+            if (!lmk->is_triangulated) {
+                lmk->position = lmk_map.at(id);
+                lmk->is_triangulated = true;
+            }
+        }
+#else
         if (lmk->frm2fet.size() > 1) {
 //            std::cout << "lmk->frm2fet.size() = " << lmk->frm2fet.size() << std::endl;
             ids.emplace_back(id, lmk);
@@ -331,6 +347,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
                 lmk->is_triangulated = true;
             }
         }
+#endif
     }
 
     std::cout << "There are " << ids.size() << " Triangulated Landmarks" << std::endl;
@@ -556,6 +573,12 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 
         // 遍历 landmark 的 所有 observations
         for (auto &it : lmk->frm2fet) {
+#ifdef ONE_SHOT
+            if (it.first != curr_frame_id) {
+                continue;
+            }
+#endif
+
             const auto fet = it.second;
             const auto obs = fet->obs[0];
             const auto frm = fet->frame;
@@ -714,9 +737,12 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 //        while (zero_end < LMK_SIZE && es.eigenvalues()(zero_end) < 1e-6) {
 //            ++zero_end;
 //        }
+#ifdef ONE_SHOT
+#else
         if (zero_end != 0) {
             std::cerr << "zero_end = " << zero_end << ", eigen value = " << es.eigenvalues().transpose() << std::endl;
         }
+#endif
         if (zero_end == LMK_SIZE) {
             std::cerr << "id = " << id << ", eigen value = " << es.eigenvalues().transpose() << std::endl;
         }
@@ -866,4 +892,6 @@ void SchurVINS::setQPV(const Quat &q, const Vec3 &p, const Vec3 &v) {
     state_.orientation = q;
     state_.position = p;
     state_.velocity = v;
+
+    Rnb_ = state_.orientation.toRotationMatrix();
 }

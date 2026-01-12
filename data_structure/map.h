@@ -36,7 +36,7 @@ namespace slam {
             }
 
             // TODO: 判断是否为 Key Frame
-            if (!sfw.empty() && sfw.getLatestFrame()->timestamp + 500000 > image_info.timestamp) {
+            if (!sfw.empty() && sfw.getLatestFrame()->timestamp + 200000 > image_info.timestamp) {
                 std::cout << "Not Key Frame" << std::endl;
                 return false;
             }
@@ -143,9 +143,9 @@ namespace slam {
         [[nodiscard]] size_t getWinLatestIndex() const { return sfw.getLatestIndex(); }
         [[nodiscard]] Frame *getWinLatestFrame() const { return sfw.getLatestFrame(); }
 
-        constexpr static size_t N_WIN = 7;
+        constexpr static size_t N_WIN = 30;
         constexpr static size_t N_LMK = 100000;
-        constexpr static size_t N_FRM = 1000;
+        constexpr static size_t N_FRM = 10000;
         constexpr static size_t N_FET = 1000 * N_FRM;
         constexpr static size_t N_OBS = N_FET * N_CAMERA;
 

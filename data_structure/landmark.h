@@ -55,7 +55,7 @@ namespace slam {
         Vec3 position{};
 
         TYPE var_ins_depth{TYPE(1)};
-        Mat3_3 cov_position{Mat3_3 ::Identity()};
+        Mat3_3 cov_position{Mat3_3 ::Identity() * 1e-4};
 
         Observation *anchor_obs{};
         Frame2FeatureMsg frm2fet;

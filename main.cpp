@@ -51,7 +51,7 @@ int main() {
     simulator.setImuNoise(0.01, 0.01, 0.001, 0.001);  // IMU噪声参数
 
     // 配置轨迹：半径5m，速度1m/s，持续20s
-    simulator.setTrajectoryParams(5.0, 1.0, 20.0);
+    simulator.setTrajectoryParams(5.0, 1.0, 100.0);
 
     // 配置环形特征点：3个同心圆环，半径分别为8m、10m、12m，共200个特征点
     std::vector<double> ring_radii = {8.0, 10.0, 12.0};
@@ -102,7 +102,10 @@ int main() {
             gt_idx++;
         }
 
-        std::cout << "QUAT: GT = " << ground_truth[gt_idx].q << ", EST = " << ekf.state_.orientation << std::endl;
+        auto ypr_gt = ground_truth[gt_idx].q.toRotationMatrix().eulerAngles(2, 1, 0);
+        auto ypr_est = ekf.state_.orientation.toRotationMatrix().eulerAngles(2, 1, 0);
+//        std::cout << "QUAT: GT = " << ground_truth[gt_idx].q << ", EST = " << ekf.state_.orientation << std::endl;
+        std::cout << "YPR: GT = " << ypr_gt.transpose() << ", EST = " << ypr_est.transpose() << std::endl;
         std::cout << "POS: GT = " << ground_truth[gt_idx].p.transpose() << ", EST = " << ekf.state_.position.transpose() << std::endl;
         std::cout << "VEL: GT = " << ground_truth[gt_idx].v.transpose() << ", EST = " << ekf.state_.velocity.transpose() << std::endl;
         std::cout << "BG: EST = " << ekf.state_.gyro_bias.transpose() << std::endl;
