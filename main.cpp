@@ -38,11 +38,11 @@ int main() {
     simulator.setImuNoise(0.01, 0.01, 0.001, 0.001);  // IMU噪声参数
 
     // 配置轨迹：半径5m，速度1m/s，持续20s
-    simulator.setTrajectoryParams(10.0, 1.0, 20.0);
+    simulator.setTrajectoryParams(10.0, 1.0, 200.0);
 
     // 配置环形特征点：3个同心圆环，半径分别为3m、5m、7m，共200个特征点
     std::vector<double> ring_radii = {3.0, 5.0, 7.0};
-    simulator.setCircularFeaturesParams(200, ring_radii, Eigen::Vector3d(0, 0, 1.5));
+    simulator.setCircularFeaturesParams(1000, ring_radii, Eigen::Vector3d(0, 0, 1.5));
 #else
     // 创建模拟器
     VIOFrontendSimulator simulator;
@@ -51,11 +51,11 @@ int main() {
     simulator.setImuNoise(0.01, 0.01, 0.001, 0.001);  // IMU噪声参数
 
     // 配置轨迹：半径5m，速度1m/s，持续20s
-    simulator.setTrajectoryParams(5.0, 1.0, 100.0);
+    simulator.setTrajectoryParams(5.0, 1.0, 200.0);
 
     // 配置环形特征点：3个同心圆环，半径分别为8m、10m、12m，共200个特征点
     std::vector<double> ring_radii = {8.0, 10.0, 12.0};
-    simulator.setCircularFeaturesParams(200, ring_radii, Eigen::Vector3d(0, 0, 1.5));
+    simulator.setCircularFeaturesParams(1000, ring_radii, Eigen::Vector3d(0, 0, 1.5));
 #endif
 
     // 生成模拟数据

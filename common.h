@@ -63,7 +63,7 @@ namespace slam {
 
     // INS 状态
     struct INSState {
-        constexpr static bool ESTIMATE_GRAVITY = false;
+        constexpr static bool ESTIMATE_GRAVITY = true;
 
         constexpr static int Q = 0;
         constexpr static int P = Q + 3;

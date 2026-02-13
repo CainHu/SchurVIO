@@ -360,8 +360,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     }
 
 
-//#define USE_QR
-#define USE_SCHUR
+#define USE_QR
+//#define USE_SCHUR
 #if defined(USE_QR)
     auto t1 = clock();
 
@@ -818,11 +818,12 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     // 更新 landmark
     // 量测方程为 gl = Hll * x + Hll * n
     for (size_t i = 0; i < ids.size(); ++i) {
-        auto id = ids[i];
+        auto id = ids[i].first;
+        auto lmk = ids[i].second;
         auto index = i * LMK_SIZE;
 
         auto &&el = gl.segment<3>(index);
-        auto &&cov_p = lmk_[id].cov_p;
+        auto &&cov_p = lmk->cov_position;
         auto &&hll = Hll.block<3, 3>(index, index);
 
 //        const auto R = uv_var / dt;
@@ -854,7 +855,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 
         VecX dx_l = KT.transpose() * el;
 
-        lmk_[id].updateState(dx_l);
+        lmk->position += dx_l;
 //        std::cout << "id = " << id << ", dx_l = " << dx_l.transpose() << std::endl;
     }
 #endif
@@ -865,6 +866,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     t_cost_ += t2 - t1;
     ++posterior_times_;
 
+#else
+    
 #endif
 
     // 移除一帧
