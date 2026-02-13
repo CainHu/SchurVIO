@@ -128,7 +128,7 @@ std::vector<ImuData> VIOFrontendSimulator1::generateImuData(const std::vector<St
         // 计算理想加速度（机体坐标系）
         Eigen::Vector3d acc_ideal = curr.q.inverse() * ((curr.v - prev.v) / dt - g);
         // 添加偏置和噪声
-        std::normal_distribution<double> acc_noise(0, imu_acc_noise_std_);
+        std::normal_distribution<double> acc_noise(0, imu_acc_noise_std_ / sqrt(imu_rate_));
         data.accel = acc_ideal + curr.ba + Eigen::Vector3d(acc_noise(random_generator_),
                                                            acc_noise(random_generator_),
                                                            acc_noise(random_generator_));
@@ -139,7 +139,7 @@ std::vector<ImuData> VIOFrontendSimulator1::generateImuData(const std::vector<St
 //        if (dq.w() < 0) gyro_ideal = -gyro_ideal;  // 确保最短路径
         Eigen::Vector3d gyro_ideal = slam::quat2vec(dq) / dt;
         // 添加偏置和噪声
-        std::normal_distribution<double> gyro_noise(0, imu_gyro_noise_std_);
+        std::normal_distribution<double> gyro_noise(0, imu_gyro_noise_std_ / sqrt(imu_rate_));
         data.gyro = gyro_ideal + curr.bg + Eigen::Vector3d(gyro_noise(random_generator_),
                                                            gyro_noise(random_generator_),
                                                            gyro_noise(random_generator_));
