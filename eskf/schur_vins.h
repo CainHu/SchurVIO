@@ -62,7 +62,7 @@ namespace slam {
         void predict(const IMUData& imu_data, double dt);
 
         //
-        void pushFrame(const CameraData &cam_data);
+        void pushFrame(const CameraData &cam_data, bool is_keyframe);
         void popFrame();
 
         // 更新 map

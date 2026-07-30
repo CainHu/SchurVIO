@@ -18,7 +18,7 @@ if(MINGW)
 endif()
 
 
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall -g -march=native -fopenmp")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall -march=native -fopenmp")
 
 #set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall -g -march=native -Xpreprocessor -fopenmp")
 #set(OpenMP_C_FLAGS "-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include")

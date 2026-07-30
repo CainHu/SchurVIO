@@ -27,30 +27,50 @@ namespace slam {
 
         Landmark *addLandmark(LandmarkID id);
 
+        // 判断是否为关键帧
         template<typename IMG_INFO>
-        bool pushImageInfo(const IMG_INFO &image_info) {
+        bool isKeyFrame(const IMG_INFO &image_info) {
             // 特征点过少, 直接丢弃
             if (image_info.measurements.size() < 10) {
-                std::cerr << "Features are not enough" << std::endl;
                 return false;
             }
 
-            // TODO: 判断是否为 Key Frame
+            // 判断是否为 Key Frame
             if (!sfw.empty() && sfw.getLatestFrame()->timestamp + 200000 > image_info.timestamp) {
-//                std::cout << "Not Key Frame" << std::endl;
                 return false;
             }
-//            std::cout << "Find Key Frame" << std::endl;
 
-            // Create Frame
+            return true;
+        }
+
+        // 将帧加入滑窗（仅关键帧）
+        Frame* pushKeyFrame(Tus timestamp) {
             auto frame = pool_frm.allocate();
             sfw.pushFrame(frame);
-            frame->timestamp = image_info.timestamp;
-            frame->id = image_info.timestamp;
+            frame->timestamp = timestamp;
+            frame->id = timestamp;
             frame->ordering = sfw.getLatestIndex();
+            frame->is_key_frame = true;
 
             std::cout << "frame->ordering = " << frame->ordering << std::endl;
 
+            return frame;
+        }
+
+        // 创建临时帧（非关键帧），不加入滑窗，仅用于观测关联
+        Frame* createTempFrame(Tus timestamp) {
+            auto frame = pool_frm.allocate();
+            frame->timestamp = timestamp;
+            frame->id = timestamp;
+            frame->ordering = 0; // 非关键帧没有ordering
+            frame->is_key_frame = false;
+
+            return frame;
+        }
+
+        // 添加观测到map（关键帧和非关键帧都调用）
+        template<typename IMG_INFO>
+        void addObservations(Frame* frame, const IMG_INFO &image_info) {
             for (const auto &meas : image_info.measurements) {
                 // Create Feature
                 auto fet = pool_fet.allocate();
@@ -89,8 +109,52 @@ namespace slam {
                 // Add Landmark to Feature
                 fet->landmark = lmk;
             }
+        }
 
-            return true;
+        // 删除临时帧（非关键帧用完后清理）
+        void removeTempFrame(Frame* frame) {
+            if (frame->is_key_frame) {
+                std::cerr << "Error: trying to remove a key frame as temp frame!" << std::endl;
+                return;
+            }
+
+            auto frm_id = frame->id;
+            for (auto &it : frame->lmk2fet) {
+                LandmarkID lmk_id = it.first;
+
+                if (auto lmk_it = lmk_map.find(lmk_id); lmk_it != lmk_map.end()) {
+                    Landmark *lmk = lmk_it->second;
+
+                    // 把 Frame 从 Landmark 中删去
+                    lmk->delete_frame(frm_id);
+
+                    // 如果 Landmark 不再与任何 Frame 关联，则删除 Landmark
+                    if (lmk->frm2fet.empty()) {
+                        lmk_map.erase(lmk_id);
+                        pool_lmk.deallocate(lmk, [](Landmark &landmark) {
+                            landmark.reset();
+                        });
+                    }
+                }
+
+                // 删除 Feature
+                Feature *fet = it.second;
+                for (auto &obs : fet->obs) {
+                    if (!obs) {
+                        continue;
+                    }
+                    // 删除 Observation
+                    pool_obs.deallocate(obs, [](Observation &observation) {
+                        observation.reset();
+                    });
+                }
+                pool_fet.deallocate(fet);
+            }
+
+            // 删除 Frame
+            pool_frm.deallocate(frame, [](Frame &frame) {
+                frame.reset();
+            });
         }
 
         void popFrame() {

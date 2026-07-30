@@ -217,38 +217,17 @@ void SchurVINS::predict(const slam::IMUData &imu_data, const double dt) {
     state_.timestamp = imu_data.timestamp;
 }
 
-void SchurVINS::pushFrame(const CameraData &cam_data) {
+void SchurVINS::pushFrame(const CameraData &cam_data, bool is_keyframe) {
     using A = AugState;
 
-//    if (free_sfw_idx_.empty()) {
-//        throw std::invalid_argument("no free space in sfw");
-//    }
-//
-//    if (free_sfw_idx_.size() < WIN_SIZE) {
-//        if (sfw_[latest_free_sfw_idx_].first.timestamp + 500000 > cam_data.timestamp) {
-//            std::cout << "Not Key Frame" << std::endl;
-//            return;
-//        }
-//    }
-//
-//    std::cout << "Key Frame" << std::endl;
-//    std::cout << "q = " << state_.orientation << std::endl;
-//    std::cout << "p = " << state_.position.transpose() << std::endl;
-//
-//    const auto idx = free_sfw_idx_.back();
-//    latest_free_sfw_idx_ = idx;
-//    sfw_[idx].first = AugState {
-//        .timestamp = state_.timestamp,
-//        .orientation = state_.orientation,
-//        .position = state_.position,
-//    };
-//    sfw_[idx].second = cam_data;
-//    free_sfw_idx_.pop_back();
-
-    if (!map_.pushImageInfo(cam_data)) {
+    if (!is_keyframe) {
+        // 非关键帧，不增广状态
         return;
     }
-    auto frm = map_.getWinLatestFrame();
+
+    // 关键帧：创建并加入滑窗
+    std::cout << "Find Key Frame" << std::endl;
+    auto frm = map_.pushKeyFrame(cam_data.timestamp);
     frm->timestamp = state_.timestamp;
     frm->q() = state_.orientation;
     frm->p() = state_.position;
@@ -271,7 +250,7 @@ void SchurVINS::pushFrame(const CameraData &cam_data) {
         cov_.block<A::SIZE, A::SIZE>(i, i).noalias() = cov_.topLeftCorner<A::SIZE, A::SIZE>();
     }
 
-//    std::cout << "Output" << std::endl;
+    std::cout << "Output" << std::endl;
 }
 
 void SchurVINS::popFrame() {
@@ -290,16 +269,49 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     using I = INSState;
     using A = AugState;
 
-    // 加入滑窗, 增广状态
-    pushFrame(cam_data);
+    // 判断是否为关键帧
+    bool is_keyframe = map_.isKeyFrame(cam_data);
 
-    // 滑窗不满，不进行更新
-    if (!map_.isWinFull()) {
-        std::cout << "Sliding Window is not full" << std::endl;
+    if (is_keyframe) {
+        std::cout << "Find Key Frame" << std::endl;
+    } else {
+        std::cout << "Not Key Frame" << std::endl;
+    }
+
+    // 创建帧并添加观测（关键帧和非关键帧都执行）
+    Frame* current_frame = nullptr;
+    if (is_keyframe) {
+        // 关键帧：加入滑窗并增广状态
+        pushFrame(cam_data, true);
+        current_frame = map_.getWinLatestFrame();
+    } else {
+        // 非关键帧：创建临时帧，不加入滑窗
+        current_frame = map_.createTempFrame(cam_data.timestamp);
+        current_frame->timestamp = state_.timestamp;
+        current_frame->q() = state_.orientation;
+        current_frame->p() = state_.position;
+    }
+
+    // 添加当前帧的观测到map
+    map_.addObservations(current_frame, cam_data);
+
+    // 需要至少2帧才能进行视觉更新（用于三角化）
+    size_t current_win_size = map_.sfw.size();
+    if (current_win_size < 2) {
+        std::cout << "Sliding Window has " << current_win_size << " frame(s), skip visual update" << std::endl;
+
+        // 非关键帧用完后立即清理
+        if (!is_keyframe) {
+            map_.removeTempFrame(current_frame);
+        }
         return;
     }
 
-//    std::cout << "Do vision update" << std::endl;
+    std::cout << "Do vision update with " << current_win_size << " keyframes";
+    if (!is_keyframe) {
+        std::cout << " + 1 non-keyframe";
+    }
+    std::cout << std::endl;
 
     // 处理 landmark
 //    std::vector<size_t> ids;
@@ -869,11 +881,18 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     ++posterior_times_;
 
 #else
-    
+
 #endif
 
-    // 移除一帧
-    popFrame();
+    // 非关键帧用完后清理
+    if (!is_keyframe) {
+        map_.removeTempFrame(current_frame);
+    }
+
+    // 移除一帧（仅当是关键帧且窗口已满时才pop滑窗）
+    if (is_keyframe && map_.isWinFull()) {
+        popFrame();
+    }
 }
 
 void SchurVINS::updateState(auto &&dx) {
