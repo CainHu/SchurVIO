@@ -271,7 +271,7 @@ void SchurVINS::pushFrame(const CameraData &cam_data) {
         cov_.block<A::SIZE, A::SIZE>(i, i).noalias() = cov_.topLeftCorner<A::SIZE, A::SIZE>();
     }
 
-    std::cout << "Output" << std::endl;
+//    std::cout << "Output" << std::endl;
 }
 
 void SchurVINS::popFrame() {
@@ -298,6 +298,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         std::cout << "Sliding Window is not full" << std::endl;
         return;
     }
+
+//    std::cout << "Do vision update" << std::endl;
 
     // 处理 landmark
 //    std::vector<size_t> ids;

@@ -31,16 +31,16 @@ namespace slam {
         bool pushImageInfo(const IMG_INFO &image_info) {
             // 特征点过少, 直接丢弃
             if (image_info.measurements.size() < 10) {
-                std::cout << "Features are not enough" << std::endl;
+                std::cerr << "Features are not enough" << std::endl;
                 return false;
             }
 
             // TODO: 判断是否为 Key Frame
             if (!sfw.empty() && sfw.getLatestFrame()->timestamp + 200000 > image_info.timestamp) {
-                std::cout << "Not Key Frame" << std::endl;
+//                std::cout << "Not Key Frame" << std::endl;
                 return false;
             }
-            std::cout << "Find Key Frame" << std::endl;
+//            std::cout << "Find Key Frame" << std::endl;
 
             // Create Frame
             auto frame = pool_frm.allocate();
@@ -110,7 +110,7 @@ namespace slam {
 
                 // 如果 Landmark 不再与任何 Key Frame 关联，则删除 Landmark
                 if (lmk->frm2fet.empty()) {
-                    std::cout << "Deleted Landmark ID = " << lmk_id << std::endl;
+//                    std::cout << "Deleted Landmark ID = " << lmk_id << std::endl;
                     lmk_map.erase(lmk_id);
                     pool_lmk.deallocate(lmk, [](Landmark &landmark) {
                         landmark.reset();
