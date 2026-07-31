@@ -161,6 +161,13 @@ int main() {
     std::cout << "seq state update = " << ekf.t_seq_state_ / S << std::endl;
     std::cout << "lmk pos update   = " << ekf.t_lmk_update_ / S << std::endl;
     std::cout << "mean seq rows    = " << static_cast<double>(ekf.n_seq_rows_) / static_cast<double>(ekf.posterior_times_) << std::endl;
+    std::cout << "--- schur path ---" << std::endl;
+    std::cout << "build H          = " << ekf.t_build_H_ / S << std::endl;
+    std::cout << "schur complement = " << ekf.t_schur_ / S << std::endl;
+    std::cout << "eig+seq state    = " << ekf.t_eig_state_ / S << std::endl;
+    std::cout << "eig+upd lmk      = " << ekf.t_eig_lmk_ / S << std::endl;
+    std::cout << "  of which: Hpp eig = " << ekf.t_eig_decomp_ / S << std::endl;
+    std::cout << "mean K (obs per lmk) = " << static_cast<double>(ekf.n_K_total_) / static_cast<double>(ekf.n_K_count_) << std::endl;
 
 //    std::cout << "数据处理完成" << std::endl;
     return 0;

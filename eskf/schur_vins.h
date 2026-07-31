@@ -117,6 +117,15 @@ namespace slam {
         size_t t_seq_state_ = 0;   // 序贯更新 state (198x198 协方差)
         size_t t_lmk_update_ = 0;  // 更新 landmark 位置
         size_t n_seq_rows_ = 0;    // 序贯更新的行数
+
+        // USE_SCHUR 路径
+        size_t t_build_H_ = 0;     // 构建 Hpp/Hpl/Hll
+        size_t t_schur_ = 0;       // Schur 补
+        size_t t_eig_state_ = 0;   // Hpp 特征分解 + 序贯更新 state
+        size_t t_eig_lmk_ = 0;     // Hll 特征分解 + 更新 landmark
+        size_t t_eig_decomp_ = 0;  // 仅 Hpp 的 SelfAdjointEigenSolver
+        size_t n_K_total_ = 0;     // 每个 landmark 的观测帧数之和
+        size_t n_K_count_ = 0;
     };
 }
 

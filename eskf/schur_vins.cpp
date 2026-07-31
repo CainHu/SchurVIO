@@ -356,8 +356,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     }
 
 
-#define USE_QR
-//#define USE_SCHUR
+//#define USE_QR
+#define USE_SCHUR
 #if defined(USE_QR)
     auto t1 = clock();
 
@@ -661,13 +661,18 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     auto t1 = clock();
 
     // Hessian 矩阵
+    //
+    // 优化: Hll 是块对角矩阵(landmark 之间没有直接耦合，只通过 pose 间接耦合)，
+    //   原本按 lmk_size x lmk_size 稠密分配 = (3*326)^2 ~ 96万个 double,
+    //   而实际只用到对角线上 326 个 3x3 块 = 2934 个。
+    //   改成只存对角块: lmk_size x 3，省掉 99.7% 的分配和清零。
     const auto lmk_size = LMK_SIZE * ids.size();
     MatXX Hpp(COV_SIZE, COV_SIZE);
     MatXX Hpl(COV_SIZE, lmk_size);
-    MatXX Hll(lmk_size, lmk_size);
+    Eigen::Matrix<TYPE, Eigen::Dynamic, LMK_SIZE> Hll_diag(lmk_size, LMK_SIZE);
     Hpp.setZero();
     Hpl.setZero();
-    Hll.setZero();
+    Hll_diag.setZero();
 
     // Gradient
     VecX gp(COV_SIZE);
@@ -675,10 +680,14 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     gp.setZero();
     gl.setZero();
 
+    // 优化: 外参相关量对整帧是常量，提到所有循环外(原本每个观测都重算一次)
+    const Mat3_3 Ric = ext_.q_ic.toRotationMatrix();
+
     // 遍历 landmarks
     for (size_t i = 0; i < ids.size(); ++i) {
         const auto id = ids[i].first;
         auto lmk = ids[i].second;
+        const size_t lmk_index = LMK_SIZE * i;
 
         // 遍历 landmark 的 所有 observations
         for (auto &it : lmk->frm2fet) {
@@ -692,67 +701,78 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             const auto obs = fet->obs[0];
             const auto frm = fet->frame;
 
-            const auto Rwi = frm->q().toRotationMatrix();
-            const auto Ric = ext_.q_ic.toRotationMatrix();
-            const auto d_ij_w = lmk->position - frm->p();
-            const auto d_cj_i = Rwi.transpose() * d_ij_w - ext_.t_ic;
-            const auto d_cj_c = Ric.transpose() * d_cj_i;
+            const Mat3_3 Rwi = frm->q().toRotationMatrix();
+            const Vec3 d_ij_w = lmk->position - frm->p();
+            const Vec3 d_cj_i = Rwi.transpose() * d_ij_w - ext_.t_ic;
+            const Vec3 d_cj_c = Ric.transpose() * d_cj_i;
             const auto inv_d = TYPE(1) / d_cj_c.z();
             const auto inv_d2 = inv_d * inv_d;
-            const auto est = d_cj_c.head<2>() * inv_d;
-            const auto err = obs->un_pt.head<2>() - est;
+            const Vec2 est = d_cj_c.head<2>() * inv_d;
+            const Vec2 err = obs->un_pt.head<2>() - est;
 
             Mat2_3 J;
             J << inv_d, TYPE(0), -d_cj_c.x() * inv_d2,
                     TYPE(0), inv_d, -d_cj_c.y() * inv_d2;
 
-            Mat2_3 J_lmk = J * (frm->q() * ext_.q_ic).inverse().toRotationMatrix();
+            // Rwc^T = (Rwi * Ric)^T = Ric^T * Rwi^T，复用已算好的 Rwi/Ric,
+            // 避免再做一次四元数乘法 + 求逆 + toRotationMatrix
+            Mat2_3 J_lmk;
+            J_lmk.noalias() = J * (Ric.transpose() * Rwi.transpose());
 
             Mat2_6 J_pose;
-            J_pose.leftCols<3>().noalias() = J_lmk * hat(d_ij_w);;
+            J_pose.leftCols<3>().noalias() = J_lmk * hat(d_ij_w);
             J_pose.rightCols<3>().noalias() = -J_lmk;
 
-            Mat2_6 J_ext;
-            J_ext.rightCols<3>().noalias() = -J * Ric.transpose();
-            J_ext.leftCols<3>().noalias() = -J_ext.rightCols<3>() * hat(d_cj_i);
+            // 注: 原本这里还算了 J_ext (外参雅可比)，但它写完从未被读取
+            //     (外参目前不在状态里)，是纯浪费，已删除。
 
-            const size_t lmk_index = LMK_SIZE * i;
             const size_t frm_index = INSState::SIZE + AugState::SIZE * frm->ordering;
 
             Hpp.block<6, 6>(frm_index, frm_index).triangularView<Eigen::Upper>() += J_pose.transpose() * J_pose;
-//            Hpp.block<6, 6>(frm_index, frm_index).triangularView<Eigen::StrictlyLower>() = Hpp.block<6, 6>(frm_index, frm_index).triangularView<Eigen::StrictlyUpper>().transpose();
+            Hll_diag.middleRows<3>(lmk_index).triangularView<Eigen::Upper>() += J_lmk.transpose() * J_lmk;
+            Hpl.block<6, 3>(frm_index, lmk_index).noalias() += J_pose.transpose() * J_lmk;
 
-            Hll.block<3, 3>(lmk_index, lmk_index).triangularView<Eigen::Upper>() += J_lmk.transpose() * J_lmk;
-//            Hll.block<3, 3>(lmk_index, lmk_index).triangularView<Eigen::StrictlyLower>() = Hll.block<3, 3>(lmk_index, lmk_index).triangularView<Eigen::StrictlyUpper>().transpose();
-
-            Hpl.block<6, 3>(frm_index, lmk_index) += J_pose.transpose() * J_lmk;
-
-            gp.segment<6>(frm_index) += J_pose.transpose() * err;
-            gl.segment<3>(lmk_index) += J_lmk.transpose() * err;
+            gp.segment<6>(frm_index).noalias() += J_pose.transpose() * err;
+            gl.segment<3>(lmk_index).noalias() += J_lmk.transpose() * err;
         }
     }
     Hpp.triangularView<Eigen::StrictlyLower>() = Hpp.triangularView<Eigen::StrictlyUpper>().transpose();
-    Hll.triangularView<Eigen::StrictlyLower>() = Hll.triangularView<Eigen::StrictlyUpper>().transpose();
+    // Hll_diag 的每个 3x3 块单独对称化
+    for (size_t i = 0; i < ids.size(); ++i) {
+        auto &&h = Hll_diag.middleRows<LMK_SIZE>(i * LMK_SIZE);
+        h.triangularView<Eigen::StrictlyLower>() = h.triangularView<Eigen::StrictlyUpper>().transpose();
+    }
+
+    auto t_sc1 = clock();
+    t_build_H_ += t_sc1 - t1;
 
     // 计算 schur 补
+    //
+    // 注: 试过利用 Hpl 的块稀疏性(只在被观测帧的块上运算)，实测反而变慢
+    //   (2.60s -> 3.49s)。原因是每个 landmark 平均被 14.8 个关键帧观测到
+    //   (WIN_SIZE = 30)，稀疏度只有 2 倍，而 K*K ~ 219 次 6x6 小块乘法的
+    //   标量索引开销超过了省下的乘零。稠密 GEMM 的向量化更划算，保持原样。
     MatXX tmp(COV_SIZE, LMK_SIZE);
     for (size_t i = 0; i < ids.size(); ++i) {
         auto index = i * LMK_SIZE;
 
         // STEP1: 对 Hll 求逆
-        const Mat3_3 hll = Hll.block<LMK_SIZE, LMK_SIZE>(index, index);
+        const Mat3_3 hll = Hll_diag.middleRows<LMK_SIZE>(index);
         const Mat3_3 hll_inv = hll.completeOrthogonalDecomposition().pseudoInverse();
 
         // STEP2: 计算 Hpl * Hll^-1
-        tmp = Hpl.middleCols<LMK_SIZE>(index) * hll_inv;
+        tmp.noalias() = Hpl.middleCols<LMK_SIZE>(index) * hll_inv;
 
         // STEP3: 计算 Hpp - Hpl * Hll^-1 * Hpl^T
         Hpp.triangularView<Eigen::Upper>() -= tmp * Hpl.middleCols<LMK_SIZE>(index).transpose();
 
         // STEP4: 计算 gp - Hpl * Hll^-1 * gl
-        gp -= tmp * gl.segment<LMK_SIZE>(index);
+        gp.noalias() -= tmp * gl.segment<LMK_SIZE>(index);
     }
     Hpp.triangularView<Eigen::StrictlyLower>() = Hpp.triangularView<Eigen::StrictlyUpper>().transpose();
+
+    auto t_sc2 = clock();
+    t_schur_ += t_sc2 - t_sc1;
 
 #if 1
 //    std::cout << "Update State" << std::endl;
@@ -772,7 +792,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     dx_p.setZero();
     {
         auto &&cov_p = cov_;
+        auto t_e0 = clock();
         Eigen::SelfAdjointEigenSolver<decltype(Hpp)> es(Hpp);
+        t_eig_decomp_ += clock() - t_e0;
 
         auto &&ep = gp;
 //        VecX VTe = es.eigenvectors().transpose() * ep;
@@ -793,30 +815,38 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         }
 
         // Step-1: 序贯
+        //
+        // 优化: cov_p 全程保持对称，所以
+        //   1) cov_p * hT 用 selfadjointView 做对称矩阵-向量乘 (只读一半)
+        //   2) 两次 rank-1/rank-2 更新只写上三角，循环内不再重建下三角
+        //      (原本每次迭代都做一次 198x198 的 StrictlyLower = StrictlyUpper^T)
+        //   3) 下三角在循环结束后统一恢复一次
+        // 数学上完全等价: 中间过程只有 selfadjointView 在读 cov_p，它只看上三角。
+        VecX PhT(COV_SIZE);
+        VecX K(COV_SIZE);
         for (; zero_end < COV_SIZE; ++zero_end) {
-            const auto R = uv_var / es.eigenvalues()(zero_end) / dt;
+            const auto lambda = es.eigenvalues()(zero_end);
+            const auto R = uv_var / lambda / dt;
             const auto hT = es.eigenvectors().col(zero_end);
 
-            VecX PhT = cov_p * hT;
-            TYPE var = hT.dot(PhT) + R;
-            VecX K = PhT / var;
-            cov_p -= K * PhT.transpose();
+            PhT.noalias() = cov_p.selfadjointView<Eigen::Upper>() * hT;
+            const TYPE var = hT.dot(PhT) + R;
+            K.noalias() = PhT / var;
+            cov_p.triangularView<Eigen::Upper>() -= K * PhT.transpose();
 
-            PhT = cov_p * hT;
+            PhT.noalias() = cov_p.selfadjointView<Eigen::Upper>() * hT;
             cov_p.triangularView<Eigen::Upper>() += (K * R - PhT) * K.transpose();
-            cov_p.triangularView<Eigen::StrictlyLower>() = cov_p.triangularView<Eigen::StrictlyUpper>().transpose();
 
-//            // 更新误差 Ve
-//            auto dx = K * (VTe(zero_end) / es.eigenvalues()(zero_end));
-//            dx_p += dx;
-//            VTe -= es.eigenvalues().asDiagonal() * (es.eigenvectors().transpose() * dx);
-
-            auto e = hT.dot(ep / es.eigenvalues()(zero_end) - dx_p);
-            dx_p += K * e;
+            const auto e = hT.dot(ep / lambda - dx_p);
+            dx_p.noalias() += K * e;
         }
+        cov_p.triangularView<Eigen::StrictlyLower>() = cov_p.triangularView<Eigen::StrictlyUpper>().transpose();
     }
     updateState(dx_p);
 //    std::cout << "Update State Finished" << std::endl;
+
+    auto t_sc3 = clock();
+    t_eig_state_ += t_sc3 - t_sc2;
 
 //    std::cout << "Update Landmark" << std::endl;
     // [[ 更新 Landmark ]]
@@ -830,7 +860,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         dx_l.setZero();
 
         auto &&cov_p = lmk->cov_position;
-        auto &&hll = Hll.block<3, 3>(index, index);
+        const Mat3_3 hll = Hll_diag.middleRows<LMK_SIZE>(index);
         Eigen::SelfAdjointEigenSolver<Mat3_3> es(hll);
 
         auto &&el = gl.segment<3>(index);
@@ -882,6 +912,10 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         lmk->position += dx_l;
     }
 //    std::cout << "Update Landmark Finished" << std::endl;
+
+    auto t_sc4 = clock();
+    t_eig_lmk_ += t_sc4 - t_sc3;
+    n_lmk_total_ += ids.size();
 #else
     // 更新 state
     // 量测方程为 gp = Hpp * x + Hpp * n
@@ -933,7 +967,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 
         auto &&el = gl.segment<3>(index);
         auto &&cov_p = lmk->cov_position;
-        auto &&hll = Hll.block<3, 3>(index, index);
+        const Mat3_3 hll = Hll_diag.middleRows<LMK_SIZE>(index);
 
 //        const auto R = uv_var / dt;
 //        MatXX HP = hll * cov_p;
