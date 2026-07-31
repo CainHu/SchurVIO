@@ -226,7 +226,7 @@ void SchurVINS::pushFrame(const CameraData &cam_data, bool is_keyframe) {
     }
 
     // 关键帧：创建并加入滑窗
-    std::cout << "Find Key Frame" << std::endl;
+//    std::cout << "Find Key Frame" << std::endl;
     auto frm = map_.pushKeyFrame(cam_data.timestamp);
     frm->timestamp = state_.timestamp;
     frm->q() = state_.orientation;
@@ -250,7 +250,7 @@ void SchurVINS::pushFrame(const CameraData &cam_data, bool is_keyframe) {
         cov_.block<A::SIZE, A::SIZE>(i, i).noalias() = cov_.topLeftCorner<A::SIZE, A::SIZE>();
     }
 
-    std::cout << "Output" << std::endl;
+//    std::cout << "Output" << std::endl;
 }
 
 void SchurVINS::popFrame() {
@@ -272,46 +272,40 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     // 判断是否为关键帧
     bool is_keyframe = map_.isKeyFrame(cam_data);
 
-    if (is_keyframe) {
-        std::cout << "Find Key Frame" << std::endl;
-    } else {
-        std::cout << "Not Key Frame" << std::endl;
-    }
+//    if (is_keyframe) {
+//        std::cout << "Find Key Frame" << std::endl;
+//    } else {
+//        std::cout << "Not Key Frame" << std::endl;
+//    }
 
-    // 创建帧并添加观测（关键帧和非关键帧都执行）
-    Frame* current_frame = nullptr;
+    // 关键帧：加入滑窗并增广状态
     if (is_keyframe) {
-        // 关键帧：加入滑窗并增广状态
         pushFrame(cam_data, true);
-        current_frame = map_.getWinLatestFrame();
+        auto current_frame = map_.getWinLatestFrame();
+        // 添加关键帧的观测到map
+        map_.addObservations(current_frame, cam_data);
     } else {
-        // 非关键帧：创建临时帧，不加入滑窗
-        current_frame = map_.createTempFrame(cam_data.timestamp);
-        current_frame->timestamp = state_.timestamp;
-        current_frame->q() = state_.orientation;
-        current_frame->p() = state_.position;
+        // 非关键帧：填充到临时缓冲区
+        map_.fillTempBuffer(cam_data, cam_data.timestamp, state_.orientation, state_.position);
     }
-
-    // 添加当前帧的观测到map
-    map_.addObservations(current_frame, cam_data);
 
     // 需要至少2帧才能进行视觉更新（用于三角化）
     size_t current_win_size = map_.sfw.size();
     if (current_win_size < 2) {
-        std::cout << "Sliding Window has " << current_win_size << " frame(s), skip visual update" << std::endl;
+//        std::cout << "Sliding Window has " << current_win_size << " frame(s), skip visual update" << std::endl;
 
-        // 非关键帧用完后立即清理
+        // 非关键帧清空缓冲区
         if (!is_keyframe) {
-            map_.removeTempFrame(current_frame);
+            map_.clearTempBuffer();
         }
         return;
     }
 
-    std::cout << "Do vision update with " << current_win_size << " keyframes";
-    if (!is_keyframe) {
-        std::cout << " + 1 non-keyframe";
-    }
-    std::cout << std::endl;
+//    std::cout << "Do vision update with " << current_win_size << " keyframes";
+//    if (!is_keyframe) {
+//        std::cout << " + 1 non-keyframe";
+//    }
+//    std::cout << std::endl;
 
     // 处理 landmark
 //    std::vector<size_t> ids;
@@ -333,42 +327,60 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 //#define ONE_SHOT
 
     size_t num_obs = 0;
-    FrameID curr_frame_id = map_.getWinLatestFrame()->id;
     static std::vector<std::pair<LandmarkID, Landmark*>> ids;
     ids.resize(map_.lmk_map.size());
     ids.clear();
+
+    // 统计观测数量（只处理至少被2个关键帧观测到的landmark）
     for (const auto &it : map_.lmk_map) {
         const auto id = it.first;
         auto lmk = it.second;
-#ifdef ONE_SHOT
-        if (auto iter = lmk->frm2fet.find(curr_frame_id); iter != lmk->frm2fet.end()) {
+
+        // 关键帧的观测数量
+        size_t keyframe_obs = lmk->frm2fet.size();
+
+        // 至少需要2个关键帧观测才能进行滑窗优化
+        if (keyframe_obs > 1) {
             ids.emplace_back(id, lmk);
-            num_obs += 1;
+            num_obs += keyframe_obs;
             // TODO: 三角化
             if (!lmk->is_triangulated) {
                 lmk->position = lmk_map.at(id);
                 lmk->is_triangulated = true;
             }
         }
-#else
-        if (lmk->frm2fet.size() > 1) {
-//            std::cout << "lmk->frm2fet.size() = " << lmk->frm2fet.size() << std::endl;
-            ids.emplace_back(id, lmk);
-            num_obs += lmk->frm2fet.size();
-            // TODO: 三角化
-            if (!lmk->is_triangulated) {
-                lmk->position = lmk_map.at(id);
-                lmk->is_triangulated = true;
-            }
-        }
-#endif
     }
 
-    std::cout << "There are " << ids.size() << " Triangulated Landmarks" << std::endl;
+    // 如果是非关键帧，还需要考虑那些只有1个关键帧观测但被临时帧观测到的landmark
+    // 这些landmark不参与滑窗优化，但可以用临时帧观测来初始化/refine
+    static std::vector<std::pair<LandmarkID, Landmark*>> temp_only_ids;
+    temp_only_ids.clear();
+    if (!is_keyframe) {
+        for (const auto &[lmk_id, fet] : map_.temp_buffer.lmk_to_feature) {
+            auto lmk = fet->landmark;
+            // 只有1个关键帧观测，加上临时帧观测凑成2个
+            if (lmk->frm2fet.size() == 1) {
+                temp_only_ids.emplace_back(lmk_id, lmk);
+                if (!lmk->is_triangulated) {
+                    lmk->position = lmk_map.at(lmk_id);
+                    lmk->is_triangulated = true;
+                }
+            }
+        }
+    }
+
+    // std::cout << "There are " << ids.size() << " Triangulated Landmarks" << std::endl;
 
     if (ids.empty()) {
-        // 移除一帧
-        popFrame();
+        // 非关键帧清空缓冲区
+        if (!is_keyframe) {
+            map_.clearTempBuffer();
+        }
+
+        // 关键帧且窗口满才移除一帧
+        if (is_keyframe && map_.isWinFull()) {
+            popFrame();
+        }
 
         return;
     }
@@ -401,7 +413,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         auto lmk = ids[i].second;
         pose_order.clear();
 
-        // 遍历 landmark 的所有观测
+        // 遍历关键帧的观测（只处理滑窗内的关键帧）
         for (auto &it : lmk->frm2fet) {
             const auto fet = it.second;
             const auto obs = fet->obs[0];
@@ -442,7 +454,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             pose_order.emplace_back(frm->ordering);
         }
 
-        // QR 分解
+        // 注意：非关键帧的观测暂不在这里处理，稍后单独更新 landmark
         // Measurement Equation: [J_POSE, J_LMK] * [dxp; dxl] = e
         // QR Decomposition: J_LMK = Q * [R; 0] * P^-1 = [Q1, Q2] * [R; 0] * P^-1
         // We have:
@@ -555,6 +567,122 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             dx_l += K * e;
         }
         lmk->position += dx_l;
+    }
+
+    // 如果是非关键帧，用临时缓冲区的观测进一步refine landmark
+    if (!is_keyframe) {
+        // 1. 更新已经参与滑窗优化的landmark（>=2个关键帧观测）
+        for (size_t i = 0; i < ids.size(); ++i) {
+            const auto id = ids[i].first;
+            auto lmk = ids[i].second;
+
+            // 检查临时缓冲区是否有此landmark的观测
+            auto temp_it = map_.temp_buffer.lmk_to_feature.find(id);
+            if (temp_it == map_.temp_buffer.lmk_to_feature.end()) {
+                continue;
+            }
+
+            const auto fet = temp_it->second;
+            const auto obs = fet->obs[0];
+            const auto frm = &map_.temp_buffer.temp_frame;
+
+            // 计算残差和雅可比
+            const auto Rwi = frm->q().toRotationMatrix();
+            const auto Ric = ext_.q_ic.toRotationMatrix();
+            const auto d_ij_w = lmk->position - frm->p();
+            const auto d_cj_i = Rwi.transpose() * d_ij_w - ext_.t_ic;
+            const auto d_cj_c = Ric.transpose() * d_cj_i;
+            const auto inv_d = TYPE(1) / d_cj_c.z();
+            const auto inv_d2 = inv_d * inv_d;
+            const auto est = d_cj_c.head<2>() * inv_d;
+            const auto err = obs->un_pt.head<2>() - est;
+
+            Mat2_3 J;
+            J << inv_d, TYPE(0), -d_cj_c.x() * inv_d2,
+                    TYPE(0), inv_d, -d_cj_c.y() * inv_d2;
+
+            Mat2_3 J_lmk = J * (frm->q() * ext_.q_ic).inverse().toRotationMatrix();
+
+            // 用这个观测更新landmark（简化的EKF更新）
+            auto &&cov_l = lmk->cov_position;
+            VecX dx_l = VecX::Zero(LMK_SIZE);
+
+            for (size_t j = 0; j < 2; ++j) {  // 2个残差分量（u, v）
+                Vec3 hT = J_lmk.row(j).transpose();
+
+                const auto r = uv_var / dt;
+                Vec3 PhT = cov_l * hT;
+                TYPE var = hT.dot(PhT) + r;
+                Vec3 K = PhT / var;
+                cov_l -= K * PhT.transpose();
+
+                PhT = cov_l * hT;
+                cov_l.triangularView<Eigen::Upper>() += (K * r - PhT) * K.transpose();
+                cov_l.triangularView<Eigen::StrictlyLower>() = cov_l.triangularView<Eigen::StrictlyUpper>().transpose();
+
+                auto e = err(j) - hT.dot(dx_l);
+                dx_l += K * e;
+            }
+            lmk->position += dx_l;
+        }
+
+        // 2. 处理只有1个关键帧观测+临时帧观测的landmark（没有参与滑窗优化）
+        for (const auto &[id, lmk] : temp_only_ids) {
+            auto temp_it = map_.temp_buffer.lmk_to_feature.find(id);
+            if (temp_it == map_.temp_buffer.lmk_to_feature.end()) {
+                continue;
+            }
+
+            const auto fet = temp_it->second;
+            const auto obs = fet->obs[0];
+            const auto frm = &map_.temp_buffer.temp_frame;
+
+            // 获取关键帧的观测
+            if (lmk->frm2fet.empty()) continue;
+            auto kf_it = lmk->frm2fet.begin();
+            const auto kf_fet = kf_it->second;
+            const auto kf_obs = kf_fet->obs[0];
+            const auto kf_frm = kf_fet->frame;
+
+            // 用两个观测(关键帧+临时帧)来优化landmark
+            // 这里简化处理：只用临时帧观测
+            const auto Rwi = frm->q().toRotationMatrix();
+            const auto Ric = ext_.q_ic.toRotationMatrix();
+            const auto d_ij_w = lmk->position - frm->p();
+            const auto d_cj_i = Rwi.transpose() * d_ij_w - ext_.t_ic;
+            const auto d_cj_c = Ric.transpose() * d_cj_i;
+            const auto inv_d = TYPE(1) / d_cj_c.z();
+            const auto inv_d2 = inv_d * inv_d;
+            const auto est = d_cj_c.head<2>() * inv_d;
+            const auto err = obs->un_pt.head<2>() - est;
+
+            Mat2_3 J;
+            J << inv_d, TYPE(0), -d_cj_c.x() * inv_d2,
+                    TYPE(0), inv_d, -d_cj_c.y() * inv_d2;
+
+            Mat2_3 J_lmk = J * (frm->q() * ext_.q_ic).inverse().toRotationMatrix();
+
+            auto &&cov_l = lmk->cov_position;
+            VecX dx_l = VecX::Zero(LMK_SIZE);
+
+            for (size_t j = 0; j < 2; ++j) {
+                Vec3 hT = J_lmk.row(j).transpose();
+
+                const auto r = uv_var / dt;
+                Vec3 PhT = cov_l * hT;
+                TYPE var = hT.dot(PhT) + r;
+                Vec3 K = PhT / var;
+                cov_l -= K * PhT.transpose();
+
+                PhT = cov_l * hT;
+                cov_l.triangularView<Eigen::Upper>() += (K * r - PhT) * K.transpose();
+                cov_l.triangularView<Eigen::StrictlyLower>() = cov_l.triangularView<Eigen::StrictlyUpper>().transpose();
+
+                auto e = err(j) - hT.dot(dx_l);
+                dx_l += K * e;
+            }
+            lmk->position += dx_l;
+        }
     }
 
 
@@ -753,9 +881,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 //        }
 #ifdef ONE_SHOT
 #else
-        if (zero_end != 0) {
-            std::cerr << "zero_end = " << zero_end << ", eigen value = " << es.eigenvalues().transpose() << std::endl;
-        }
+//        if (zero_end != 0) {
+//            std::cerr << "zero_end = " << zero_end << ", eigen value = " << es.eigenvalues().transpose() << std::endl;
+//        }
 #endif
         if (zero_end == LMK_SIZE) {
             std::cerr << "id = " << id << ", eigen value = " << es.eigenvalues().transpose() << std::endl;
@@ -884,9 +1012,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 
 #endif
 
-    // 非关键帧用完后清理
+    // 非关键帧清空缓冲区
     if (!is_keyframe) {
-        map_.removeTempFrame(current_frame);
+        map_.clearTempBuffer();
     }
 
     // 移除一帧（仅当是关键帧且窗口已满时才pop滑窗）

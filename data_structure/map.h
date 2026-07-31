@@ -19,10 +19,32 @@ namespace slam {
     using FrameVector = std::vector<Frame *>;
     using LandmarkMap = std::unordered_map<LandmarkID, Landmark *>;
 
+    // 临时观测缓冲区（用于非关键帧）
+    struct TempObservationBuffer {
+        Frame temp_frame;
+        std::vector<Feature> temp_features;
+        std::vector<Observation> temp_observations;
+        std::unordered_map<LandmarkID, Feature*> lmk_to_feature;
+
+        void clear() {
+            lmk_to_feature.clear();
+            temp_frame.reset();
+            // features 和 observations 保留容量，不释放内存
+        }
+
+        void reserve(size_t n) {
+            temp_features.reserve(n);
+            temp_observations.reserve(n);
+            lmk_to_feature.reserve(n);
+        }
+    };
+
     struct Map {
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
 
-        Map() = default;
+        Map() {
+            temp_buffer.reserve(500);  // 预分配500个特征点的空间
+        }
         ~Map() = default;
 
         Landmark *addLandmark(LandmarkID id);
@@ -52,7 +74,7 @@ namespace slam {
             frame->ordering = sfw.getLatestIndex();
             frame->is_key_frame = true;
 
-            std::cout << "frame->ordering = " << frame->ordering << std::endl;
+//            std::cout << "frame->ordering = " << frame->ordering << std::endl;
 
             return frame;
         }
@@ -111,50 +133,59 @@ namespace slam {
             }
         }
 
-        // 删除临时帧（非关键帧用完后清理）
-        void removeTempFrame(Frame* frame) {
-            if (frame->is_key_frame) {
-                std::cerr << "Error: trying to remove a key frame as temp frame!" << std::endl;
-                return;
-            }
+        // 填充临时观测缓冲区（用于非关键帧）
+        template<typename IMG_INFO>
+        void fillTempBuffer(const IMG_INFO &image_info, Tus timestamp, const Quat& q, const Vec3& p) {
+            temp_buffer.clear();
 
-            auto frm_id = frame->id;
-            for (auto &it : frame->lmk2fet) {
-                LandmarkID lmk_id = it.first;
+            temp_buffer.temp_frame.timestamp = timestamp;
+            temp_buffer.temp_frame.id = timestamp;
+            temp_buffer.temp_frame.q() = q;
+            temp_buffer.temp_frame.p() = p;
+            temp_buffer.temp_frame.is_key_frame = false;
 
-                if (auto lmk_it = lmk_map.find(lmk_id); lmk_it != lmk_map.end()) {
-                    Landmark *lmk = lmk_it->second;
+            size_t idx = 0;
+            for (const auto &meas : image_info.measurements) {
+                const auto lmk_id = meas.first;
 
-                    // 把 Frame 从 Landmark 中删去
-                    lmk->delete_frame(frm_id);
-
-                    // 如果 Landmark 不再与任何 Frame 关联，则删除 Landmark
-                    if (lmk->frm2fet.empty()) {
-                        lmk_map.erase(lmk_id);
-                        pool_lmk.deallocate(lmk, [](Landmark &landmark) {
-                            landmark.reset();
-                        });
-                    }
+                // 只处理已存在于map中的landmark（被关键帧观测过的）
+                if (lmk_map.find(lmk_id) == lmk_map.end()) {
+                    continue;
                 }
 
-                // 删除 Feature
-                Feature *fet = it.second;
-                for (auto &obs : fet->obs) {
-                    if (!obs) {
-                        continue;
-                    }
-                    // 删除 Observation
-                    pool_obs.deallocate(obs, [](Observation &observation) {
-                        observation.reset();
-                    });
+                // 复用预分配的空间
+                if (idx >= temp_buffer.temp_features.size()) {
+                    temp_buffer.temp_features.emplace_back();
+                    temp_buffer.temp_observations.emplace_back();
                 }
-                pool_fet.deallocate(fet);
+
+                Feature& fet = temp_buffer.temp_features[idx];
+                Observation& obs = temp_buffer.temp_observations[idx];
+
+                // 设置 observation
+                obs.un_pt = Vec3(meas.second.x(), meas.second.y(), 1);
+                obs.camera_id = 0;
+                obs.fet = &fet;
+
+                // 设置 feature
+                fet.frame = &temp_buffer.temp_frame;
+                fet.obs[0] = &obs;
+                fet.landmark = lmk_map[lmk_id];
+
+                // 建立索引
+                temp_buffer.lmk_to_feature[lmk_id] = &fet;
+
+                idx++;
             }
 
-            // 删除 Frame
-            pool_frm.deallocate(frame, [](Frame &frame) {
-                frame.reset();
-            });
+            // 调整实际使用的大小
+            temp_buffer.temp_features.resize(idx);
+            temp_buffer.temp_observations.resize(idx);
+        }
+
+        // 清空临时缓冲区
+        void clearTempBuffer() {
+            temp_buffer.clear();
         }
 
         void popFrame() {
@@ -227,6 +258,7 @@ namespace slam {
 
         SlidingWindow sfw {N_WIN};
         LandmarkMap lmk_map;
+        TempObservationBuffer temp_buffer;  // 临时观测缓冲区
     };
 }
 

@@ -73,11 +73,11 @@ int main() {
 //    std::cout << "特征点数量: " << simulator.getFeaturePositions().size() << std::endl;
 
 
-    std::cout << "feature_positions.size() = " << feature_positions.size() << std::endl;
-
-    std::cout << "q:\n" << ground_truth[0].q << std::endl;
-    std::cout << "p:\n" << ground_truth[0].p << std::endl;
-    std::cout << "v:\n" << ground_truth[0].v << std::endl;
+//    std::cout << "feature_positions.size() = " << feature_positions.size() << std::endl;
+//
+//    std::cout << "q:\n" << ground_truth[0].q << std::endl;
+//    std::cout << "p:\n" << ground_truth[0].p << std::endl;
+//    std::cout << "v:\n" << ground_truth[0].v << std::endl;
 
     // 初始化EKF后端
     slam::Map map;
@@ -109,9 +109,9 @@ int main() {
             std::cout << "YPR: GT = " << ypr_gt.transpose() << ", EST = " << ypr_est.transpose() << std::endl;
             std::cout << "POS: GT = " << ground_truth[gt_idx].p.transpose() << ", EST = " << ekf.state_.position.transpose() << std::endl;
             std::cout << "VEL: GT = " << ground_truth[gt_idx].v.transpose() << ", EST = " << ekf.state_.velocity.transpose() << std::endl;
-            std::cout << "BG: EST = " << ekf.state_.gyro_bias.transpose() << std::endl;
-            std::cout << "BA: EST = " << ekf.state_.accel_bias.transpose() << std::endl;
-            std::cout << "G: EST = " << ekf.state_.gravity.transpose() << std::endl;
+//            std::cout << "BG: EST = " << ekf.state_.gyro_bias.transpose() << std::endl;
+//            std::cout << "BA: EST = " << ekf.state_.accel_bias.transpose() << std::endl;
+//            std::cout << "G: EST = " << ekf.state_.gravity.transpose() << std::endl;
         }
 
         for (auto &it : cam_data.measurements) {
@@ -152,6 +152,6 @@ int main() {
     std::cout << "t_cost = " << cost << std::endl;
     std::cout << "mean cost = " << cost / static_cast<double>(ekf.posterior_times_) << std::endl;
 
-    std::cout << "数据处理完成" << std::endl;
+//    std::cout << "数据处理完成" << std::endl;
     return 0;
 }
