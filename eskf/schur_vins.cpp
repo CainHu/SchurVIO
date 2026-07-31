@@ -279,25 +279,18 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 //    }
 
     // 关键帧：加入滑窗并增广状态
+    // 非关键帧：Zero-copy，什么都不做，观测在后面直接从 cam_data 读取
     if (is_keyframe) {
         pushFrame(cam_data, true);
         auto current_frame = map_.getWinLatestFrame();
         // 添加关键帧的观测到map
         map_.addObservations(current_frame, cam_data);
-    } else {
-        // 非关键帧：填充到临时缓冲区
-        map_.fillTempBuffer(cam_data, cam_data.timestamp, state_.orientation, state_.position);
     }
 
     // 需要至少2帧才能进行视觉更新（用于三角化）
     size_t current_win_size = map_.sfw.size();
     if (current_win_size < 2) {
 //        std::cout << "Sliding Window has " << current_win_size << " frame(s), skip visual update" << std::endl;
-
-        // 非关键帧清空缓冲区
-        if (!is_keyframe) {
-            map_.clearTempBuffer();
-        }
         return;
     }
 
@@ -351,32 +344,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         }
     }
 
-    // 如果是非关键帧，还需要考虑那些只有1个关键帧观测但被临时帧观测到的landmark
-    // 这些landmark不参与滑窗优化，但可以用临时帧观测来初始化/refine
-    static std::vector<std::pair<LandmarkID, Landmark*>> temp_only_ids;
-    temp_only_ids.clear();
-    if (!is_keyframe) {
-        for (const auto &[lmk_id, fet] : map_.temp_buffer.lmk_to_feature) {
-            auto lmk = fet->landmark;
-            // 只有1个关键帧观测，加上临时帧观测凑成2个
-            if (lmk->frm2fet.size() == 1) {
-                temp_only_ids.emplace_back(lmk_id, lmk);
-                if (!lmk->is_triangulated) {
-                    lmk->position = lmk_map.at(lmk_id);
-                    lmk->is_triangulated = true;
-                }
-            }
-        }
-    }
-
     // std::cout << "There are " << ids.size() << " Triangulated Landmarks" << std::endl;
 
     if (ids.empty()) {
-        // 非关键帧清空缓冲区
-        if (!is_keyframe) {
-            map_.clearTempBuffer();
-        }
-
         // 关键帧且窗口满才移除一帧
         if (is_keyframe && map_.isWinFull()) {
             popFrame();
@@ -569,116 +539,74 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         lmk->position += dx_l;
     }
 
-    // 如果是非关键帧，用临时缓冲区的观测进一步refine landmark
+    // 方案4（Zero-copy）：非关键帧的观测直接从 cam_data 读取来 refine landmark，
+    // 不创建 Frame / Feature / Observation，也不写入 lmk_map 的持久关联。
+    // 位姿直接用当前状态 state_，即"临时帧"的位姿。
     if (!is_keyframe) {
-        // 1. 更新已经参与滑窗优化的landmark（>=2个关键帧观测）
-        for (size_t i = 0; i < ids.size(); ++i) {
-            const auto id = ids[i].first;
-            auto lmk = ids[i].second;
+        // 这些量对整帧都是常量，提到循环外
+        const Mat3_3 Ric = ext_.q_ic.toRotationMatrix();
+        const Mat3_3 Rwi_T = state_.orientation.toRotationMatrix().transpose();
+        const Mat3_3 Rwc_T = (state_.orientation * ext_.q_ic).inverse().toRotationMatrix();
+        const auto &p_wi = state_.position;
+        const auto r = uv_var / dt;
 
-            // 检查临时缓冲区是否有此landmark的观测
-            auto temp_it = map_.temp_buffer.lmk_to_feature.find(id);
-            if (temp_it == map_.temp_buffer.lmk_to_feature.end()) {
+        for (const auto &meas : cam_data.measurements) {
+            const auto lmk_id = meas.first;
+
+            // 只处理已被关键帧观测过的 landmark
+            auto lmk_it = map_.lmk_map.find(lmk_id);
+            if (lmk_it == map_.lmk_map.end()) {
+                continue;
+            }
+            auto lmk = lmk_it->second;
+
+            // 至少有 1 个关键帧观测，加上本帧观测才能约束
+            if (lmk->frm2fet.empty()) {
                 continue;
             }
 
-            const auto fet = temp_it->second;
-            const auto obs = fet->obs[0];
-            const auto frm = &map_.temp_buffer.temp_frame;
+            // TODO: 三角化
+            if (!lmk->is_triangulated) {
+                if (auto gt_it = lmk_map.find(lmk_id); gt_it != lmk_map.end()) {
+                    lmk->position = gt_it->second;
+                    lmk->is_triangulated = true;
+                } else {
+                    continue;
+                }
+            }
 
-            // 计算残差和雅可比
-            const auto Rwi = frm->q().toRotationMatrix();
-            const auto Ric = ext_.q_ic.toRotationMatrix();
-            const auto d_ij_w = lmk->position - frm->p();
-            const auto d_cj_i = Rwi.transpose() * d_ij_w - ext_.t_ic;
-            const auto d_cj_c = Ric.transpose() * d_cj_i;
+            // 计算残差和雅可比（观测 meas.second 直接取用，无中间结构）
+            const Vec3 d_ij_w = lmk->position - p_wi;
+            const Vec3 d_cj_i = Rwi_T * d_ij_w - ext_.t_ic;
+            const Vec3 d_cj_c = Ric.transpose() * d_cj_i;
             const auto inv_d = TYPE(1) / d_cj_c.z();
             const auto inv_d2 = inv_d * inv_d;
-            const auto est = d_cj_c.head<2>() * inv_d;
-            const auto err = obs->un_pt.head<2>() - est;
+            const Vec2 est = d_cj_c.head<2>() * inv_d;
+            const Vec2 err = meas.second - est;
 
             Mat2_3 J;
             J << inv_d, TYPE(0), -d_cj_c.x() * inv_d2,
                     TYPE(0), inv_d, -d_cj_c.y() * inv_d2;
 
-            Mat2_3 J_lmk = J * (frm->q() * ext_.q_ic).inverse().toRotationMatrix();
+            const Mat2_3 J_lmk = J * Rwc_T;
 
-            // 用这个观测更新landmark（简化的EKF更新）
+            // 序贯 EKF 更新 landmark（只更新 landmark，不约束 pose）
             auto &&cov_l = lmk->cov_position;
-            VecX dx_l = VecX::Zero(LMK_SIZE);
+            Vec3 dx_l = Vec3::Zero();
 
             for (size_t j = 0; j < 2; ++j) {  // 2个残差分量（u, v）
-                Vec3 hT = J_lmk.row(j).transpose();
+                const Vec3 hT = J_lmk.row(j).transpose();
 
-                const auto r = uv_var / dt;
                 Vec3 PhT = cov_l * hT;
-                TYPE var = hT.dot(PhT) + r;
-                Vec3 K = PhT / var;
+                const TYPE var = hT.dot(PhT) + r;
+                const Vec3 K = PhT / var;
                 cov_l -= K * PhT.transpose();
 
                 PhT = cov_l * hT;
                 cov_l.triangularView<Eigen::Upper>() += (K * r - PhT) * K.transpose();
                 cov_l.triangularView<Eigen::StrictlyLower>() = cov_l.triangularView<Eigen::StrictlyUpper>().transpose();
 
-                auto e = err(j) - hT.dot(dx_l);
-                dx_l += K * e;
-            }
-            lmk->position += dx_l;
-        }
-
-        // 2. 处理只有1个关键帧观测+临时帧观测的landmark（没有参与滑窗优化）
-        for (const auto &[id, lmk] : temp_only_ids) {
-            auto temp_it = map_.temp_buffer.lmk_to_feature.find(id);
-            if (temp_it == map_.temp_buffer.lmk_to_feature.end()) {
-                continue;
-            }
-
-            const auto fet = temp_it->second;
-            const auto obs = fet->obs[0];
-            const auto frm = &map_.temp_buffer.temp_frame;
-
-            // 获取关键帧的观测
-            if (lmk->frm2fet.empty()) continue;
-            auto kf_it = lmk->frm2fet.begin();
-            const auto kf_fet = kf_it->second;
-            const auto kf_obs = kf_fet->obs[0];
-            const auto kf_frm = kf_fet->frame;
-
-            // 用两个观测(关键帧+临时帧)来优化landmark
-            // 这里简化处理：只用临时帧观测
-            const auto Rwi = frm->q().toRotationMatrix();
-            const auto Ric = ext_.q_ic.toRotationMatrix();
-            const auto d_ij_w = lmk->position - frm->p();
-            const auto d_cj_i = Rwi.transpose() * d_ij_w - ext_.t_ic;
-            const auto d_cj_c = Ric.transpose() * d_cj_i;
-            const auto inv_d = TYPE(1) / d_cj_c.z();
-            const auto inv_d2 = inv_d * inv_d;
-            const auto est = d_cj_c.head<2>() * inv_d;
-            const auto err = obs->un_pt.head<2>() - est;
-
-            Mat2_3 J;
-            J << inv_d, TYPE(0), -d_cj_c.x() * inv_d2,
-                    TYPE(0), inv_d, -d_cj_c.y() * inv_d2;
-
-            Mat2_3 J_lmk = J * (frm->q() * ext_.q_ic).inverse().toRotationMatrix();
-
-            auto &&cov_l = lmk->cov_position;
-            VecX dx_l = VecX::Zero(LMK_SIZE);
-
-            for (size_t j = 0; j < 2; ++j) {
-                Vec3 hT = J_lmk.row(j).transpose();
-
-                const auto r = uv_var / dt;
-                Vec3 PhT = cov_l * hT;
-                TYPE var = hT.dot(PhT) + r;
-                Vec3 K = PhT / var;
-                cov_l -= K * PhT.transpose();
-
-                PhT = cov_l * hT;
-                cov_l.triangularView<Eigen::Upper>() += (K * r - PhT) * K.transpose();
-                cov_l.triangularView<Eigen::StrictlyLower>() = cov_l.triangularView<Eigen::StrictlyUpper>().transpose();
-
-                auto e = err(j) - hT.dot(dx_l);
+                const auto e = err(j) - hT.dot(dx_l);
                 dx_l += K * e;
             }
             lmk->position += dx_l;
@@ -1012,10 +940,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 
 #endif
 
-    // 非关键帧清空缓冲区
-    if (!is_keyframe) {
-        map_.clearTempBuffer();
-    }
+    // 方案4：非关键帧无任何临时数据结构，无需清理
 
     // 移除一帧（仅当是关键帧且窗口已满时才pop滑窗）
     if (is_keyframe && map_.isWinFull()) {
