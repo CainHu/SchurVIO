@@ -542,6 +542,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     // 方案4（Zero-copy）：非关键帧的观测直接从 cam_data 读取来 refine landmark，
     // 不创建 Frame / Feature / Observation，也不写入 lmk_map 的持久关联。
     // 位姿直接用当前状态 state_，即"临时帧"的位姿。
+    auto t_refine_1 = clock();
     if (!is_keyframe) {
         // 这些量对整帧都是常量，提到循环外
         const Mat3_3 Ric = ext_.q_ic.toRotationMatrix();
@@ -612,6 +613,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             lmk->position += dx_l;
         }
     }
+    auto t_refine_2 = clock();
+    t_refine_cost_ += t_refine_2 - t_refine_1;
+    n_lmk_total_ += ids.size();
 
 
     auto t2 = clock();

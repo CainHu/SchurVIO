@@ -110,6 +110,8 @@ namespace slam {
 
         size_t posterior_times_ = 0;
         size_t t_cost_ = 0;
+        size_t t_refine_cost_ = 0;
+        size_t n_lmk_total_ = 0;
     };
 }
 

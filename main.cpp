@@ -151,6 +151,8 @@ int main() {
     std::cout << "posterior times = " << ekf.posterior_times_ << std::endl;
     std::cout << "t_cost = " << cost << std::endl;
     std::cout << "mean cost = " << cost / static_cast<double>(ekf.posterior_times_) << std::endl;
+    std::cout << "refine cost = " << static_cast<double>(ekf.t_refine_cost_) / static_cast<double>(CLOCKS_PER_SEC) << std::endl;
+    std::cout << "mean lmk per update = " << static_cast<double>(ekf.n_lmk_total_) / static_cast<double>(ekf.posterior_times_) << std::endl;
 
 //    std::cout << "数据处理完成" << std::endl;
     return 0;
