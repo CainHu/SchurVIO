@@ -154,6 +154,14 @@ int main() {
     std::cout << "refine cost = " << static_cast<double>(ekf.t_refine_cost_) / static_cast<double>(CLOCKS_PER_SEC) << std::endl;
     std::cout << "mean lmk per update = " << static_cast<double>(ekf.n_lmk_total_) / static_cast<double>(ekf.posterior_times_) << std::endl;
 
+    const auto S = static_cast<double>(CLOCKS_PER_SEC);
+    std::cout << "--- breakdown ---" << std::endl;
+    std::cout << "per-lmk small QR = " << ekf.t_perlmk_qr_ / S << std::endl;
+    std::cout << "big QR (J_STATE) = " << ekf.t_bigqr_ / S << std::endl;
+    std::cout << "seq state update = " << ekf.t_seq_state_ / S << std::endl;
+    std::cout << "lmk pos update   = " << ekf.t_lmk_update_ / S << std::endl;
+    std::cout << "mean seq rows    = " << static_cast<double>(ekf.n_seq_rows_) / static_cast<double>(ekf.posterior_times_) << std::endl;
+
 //    std::cout << "数据处理完成" << std::endl;
     return 0;
 }

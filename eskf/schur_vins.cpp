@@ -376,6 +376,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     VecX Q1e_s = VecX::Zero(LMK_SIZE * ids.size());
     MatXX RP_s = MatXX::Zero(LMK_SIZE * ids.size(), LMK_SIZE);
 
+    auto t_stage1 = clock();
+
     // 遍历 landmark
     size_t row_idx = 0;
     for (size_t i = 0; i < ids.size(); ++i) {
@@ -473,20 +475,48 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     }
 //    std::cout << "Update Finished" << std::endl;
 
+    auto t_stage2 = clock();
+    t_perlmk_qr_ += t_stage2 - t_stage1;
+
     // 对 J_STATE 进行 QR 分解
-    auto qr = J_STATE.colPivHouseholderQr();
-//    auto Q_red = qr.householderQ() * MatXX::Identity(J_STATE.rows(), J_STATE.cols());
-    VecX e_red = (qr.householderQ().transpose() * E_STATE).head(J_STATE.cols());
-    const MatXX R_red = qr.matrixR().topLeftCorner(J_STATE.cols(), J_STATE.cols()).template triangularView<Eigen::Upper>();
-    const MatXX H_red = R_red * qr.colsPermutation().transpose();
+    //
+    // 优化点1: 用 householderQr 取代 colPivHouseholderQr。
+    //   列选主元对 (2*num_obs) x 180 的矩阵开销很大，而这里不需要 rank-revealing:
+    //   即使 J_STATE 降秩，R 的对应行会趋于 0，序贯更新时 hT ~ 0 => K ~ 0，
+    //   该行自然不贡献修正量，退化是平滑的。同时省掉了 R * P^T 这次乘法。
+    //
+    // 优化点2: 把 E_STATE 拼成增广矩阵 [J_STATE, E_STATE] 一起分解，
+    //   R 的最后一列前 n 行即 (Q^T * E_STATE).head(n)，省掉单独应用一次
+    //   Householder 序列。同时只对前 row_idx 行分解（后面是未填充的零行）。
+    //   注: 实测这两点对总耗时无可测量的影响(提速几乎全部来自优化点1)，
+    //   保留是因为省了一趟 O(m*n) 运算且代码更紧凑，不是性能考虑。
+    const size_t n_cols = AugState::SIZE * WIN_SIZE;
+    const size_t m_eff = row_idx;
+    const size_t n_eff = std::min(m_eff, n_cols);
+
+    MatXX JE = MatXX::Zero(m_eff, n_cols + 1);
+    JE.leftCols(n_cols) = J_STATE.topRows(m_eff);
+    JE.col(n_cols) = E_STATE.head(m_eff);
+
+    auto qr = JE.householderQr();
+    auto &&QR = qr.matrixQR();
+
+    // R_red: n_eff x n_cols 的上三角部分；H_red 不再需要乘 permutation
+    const MatXX H_red = QR.topLeftCorner(n_eff, n_cols).template triangularView<Eigen::Upper>();
+
+    // e_red: 增广列的前 n_eff 行，即 (Q^T * E_STATE).head(n_eff)
+    const VecX e_red = QR.col(n_cols).head(n_eff);
+
+    auto t_stage3 = clock();
+    t_bigqr_ += t_stage3 - t_stage2;
 
     // 序贯更新 State
     // Q2^T * J_POSE * dxp = Q2^T * e
     auto &&cov_p = cov_;
     VecX dx_p = VecX::Zero(COV_SIZE);
-    for (size_t j = 0; j < e_red.rows(); ++j) {
-        // 重构出量测矩阵 H
-        VecX hT = VecX::Zero(INSState::SIZE + AugState::SIZE * WIN_SIZE);
+    VecX hT = VecX::Zero(INSState::SIZE + AugState::SIZE * WIN_SIZE);
+    for (size_t j = 0; j < n_eff; ++j) {
+        // 重构出量测矩阵 H（INS 部分恒为 0，只需重写 tail）
         hT.tail(AugState::SIZE * WIN_SIZE) = H_red.row(j).transpose();
 
         TYPE r = uv_var / dt;
@@ -504,6 +534,10 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         dx_p += K * e;
     }
     updateState(dx_p);
+
+    auto t_stage4 = clock();
+    t_seq_state_ += t_stage4 - t_stage3;
+    n_seq_rows_ += n_eff;
 
     // 更新 Landmarks
     // R * P^-1 * dxl = Q1^T * e - Q1^T * J_POSE * dxp
@@ -543,6 +577,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     // 不创建 Frame / Feature / Observation，也不写入 lmk_map 的持久关联。
     // 位姿直接用当前状态 state_，即"临时帧"的位姿。
     auto t_refine_1 = clock();
+    t_lmk_update_ += t_refine_1 - t_stage4;
     if (!is_keyframe) {
         // 这些量对整帧都是常量，提到循环外
         const Mat3_3 Ric = ext_.q_ic.toRotationMatrix();

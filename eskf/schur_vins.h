@@ -112,6 +112,11 @@ namespace slam {
         size_t t_cost_ = 0;
         size_t t_refine_cost_ = 0;
         size_t n_lmk_total_ = 0;
+        size_t t_perlmk_qr_ = 0;   // 每个 landmark 的小 QR (2K x 3)
+        size_t t_bigqr_ = 0;       // J_STATE 的大 QR
+        size_t t_seq_state_ = 0;   // 序贯更新 state (198x198 协方差)
+        size_t t_lmk_update_ = 0;  // 更新 landmark 位置
+        size_t n_seq_rows_ = 0;    // 序贯更新的行数
     };
 }
 
