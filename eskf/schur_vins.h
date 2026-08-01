@@ -114,8 +114,31 @@ namespace slam {
 
         constexpr static size_t LMK_SIZE = 3;
 
-        constexpr static TYPE uv_var = TYPE(400);
+        // 量测噪声(视觉). 原先是 constexpr，改为成员变量以便做噪声敏感度扫描。
+        // 默认值与此前一致，不改变行为。
+        TYPE uv_var = TYPE(400);
+        // 过程噪声整体缩放因子(1.0 = 使用 INSState 中配置的原值)，用于敏感度扫描
+        TYPE proc_noise_scale_ = TYPE(1);
         constexpr static TYPE lmk_var = TYPE(0.01);
+
+        // ---- 数据采集(用于可视化/分析，见 tools/) ----
+        struct UpdateLog {
+            Tus timestamp;
+            // 视觉更新【前】(先验)与【后】(后验)的状态，用于看修正作用
+            Vec3 p_prior, p_post;
+            Vec3 v_prior, v_post;
+            Quat q_prior, q_post;
+            Vec3 bg_post, ba_post, g_post;
+            // 本次视觉更新施加的修正量范数
+            TYPE dx_p_norm, dx_q_norm, dx_v_norm;
+            // 协方差(位置/姿态/速度的 trace，开根号得米/弧度量级)
+            TYPE cov_p_trace, cov_q_trace, cov_v_trace;
+            size_t n_lmk;      // 参与本次更新的 landmark 数
+            size_t win_size;   // 滑窗帧数
+            bool is_keyframe;
+        };
+        std::vector<UpdateLog> logs_;
+        bool enable_logging_ = false;
 
         Eigen::VectorXd Rll_;
 

@@ -74,6 +74,23 @@ add_executable(VinsEKF main.cpp
 
 target_include_directories(VinsEKF PUBLIC "E:/eigen-3.4.0/eigen-3.4.0")
 
+# 分析工具: 导出 CSV 供 tools/report.html 可视化
+add_executable(VinsAnalysis tools/analysis_main.cpp
+        data_structure/frame.cpp
+        data_structure/landmark.cpp
+        data_structure/feature.cpp
+        data_structure/map.cpp
+        data_structure/pool.cpp
+        vio_frontend_simulator.cpp
+        eskf/schur_vins.cpp
+        data_structure/sliding_window.cpp
+        data_structure/observation.cpp
+)
+target_include_directories(VinsAnalysis PUBLIC "E:/eigen-3.4.0/eigen-3.4.0")
+
+# 报告生成器: 把 out/*.csv 嵌进自包含的 HTML(无外部依赖)
+add_executable(VinsReport tools/make_report.cpp tools/report_template.cpp)
+
 #target_link_libraries(VinsEKF
 ##        ${OpenCV_LIBS}
 ##        ${CERES_LIBRARIES}

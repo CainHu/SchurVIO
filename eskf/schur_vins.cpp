@@ -211,7 +211,7 @@ void SchurVINS::predict(const slam::IMUData &imu_data, const double dt) {
     }
 
     // 叠加过程噪声
-    cov += (state_.var_proc * dt).asDiagonal();
+    cov += (state_.var_proc * (dt * proc_noise_scale_)).asDiagonal();
 
     // 更新时间戳
     state_.timestamp = imu_data.timestamp;
@@ -666,6 +666,18 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 #elif defined(USE_SCHUR)
     auto t1 = clock();
 
+    // [数据采集] 记录视觉更新【前】的先验状态
+    UpdateLog log{};
+    if (enable_logging_) {
+        log.timestamp = cam_data.timestamp;
+        log.p_prior = state_.position;
+        log.v_prior = state_.velocity;
+        log.q_prior = state_.orientation;
+        log.n_lmk = ids.size();
+        log.win_size = map_.sfw.size();
+        log.is_keyframe = is_keyframe;
+    }
+
     // Hessian 矩阵
     //
     // 优化: Hll 是块对角矩阵(landmark 之间没有直接耦合，只通过 pose 间接耦合)，
@@ -892,6 +904,24 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     }
     updateState(dx_p);
 //    std::cout << "Update State Finished" << std::endl;
+
+    // [数据采集] 记录视觉更新【后】的后验状态与修正量
+    if (enable_logging_) {
+        using I = INSState;
+        log.p_post = state_.position;
+        log.v_post = state_.velocity;
+        log.q_post = state_.orientation;
+        log.bg_post = state_.gyro_bias;
+        log.ba_post = state_.accel_bias;
+        log.g_post = state_.gravity;
+        log.dx_q_norm = dx_p.segment<3>(I::Q).norm();
+        log.dx_p_norm = dx_p.segment<3>(I::P).norm();
+        log.dx_v_norm = dx_p.segment<3>(I::V).norm();
+        log.cov_q_trace = cov_.diagonal().segment<3>(I::Q).sum();
+        log.cov_p_trace = cov_.diagonal().segment<3>(I::P).sum();
+        log.cov_v_trace = cov_.diagonal().segment<3>(I::V).sum();
+        logs_.emplace_back(log);
+    }
 
     auto t_sc3 = clock();
     t_eig_state_ += t_sc3 - t_sc2;
