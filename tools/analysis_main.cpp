@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 #include <cmath>
+#include <limits>
 
 namespace {
 
@@ -27,6 +28,29 @@ namespace {
 Eigen::Vector3d attitudeError(const Eigen::Quaterniond &gt,
                               const Eigen::Quaterniond &est) {
     return slam::quat2vec((gt.inverse() * est).normalized());
+}
+
+template<int N>
+double computeNEES(const Eigen::Matrix<double, N, 1> &error,
+                   const Eigen::Matrix<double, N, N> &covariance) {
+    const Eigen::Matrix<double, N, N> cov_sym =
+        0.5 * (covariance + covariance.transpose());
+    Eigen::LDLT<Eigen::Matrix<double, N, N>> ldlt(cov_sym);
+    if (ldlt.info() != Eigen::Success) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    const double scale = std::max(1.0, cov_sym.diagonal().cwiseAbs().maxCoeff());
+    if (ldlt.vectorD().minCoeff() <= scale * 1e-12) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+
+    const Eigen::Matrix<double, N, 1> weighted_error = ldlt.solve(error);
+    const double value = error.dot(weighted_error);
+    if (!std::isfinite(value) || value < -1e-9) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    return std::max(0.0, value);
 }
 
 std::string joinPath(const std::string &dir, const std::string &name) {
@@ -69,6 +93,7 @@ int main(int argc, char **argv) {
         Eigen::Quaterniond q_gt, q_est;
         Eigen::Vector3d bg_est, ba_est, g_est;
         double cov_p, cov_q, cov_v;   // trace
+        double nees_p, nees_q, nees_v, nees_qpv;
         size_t n_meas;
     };
     std::vector<TrajRow> traj;
@@ -104,6 +129,27 @@ int main(int argc, char **argv) {
         r.cov_p = ekf.cov_.diagonal().segment<3>(I::P).sum();
         r.cov_q = ekf.cov_.diagonal().segment<3>(I::Q).sum();
         r.cov_v = ekf.cov_.diagonal().segment<3>(I::V).sum();
+
+        const Eigen::Vector3d dp = r.p_est - r.p_gt;
+        const Eigen::Vector3d dv = r.v_est - r.v_gt;
+        const Eigen::Vector3d da = attitudeError(r.q_gt, r.q_est);
+        r.nees_p = computeNEES<3>(dp, ekf.cov_.block<3, 3>(I::P, I::P));
+        r.nees_q = computeNEES<3>(da, ekf.cov_.block<3, 3>(I::Q, I::Q));
+        r.nees_v = computeNEES<3>(dv, ekf.cov_.block<3, 3>(I::V, I::V));
+
+        Eigen::Matrix<double, 9, 1> error_qpv;
+        error_qpv.segment<3>(0) = da;
+        error_qpv.segment<3>(3) = dp;
+        error_qpv.segment<3>(6) = dv;
+        Eigen::Matrix<double, 9, 9> cov_qpv;
+        constexpr int offsets[3] = {I::Q, I::P, I::V};
+        for (int bi = 0; bi < 3; ++bi) {
+            for (int bj = 0; bj < 3; ++bj) {
+                cov_qpv.block<3, 3>(bi * 3, bj * 3) =
+                    ekf.cov_.block<3, 3>(offsets[bi], offsets[bj]);
+            }
+        }
+        r.nees_qpv = computeNEES<9>(error_qpv, cov_qpv);
         r.n_meas = cam.measurements.size();
         traj.emplace_back(r);
     }
@@ -120,7 +166,8 @@ int main(int argc, char **argv) {
                         "err_p,err_v,err_att,"
                         "ex,ey,ez,eroll,epitch,eyaw,"
                         "bgx,bgy,bgz,bax,bay,baz,gx,gy,gz,"
-                        "sigma_p,sigma_q,sigma_v,n_meas\n");
+                        "sigma_p,sigma_q,sigma_v,"
+                        "nees_p,nees_q,nees_v,nees_qpv,n_meas\n");
         for (const auto &r : traj) {
             const Eigen::Vector3d dp = r.p_est - r.p_gt;
             const Eigen::Vector3d dv = r.v_est - r.v_gt;
@@ -133,7 +180,7 @@ int main(int argc, char **argv) {
                 "%.6f,%.6f,%.6f,"
                 "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
                 "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
-                "%.6e,%.6e,%.6e,%zu\n",
+                "%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%zu\n",
                 r.t,
                 r.p_gt.x(), r.p_gt.y(), r.p_gt.z(), r.p_est.x(), r.p_est.y(), r.p_est.z(),
                 r.v_gt.x(), r.v_gt.y(), r.v_gt.z(), r.v_est.x(), r.v_est.y(), r.v_est.z(),
@@ -149,6 +196,7 @@ int main(int argc, char **argv) {
                 (r.cov_p >= 0 ? std::sqrt(r.cov_p) : -std::sqrt(-r.cov_p)),
                 (r.cov_q >= 0 ? std::sqrt(r.cov_q) : -std::sqrt(-r.cov_q)),
                 (r.cov_v >= 0 ? std::sqrt(r.cov_v) : -std::sqrt(-r.cov_v)),
+                r.nees_p, r.nees_q, r.nees_v, r.nees_qpv,
                 r.n_meas);
         }
         std::fclose(f);
@@ -165,7 +213,8 @@ int main(int argc, char **argv) {
         std::fprintf(f, "t,is_kf,n_lmk,win,"
                         "errp_prior,errp_post,errv_prior,errv_post,"
                         "erra_prior,erra_post,"
-                        "dxp,dxq,dxv,sigma_p,sigma_q,sigma_v,improve_p\n");
+                        "dxp,dxq,dxv,sigma_p,sigma_q,sigma_v,"
+                        "nis_mean,nis_dof,improve_p\n");
 
         size_t g = 0;
         size_t n_improve = 0, n_total = 0;
@@ -185,12 +234,13 @@ int main(int argc, char **argv) {
 
             std::fprintf(f, "%.6f,%d,%zu,%zu,"
                             "%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,"
-                            "%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%d\n",
+                            "%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%zu,%d\n",
                 static_cast<double>(L.timestamp - t0) * 1e-6,
                 L.is_keyframe ? 1 : 0, L.n_lmk, L.win_size,
                 ep0, ep1, ev0, ev1, ea0, ea1,
                 L.dx_p_norm, L.dx_q_norm, L.dx_v_norm,
                 std::sqrt(L.cov_p_trace), std::sqrt(L.cov_q_trace), std::sqrt(L.cov_v_trace),
+                L.nis_mean, L.nis_dof,
                 improved);
         }
         std::fclose(f);

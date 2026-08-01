@@ -137,6 +137,9 @@ namespace slam {
             TYPE dx_p_norm, dx_q_norm, dx_v_norm;
             // 协方差(位置/姿态/速度的 trace，开根号得米/弧度量级)
             TYPE cov_p_trace, cov_q_trace, cov_v_trace;
+            // Schur 序贯伪量测的归一化创新平方统计；均值理论期望约为 1。
+            TYPE nis_mean;
+            size_t nis_dof;
             size_t n_lmk;      // 参与本次更新的 landmark 数
             size_t win_size;   // 滑窗帧数
             bool is_keyframe;

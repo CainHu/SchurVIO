@@ -7,6 +7,7 @@
 #include <Eigen/SparseCore>
 #include <Eigen/SparseQR>
 #include <algorithm>
+#include <cmath>
 
 using namespace slam;
 
@@ -847,6 +848,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     // 序贯 V.col(i)^T * y / λ(i) = V.col(i)^T * x + w(i), var[w] = σ^2 / λ(i)
     VecX dx_p(COV_SIZE);
     dx_p.setZero();
+    TYPE nis_sum = TYPE(0);
+    size_t nis_count = 0;
     {
         auto &&cov_p = cov_;
         auto &&ep = gp;
@@ -923,14 +926,19 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 
             PhT.noalias() = cov_p.selfadjointView<Eigen::Upper>() * hT;
             const TYPE var = hT.dot(PhT) + R;
+            // 量测 z_i = rhs(i)/d，残差 = z_i - h_i^T·dx。
+            // 序贯更新已经把伪量测噪声对角化，因此 e^2/var 可以直接累加为 NIS。
+            const TYPE e = rhs(i) / d - hT.dot(dx_p);
+            if (enable_logging_ && var > TYPE(0) && std::isfinite(var) && std::isfinite(e)) {
+                nis_sum += e * e / var;
+                ++nis_count;
+            }
             K.noalias() = PhT / var;
             cov_p.triangularView<Eigen::Upper>() -= K * PhT.transpose();
 
             PhT.noalias() = cov_p.selfadjointView<Eigen::Upper>() * hT;
             cov_p.triangularView<Eigen::Upper>() += (K * R - PhT) * K.transpose();
 
-            // 量测 z_i = rhs(i)/d，残差 = z_i - h_i^T·dx
-            const auto e = rhs(i) / d - hT.dot(dx_p);
             dx_p.noalias() += K * e;
         }
         cov_p.triangularView<Eigen::StrictlyLower>() = cov_p.triangularView<Eigen::StrictlyUpper>().transpose();
@@ -953,6 +961,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         log.cov_q_trace = cov_.diagonal().segment<3>(I::Q).sum();
         log.cov_p_trace = cov_.diagonal().segment<3>(I::P).sum();
         log.cov_v_trace = cov_.diagonal().segment<3>(I::V).sum();
+        log.nis_mean = nis_count ? nis_sum / static_cast<TYPE>(nis_count) : TYPE(0);
+        log.nis_dof = nis_count;
         logs_.emplace_back(log);
     }
 
