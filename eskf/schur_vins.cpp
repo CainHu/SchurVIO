@@ -804,26 +804,53 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     dx_p.setZero();
     {
         auto &&cov_p = cov_;
+        auto &&ep = gp;
+
+        // 序贯更新需要各标量量测互不相关，即把 Cov[e] = σ²·H 对角化。
+        // 特征分解和 LDLT 都能做到，区别只在用哪组基:
+        //
+        //   特征分解 H = V·λ·V^T:  Cov[V^T·e] = σ²·V^T·H·V = σ²·λ      (对角)
+        //   LDLT     H = L·D·L^T:  Cov[L^-1·e] = σ²·L^-1·H·L^-T = σ²·D  (对角)
+        //
+        // 两者都给出 COV_SIZE 个独立标量量测:
+        //   特征分解: h_i = V.col(i),  z_i = (V^T·gp)_i / λ_i,  R_i = σ²/λ_i
+        //   LDLT:     h_i = M.col(i),  z_i = (M^-1·gp)_i / D_i, R_i = σ²/D_i
+        //     其中 M = P^T·L (Eigen 的 LDLT 带主元置换: A = P^T·L·D·L^T·P)
+        //
+        // 注意两者并非逐位等价 —— 用的是不同的基，中间量不同，
+        // 但都是同一个信息矩阵的合法分解，最终后验应当一致(数值误差内)。
+        VecX H_BASIS_diag(COV_SIZE);   // λ 或 D
+        MatXX H_BASIS(COV_SIZE, COV_SIZE);  // V 或 M
+        VecX rhs(COV_SIZE);            // V^T·gp 或 M^-1·gp
+
         auto t_e0 = clock();
-        Eigen::SelfAdjointEigenSolver<decltype(Hpp)> es(Hpp);
+        if constexpr (USE_LDLT_FOR_HPP) {
+            Eigen::LDLT<MatXX> ldlt(Hpp);
+
+            // M = P^T · L，使得 Hpp = M · D · M^T
+            H_BASIS = ldlt.transpositionsP().transpose()
+                    * MatXX(ldlt.matrixL());
+            H_BASIS_diag = ldlt.vectorD();
+
+            // rhs = M^-1 · gp，用三角回代而不是显式求逆:
+            //   M·rhs = gp  =>  P^T·L·rhs = gp  =>  L·rhs = P·gp
+            rhs = ldlt.transpositionsP() * ep;
+            ldlt.matrixL().solveInPlace(rhs);
+        } else {
+            Eigen::SelfAdjointEigenSolver<MatXX> es(Hpp);
+            H_BASIS = es.eigenvectors();
+            H_BASIS_diag = es.eigenvalues();
+            rhs.noalias() = H_BASIS.transpose() * ep;
+        }
         t_eig_decomp_ += clock() - t_e0;
 
-        auto &&ep = gp;
-//        VecX VTe = es.eigenvectors().transpose() * ep;
-
-        // Step-0: 过滤掉特征值为0的值
-        int zero_end = 0;
-        for (; zero_end < COV_SIZE; ++zero_end) {
-            if (es.eigenvalues()(zero_end) > 1e-6 * es.eigenvalues()(COV_SIZE - 1)) {
-                break;
-            }
-        }
-//        while (es.eigenvalues()(zero_end) < 1e-6) {
-//            ++zero_end;
-//        }
-//        std::cout << "State Update: zero_end = " << zero_end << std::endl;
-        if (zero_end == COV_SIZE) {
-            std::cerr << "eigen value = " << es.eigenvalues().transpose() << std::endl;
+        // Step-0: 过滤掉(近似)为 0 的对角元。
+        //   特征分解: eigenvalues 已升序排列，找到第一个足够大的即可
+        //   LDLT:     D 无序，必须逐个判断，所以下面用 skip 而不是起始下标
+        const TYPE d_max = H_BASIS_diag.maxCoeff();
+        const TYPE d_thresh = TYPE(1e-6) * d_max;
+        if (d_max <= TYPE(0)) {
+            std::cerr << "Hpp is not positive: max diag = " << d_max << std::endl;
         }
 
         // Step-1: 序贯
@@ -836,10 +863,18 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         // 数学上完全等价: 中间过程只有 selfadjointView 在读 cov_p，它只看上三角。
         VecX PhT(COV_SIZE);
         VecX K(COV_SIZE);
-        for (; zero_end < COV_SIZE; ++zero_end) {
-            const auto lambda = es.eigenvalues()(zero_end);
-            const auto R = uv_var / lambda / dt;
-            const auto hT = es.eigenvectors().col(zero_end);
+        for (size_t i = 0; i < COV_SIZE; ++i) {
+            const auto d = H_BASIS_diag(i);
+            if (d <= d_thresh) {
+                ++n_skipped_;           // 诊断: 被判定为零空间的方向数
+                if (d < TYPE(0)) {
+                    ++n_negative_;      // 诊断: 严格为负(Hpp 不定)的方向数
+                }
+                continue;   // 零空间方向，不提供信息
+            }
+
+            const auto R = uv_var / d / dt;
+            const auto hT = H_BASIS.col(i);
 
             PhT.noalias() = cov_p.selfadjointView<Eigen::Upper>() * hT;
             const TYPE var = hT.dot(PhT) + R;
@@ -849,7 +884,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             PhT.noalias() = cov_p.selfadjointView<Eigen::Upper>() * hT;
             cov_p.triangularView<Eigen::Upper>() += (K * R - PhT) * K.transpose();
 
-            const auto e = hT.dot(ep / lambda - dx_p);
+            // 量测 z_i = rhs(i)/d，残差 = z_i - h_i^T·dx
+            const auto e = rhs(i) / d - hT.dot(dx_p);
             dx_p.noalias() += K * e;
         }
         cov_p.triangularView<Eigen::StrictlyLower>() = cov_p.triangularView<Eigen::StrictlyUpper>().transpose();
