@@ -63,7 +63,9 @@ namespace slam {
 
     // INS 状态
     struct INSState {
-        constexpr static bool ESTIMATE_GRAVITY = true;
+        // 仿真器的世界系重力已知且初始化精确。关闭重力估计可以去掉与姿态、
+        // 加速度计零偏之间的弱可观耦合；真实设备若需要在线估计重力，再改回 true。
+        constexpr static bool ESTIMATE_GRAVITY = false;
 
         constexpr static int Q = 0;
         constexpr static int P = Q + 3;
@@ -80,11 +82,14 @@ namespace slam {
         constexpr static double STB_BA_INIT = 5e-1 * 1e-1;
         constexpr static double STB_G_INIT = 1e-2 * 1e-1;
 
-        constexpr static double STB_Q_PROC = 4e-2 * 1e-1;
+        // 连续时间噪声密度。当前仿真标称值为 gyro=0.002 rad/s/sqrt(Hz)、
+        // accel=0.02 m/s^2/sqrt(Hz)、bg_rw=0.0001、ba_rw=0.0005；这里保留
+        // 约 1.5--2 倍裕量，避免模型失配时滤波器过度自信。
+        constexpr static double STB_Q_PROC = 3e-3;
         constexpr static double STB_P_PROC = 3e-3 * 1e-1;
-        constexpr static double STB_V_PROC = 2e-1 * 1e-1;
-        constexpr static double STB_BG_PROC = 1e-2 * 1e-1;
-        constexpr static double STB_BA_PROC = 1e-1 * 1e-1;
+        constexpr static double STB_V_PROC = 3e-2;
+        constexpr static double STB_BG_PROC = 2e-4;
+        constexpr static double STB_BA_PROC = 1e-3;
         constexpr static double STB_G_PROC = 1e-3 * 1e-1;
 
         Tus timestamp{0};

@@ -56,7 +56,7 @@ code{background:#0b0d12;padding:1px 5px;border-radius:3px;font-size:12px}
 <body>
 <header>
   <h1>SchurVIO 视觉后验分析报告</h1>
-  <div class="sub">Schur 路径 · 仿真轨迹 100 s · 相机 20 Hz · IMU 200 Hz · 滑窗 30 帧 · 1000 个特征点</div>
+  <div class="sub">Schur 路径 · 四类含噪仿真 · 相机 20 Hz · IMU 200 Hz · 滑窗 30 帧 · 已知重力固定</div>
 </header>
 <main>
 
@@ -67,7 +67,23 @@ code{background:#0b0d12;padding:1px 5px;border-radius:3px;font-size:12px}
 </section>
 
 <section>
-  <h2>2. 轨迹可视化</h2>
+  <h2>2. 多仿真场景回归</h2>
+  <h3>同一套参数在不同运动激励、视线方向和特征点空间分布下的表现</h3>
+  <div class="grid g2">
+    <div class="panel"><h3>Circle-out：沿圆周运动、相机切向朝外</h3><canvas id="scenarioCircleOut" height="330"></canvas></div>
+    <div class="panel"><h3>Circle-in：沿圆周运动、相机朝向圆心</h3><canvas id="scenarioCircleIn" height="330"></canvas></div>
+    <div class="panel"><h3>Helix-3D：三维起伏、滚转/俯仰/偏航联合激励</h3><canvas id="scenarioHelix" height="330"></canvas></div>
+    <div class="panel"><h3>Stop-go：往返、减速、静止和再启动</h3><canvas id="scenarioStopGo" height="330"></canvas></div>
+  </div>
+  <div class="panel" style="margin-top:16px">
+    <h3>多场景精度、视觉修正与鲁棒门控汇总</h3>
+    <div id="scenarioTable"></div>
+  </div>
+  <div id="scenarioNotes"></div>
+</section>
+
+<section>
+  <h2>3. Circle-out 轨迹详细可视化</h2>
   <h3>真实轨迹 / 估计轨迹 / 特征点分布 / 机体坐标系朝向</h3>
   <div class="panel">
     <div class="ctl">
@@ -97,7 +113,7 @@ code{background:#0b0d12;padding:1px 5px;border-radius:3px;font-size:12px}
 </section>
 
 <section>
-  <h2>3. 视觉后验的修正作用</h2>
+  <h2>4. 视觉后验的修正作用</h2>
   <h3>这是本报告的核心：视觉更新是否真的把状态拉向真值</h3>
   <div class="grid g4" id="kpi2"></div>
   <div class="panel" style="margin-top:16px">
@@ -119,7 +135,7 @@ code{background:#0b0d12;padding:1px 5px;border-radius:3px;font-size:12px}
 </section>
 
 <section>
-  <h2>4. 特征点三角化与后续修正</h2>
+  <h2>5. 特征点三角化与后续修正</h2>
   <h3>不参与算法计算的真值，仅用于离线检查初始化质量和 landmark 后验修正</h3>
   <div class="grid g4" id="triKpis"></div>
   <div class="grid g2" style="margin-top:16px">
@@ -147,7 +163,7 @@ code{background:#0b0d12;padding:1px 5px;border-radius:3px;font-size:12px}
 </section>
 
 <section>
-  <h2>5. 误差与协方差一致性</h2>
+  <h2>6. 误差与协方差一致性</h2>
   <h3>滤波器对自身精度的估计是否可信</h3>
   <div class="grid g4" id="kpiConsistency"></div>
   <div class="grid g2" style="margin-top:16px">
@@ -164,17 +180,18 @@ code{background:#0b0d12;padding:1px 5px;border-radius:3px;font-size:12px}
 </section>
 
 <section>
-  <h2>6. 零偏与重力估计收敛</h2>
-  <h3>这些量只能通过视觉更新间接可观，是判断融合是否生效的独立证据</h3>
+  <h2>7. 零偏估计与固定重力检查</h2>
+  <h3>零偏通过视觉间接约束；本组仿真重力真值已知，固定为 (0, 0, 9.81) m/s²</h3>
   <div class="grid g3">
     <div class="panel"><h3>陀螺零偏 bg</h3><canvas id="cbg" height="280"></canvas></div>
     <div class="panel"><h3>加速度计零偏 ba</h3><canvas id="cba" height="280"></canvas></div>
-    <div class="panel"><h3>重力向量 g</h3><canvas id="cg" height="280"></canvas></div>
+    <div class="panel"><h3>固定重力向量 g</h3><canvas id="cg" height="280"></canvas></div>
   </div>
+  <div id="gravityNote"></div>
 </section>
 
 <section>
-  <h2>7. 噪声参数敏感度</h2>
+  <h2>8. 噪声参数敏感度</h2>
   <h3>量测噪声 uv_var 与过程噪声缩放对最终精度的影响</h3>
   <div class="grid g2" style="margin-top:16px">
     <div class="panel"><h3>量测噪声 uv_var 扫描</h3><canvas id="csweep1" height="320"></canvas></div>
@@ -188,7 +205,7 @@ code{background:#0b0d12;padding:1px 5px;border-radius:3px;font-size:12px}
 </section>
 
 <section>
-  <h2>8. 观测数量与滑窗状态</h2>
+  <h2>9. 观测数量、鲁棒门控与滑窗状态</h2>
   <div class="grid g4" id="obsStats"></div>
   <div class="grid g2" style="margin-top:16px">
     <div class="panel"><h3>每帧参与更新的 landmark 数</h3><canvas id="cnlmk" height="280"></canvas></div>
@@ -200,9 +217,18 @@ code{background:#0b0d12;padding:1px 5px;border-radius:3px;font-size:12px}
 
 <script>
 // ================= 数据 =================
-const RAW_TRAJ = `%%DATA_TRAJ%%`;
-const RAW_UPD  = `%%DATA_UPDATE%%`;
-const RAW_LMK  = `%%DATA_LMK%%`;
+const RAW_TRAJ_CIRCLE_OUT = `%%DATA_TRAJ_CIRCLE_OUT%%`;
+const RAW_UPDATE_CIRCLE_OUT = `%%DATA_UPDATE_CIRCLE_OUT%%`;
+const RAW_LMK_CIRCLE_OUT = `%%DATA_LMK_CIRCLE_OUT%%`;
+const RAW_TRAJ_CIRCLE_IN = `%%DATA_TRAJ_CIRCLE_IN%%`;
+const RAW_UPDATE_CIRCLE_IN = `%%DATA_UPDATE_CIRCLE_IN%%`;
+const RAW_LMK_CIRCLE_IN = `%%DATA_LMK_CIRCLE_IN%%`;
+const RAW_TRAJ_HELIX_3D = `%%DATA_TRAJ_HELIX_3D%%`;
+const RAW_UPDATE_HELIX_3D = `%%DATA_UPDATE_HELIX_3D%%`;
+const RAW_LMK_HELIX_3D = `%%DATA_LMK_HELIX_3D%%`;
+const RAW_TRAJ_STOP_GO = `%%DATA_TRAJ_STOP_GO%%`;
+const RAW_UPDATE_STOP_GO = `%%DATA_UPDATE_STOP_GO%%`;
+const RAW_LMK_STOP_GO = `%%DATA_LMK_STOP_GO%%`;
 const RAW_TRI  = `%%DATA_TRIANGULATION%%`;
 const RAW_SUM  = `%%DATA_SUMMARY%%`;
 
@@ -223,9 +249,23 @@ function parseCSV(txt){
   }
   return {cols,rows};
 }
-const T   = parseCSV(RAW_TRAJ).rows;
-const U   = parseCSV(RAW_UPD).rows;
-const LMK = parseCSV(RAW_LMK).rows;
+const SCENARIOS = [
+  {key:'circle_out', label:'Circle-out', canvas:'scenarioCircleOut',
+   traj:parseCSV(RAW_TRAJ_CIRCLE_OUT).rows, update:parseCSV(RAW_UPDATE_CIRCLE_OUT).rows,
+   landmarks:parseCSV(RAW_LMK_CIRCLE_OUT).rows},
+  {key:'circle_in', label:'Circle-in', canvas:'scenarioCircleIn',
+   traj:parseCSV(RAW_TRAJ_CIRCLE_IN).rows, update:parseCSV(RAW_UPDATE_CIRCLE_IN).rows,
+   landmarks:parseCSV(RAW_LMK_CIRCLE_IN).rows},
+  {key:'helix_3d', label:'Helix-3D', canvas:'scenarioHelix',
+   traj:parseCSV(RAW_TRAJ_HELIX_3D).rows, update:parseCSV(RAW_UPDATE_HELIX_3D).rows,
+   landmarks:parseCSV(RAW_LMK_HELIX_3D).rows},
+  {key:'stop_go', label:'Stop-go', canvas:'scenarioStopGo',
+   traj:parseCSV(RAW_TRAJ_STOP_GO).rows, update:parseCSV(RAW_UPDATE_STOP_GO).rows,
+   landmarks:parseCSV(RAW_LMK_STOP_GO).rows},
+];
+const T   = SCENARIOS[0].traj;
+const U   = SCENARIOS[0].update;
+const LMK = SCENARIOS[0].landmarks;
 const TRI = parseCSV(RAW_TRI).rows;
 const SUM = parseCSV(RAW_SUM).rows;
 
@@ -242,6 +282,19 @@ const quantile=(a,q)=>{
   const v=finiteValues(a).slice().sort((x,y)=>x-y); if(!v.length)return NaN;
   const p=(v.length-1)*q, i=Math.floor(p), f=p-i;
   return v[i]+(v[Math.min(i+1,v.length-1)]-v[i])*f;
+};
+const positionRpe=(rows,horizon=1)=>{
+  const errors=[]; let j=0;
+  for(let i=0;i<rows.length;i++){
+    j=Math.max(j,i+1);
+    while(j<rows.length && rows[j].t<rows[i].t+horizon)j++;
+    if(j>=rows.length)break;
+    const dx=(rows[j].px_est-rows[i].px_est)-(rows[j].px_gt-rows[i].px_gt);
+    const dy=(rows[j].py_est-rows[i].py_est)-(rows[j].py_gt-rows[i].py_gt);
+    const dz=(rows[j].pz_est-rows[i].pz_est)-(rows[j].pz_gt-rows[i].pz_gt);
+    errors.push(dx*dx+dy*dy+dz*dz);
+  }
+  return errors.length?Math.sqrt(errors.reduce((a,b)=>a+b,0)/errors.length):NaN;
 };
 
 // ================= 绘图基础设施 =================
@@ -355,6 +408,75 @@ function linePlot(id, opts){
   }
 }
 
+// ================= 2. 多场景回归 =================
+function drawScenarioOverview(scenario){
+  const cv=document.getElementById(scenario.canvas); if(!cv||!scenario.traj.length)return;
+  const {g,w,h}=setupHiDPI(cv), M={l:42,r:16,t:24,b:34};
+  const pw=w-M.l-M.r, ph=h-M.t-M.b;
+  let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity;
+  const include=(x,y)=>{if(!isFinite(x)||!isFinite(y))return;
+    x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);};
+  scenario.landmarks.forEach(r=>include(r.x,r.y));
+  scenario.traj.forEach(r=>{include(r.px_gt,r.py_gt);include(r.px_est,r.py_est);});
+  const dx=Math.max(x1-x0,1),dy=Math.max(y1-y0,1),pad=.07*Math.max(dx,dy);
+  x0-=pad;x1+=pad;y0-=pad;y1+=pad;
+  const scale=Math.min(pw/(x1-x0),ph/(y1-y0));
+  const cx=(x0+x1)/2,cy=(y0+y1)/2;
+  const X=x=>M.l+pw/2+(x-cx)*scale,Y=y=>M.t+ph/2-(y-cy)*scale;
+
+  g.clearRect(0,0,w,h);g.strokeStyle=C('--grid');g.lineWidth=1;
+  for(let i=0;i<=4;i++){
+    const px=M.l+pw*i/4,py=M.t+ph*i/4;
+    g.beginPath();g.moveTo(px,M.t);g.lineTo(px,M.t+ph);g.stroke();
+    g.beginPath();g.moveTo(M.l,py);g.lineTo(M.l+pw,py);g.stroke();
+  }
+  g.fillStyle='rgba(139,147,167,.42)';
+  const stride=Math.max(1,Math.ceil(scenario.landmarks.length/1200));
+  for(let i=0;i<scenario.landmarks.length;i+=stride){const r=scenario.landmarks[i];
+    g.beginPath();g.arc(X(r.x),Y(r.y),1.25,0,6.283);g.fill();}
+  const path=(kx,ky,color,width)=>{g.strokeStyle=color;g.lineWidth=width;g.beginPath();
+    scenario.traj.forEach((r,i)=>{const x=X(r[kx]),y=Y(r[ky]);i?g.lineTo(x,y):g.moveTo(x,y);});g.stroke();};
+  path('px_gt','py_gt',C('--gt'),2.4);path('px_est','py_est',C('--est'),1.7);
+
+  const rp=rms(scenario.traj.map(r=>r.err_p));
+  const z=finiteValues(scenario.traj.map(r=>r.pz_gt));
+  g.fillStyle=C('--fg');g.font='12px system-ui';g.textAlign='left';g.textBaseline='top';
+  g.fillText(`位置 RMSE ${fmt(rp,3)} m · Δz ${fmt(Math.max(...z)-Math.min(...z),2)} m`,M.l,5);
+  g.fillStyle=C('--dim');g.font='11px system-ui';g.textBaseline='bottom';
+  g.fillText('X (m)',M.l+pw-30,h-6);g.save();g.translate(12,M.t+ph/2);g.rotate(-Math.PI/2);g.fillText('Y (m)',0,0);g.restore();
+}
+
+(function(){
+  SCENARIOS.forEach(drawScenarioOverview);
+  const metrics=SCENARIOS.map(s=>{
+    const row=[...SUM].reverse().find(r=>String(r.scenario)===s.key&&String(r.tag)==='base');
+    const used=s.update.reduce((a,r)=>a+(r.obs_used||0),0);
+    const down=s.update.reduce((a,r)=>a+(r.obs_downweighted||0),0);
+    const rejected=s.update.reduce((a,r)=>a+(r.obs_rejected||0),0);
+    return {s,row,rpe:positionRpe(s.traj),improve:100*mean(s.update.map(r=>r.improve_p)),
+      downRate:100*down/Math.max(used,1),rejectRate:100*rejected/Math.max(used+rejected,1)};
+  }).filter(x=>x.row);
+  let html='<table><tr><th>场景</th><th>绝对位置 RMSE</th><th>1 s 相对位移 RMSE</th><th>最大位置误差</th><th>姿态 RMSE</th>'+
+    '<th>后验改善率</th><th>Huber 降权</th><th>硬拒绝</th><th>三角化成功率</th></tr>';
+  for(const m of metrics){const r=m.row;
+    html+=`<tr><td>${m.s.label}</td><td>${fmt(r.rmse_p,4)} m</td><td>${fmt(m.rpe,4)} m</td><td>${fmt(r.max_err_p,4)} m</td>`+
+      `<td>${fmt(r.rmse_att*180/Math.PI,3)}°</td><td>${fmt(m.improve,1)}%</td>`+
+      `<td>${fmt(m.downRate,2)}%</td><td>${fmt(m.rejectRate,3)}%</td>`+
+      `<td>${fmt(100*r.tri_success/Math.max(r.tri_attempts,1),1)}%</td></tr>`;
+  }
+  html+='</table>';document.getElementById('scenarioTable').innerHTML=html;
+  if(metrics.length){
+    const worst=metrics.reduce((a,b)=>a.row.rmse_p>b.row.rmse_p?a:b);
+    const stable=metrics.every(m=>m.row.max_err_p<10&&m.row.neg_cov===0);
+    document.getElementById('scenarioNotes').innerHTML=
+      `<div class="note ${stable?'ok':'bad'}"><b>跨场景稳定性</b>：`+
+      `${stable?'四类轨迹均未发散，且未检测到负协方差。':'存在发散或协方差异常。'}`+
+      `绝对位置包含 VIO 的全局平移 gauge 漂移，应结合 1 秒相对位移 RMSE 判断局部融合。`+
+      `最难场景为 ${worst.s.label}，位置 RMSE ${fmt(worst.row.rmse_p,4)} m。`+
+      `降权/拒绝比例用于判断鲁棒核是否频繁介入；比例过高通常意味着量测噪声、三角化或数据关联仍需检查。</div>`;
+  }
+})();
+
 // ================= 1. KPI =================
 (function(){
   const n=T.length;
@@ -362,13 +484,15 @@ function linePlot(id, opts){
   for(const r of T){ sp+=r.err_p*r.err_p; sv+=r.err_v*r.err_v; sa+=r.err_att*r.err_att;
                      if(r.err_p>mp)mp=r.err_p; }
   const rp=Math.sqrt(sp/n), rv=Math.sqrt(sv/n), ra=Math.sqrt(sa/n);
+  const rpe=positionRpe(T);
   const cards=[
     ['位置 RMSE', fmt(rp,4)+' m', '最大 '+fmt(mp,4)+' m', rp<0.5?'good':'bad'],
     ['速度 RMSE', fmt(rv,4)+' m/s', '轨迹速度 1 m/s', rv<0.1?'good':'bad'],
     ['姿态 RMSE', fmt(ra*180/Math.PI,4)+'°', fmt(ra,6)+' rad', ra<0.01?'good':'bad'],
     ['末帧位置误差', fmt(fin.err_p,4)+' m', '轨迹半径 5 m', fin.err_p<0.5?'good':'bad'],
+    ['1 s 相对位移 RMSE',fmt(rpe,4)+' m','弱化全局平移 gauge 的局部运动指标',rpe<0.3?'good':'warn'],
   ];
-  const base=[...SUM].reverse().find(r=>String(r.tag)==='base');
+  const base=[...SUM].reverse().find(r=>String(r.scenario)==='circle_out'&&String(r.tag)==='base');
   if(base&&base.updates>0){
     cards.push(['平均视觉后验耗时',fmt(1000*base.t_cost/base.updates,3)+' ms',
       `总计 ${fmt(base.t_cost,2)} s / ${base.updates} 次`,'']);
@@ -898,6 +1022,11 @@ linePlot('cg',{series:[
   {name:'g y',color:'#3ddc97',data:T.map(r=>[r.t,r.gy])},
   {name:'g z',color:'#4d94ff',data:T.map(r=>[r.t,r.gz])},
 ]});
+document.getElementById('gravityNote').innerHTML=
+  `<div class="note ok"><b>重力未参与估计</b>：<code>ESTIMATE_GRAVITY=false</code>，`+
+  `状态维数减少 3；图中仅检查传播期间固定值是否保持为 (0, 0, 9.81)。`+
+  `这适用于仿真真值与初始化完全一致的验证。真实设备若初始姿态/重力方向未知，应先完成静止初始化，`+
+  `或重新开启重力估计并保证运动具有足够激励。</div>`;
 
 // ================= 6. 噪声扫描 =================
 function barSweep(id, rows, keyX, labelX){
@@ -915,15 +1044,15 @@ function barSweep(id, rows, keyX, labelX){
     g.beginPath();g.moveTo(M.l,Y(v));g.lineTo(M.l+pw,Y(v));g.stroke();
     g.textAlign='right';g.textBaseline='middle';g.fillText(v.toExponential(0),M.l-7,Y(v));
   }
-  // 可接受阈值线
+  // 工程参考线（绝对位置包含全局平移 gauge，并非发散判据）
   g.strokeStyle=C('--ok'); g.setLineDash([5,4]); g.lineWidth=1.2;
-  g.beginPath();g.moveTo(M.l,Y(1));g.lineTo(M.l+pw,Y(1));g.stroke();g.setLineDash([]);
-  g.fillStyle=C('--ok');g.textAlign='left';g.fillText('1 m',M.l+4,Y(1)-9);
+  g.beginPath();g.moveTo(M.l,Y(2));g.lineTo(M.l+pw,Y(2));g.stroke();g.setLineDash([]);
+  g.fillStyle=C('--ok');g.textAlign='left';g.fillText('2 m 参考线',M.l+4,Y(2)-9);
 
   const bw=pw/rows.length;
   rows.forEach((r,i)=>{
     const x=M.l+i*bw+bw*0.18, bwid=bw*0.64;
-    const diverged = r.rmse_p>1;
+    const diverged = r.rmse_p>5 || r.max_err_p>10;
     g.fillStyle = diverged?'rgba(255,92,122,0.75)':'rgba(61,220,151,0.75)';
     const y=Y(Math.max(r.rmse_p,1e-4));
     g.fillRect(x,y,bwid,M.t+ph-y);
@@ -940,21 +1069,25 @@ function barSweep(id, rows, keyX, labelX){
   g.save();g.translate(14,M.t+ph/2);g.rotate(-Math.PI/2);
   g.fillText('位置 RMSE (m, 对数轴)',0,0);g.restore();
 }
-const sweepUV  = SUM.filter(r=>String(r.tag).startsWith('uv')).sort((a,b)=>a.uv_var-b.uv_var);
-const sweepPR  = SUM.filter(r=>String(r.tag).startsWith('proc')).sort((a,b)=>a.proc_scale-b.proc_scale);
+const sweepUV  = SUM.filter(r=>String(r.scenario)==='circle_out'&&String(r.tag).startsWith('uv_'))
+                    .sort((a,b)=>a.uv_var-b.uv_var);
+const sweepPR  = SUM.filter(r=>String(r.scenario)==='circle_out'&&String(r.tag).startsWith('proc_'))
+                    .sort((a,b)=>a.proc_scale-b.proc_scale);
 barSweep('csweep1', sweepUV, 'uv_var', '量测噪声方差 uv_var');
 barSweep('csweep2', sweepPR, 'proc_scale', '过程噪声缩放 scale');
 
 (function(){
-  const rows=[...SUM].sort((a,b)=>a.rmse_p-b.rmse_p);
+  const rows=SUM.filter(r=>String(r.tag)==='base'||String(r.tag).startsWith('uv_')||
+                              String(r.tag).startsWith('proc_'))
+                .sort((a,b)=>a.rmse_p-b.rmse_p);
   const best=rows[0];
-  let html='<table><tr><th>配置</th><th>uv_var</th><th>proc scale</th>'+
+  let html='<table><tr><th>场景</th><th>配置</th><th>uv_var</th><th>proc scale</th>'+
            '<th>位置 RMSE (m)</th><th>速度 RMSE</th><th>姿态 RMSE (rad)</th>'+
            '<th>最大误差 (m)</th><th>耗时 (s)</th></tr>';
   for(const r of rows){
-    const div=r.rmse_p>1;
+    const div=r.rmse_p>5 || r.max_err_p>10;
     html+=`<tr class="${div?'diverge':(r===best?'best':'')}">`+
-      `<td>${r.tag}</td><td>${r.uv_var}</td><td>${r.proc_scale}</td>`+
+      `<td>${r.scenario}</td><td>${r.tag}</td><td>${r.uv_var}</td><td>${r.proc_scale}</td>`+
       `<td>${div?'发散 ('+r.rmse_p.toExponential(1)+')':fmt(r.rmse_p,4)}</td>`+
       `<td>${div?'—':fmt(r.rmse_v,4)}</td><td>${div?'—':fmt(r.rmse_att,6)}</td>`+
       `<td>${div?'—':fmt(r.max_err_p,4)}</td><td>${fmt(r.t_cost,2)}</td></tr>`;
@@ -963,22 +1096,22 @@ barSweep('csweep2', sweepPR, 'proc_scale', '过程噪声缩放 scale');
   document.getElementById('sweepTable').innerHTML=html;
 
   // 自动结论
-  const okUV=sweepUV.filter(r=>r.rmse_p<1).map(r=>r.uv_var);
-  const okPR=sweepPR.filter(r=>r.rmse_p<1).map(r=>r.proc_scale);
+  const okUV=sweepUV.filter(r=>r.rmse_p<=5&&r.max_err_p<=10).map(r=>r.uv_var);
+  const okPR=sweepPR.filter(r=>r.rmse_p<=5&&r.max_err_p<=10).map(r=>r.proc_scale);
   let n='';
   if(okUV.length){
     const allStable=okUV.length===sweepUV.length;
     n+=`<div class="note"><b>量测噪声</b>：扫描区间 uv_var ∈ [${Math.min(...okUV)}, ${Math.max(...okUV)}] `+
        `${allStable?'全部稳定':'内存在稳定配置'}。`+
-       `在当前仿真中减小 uv_var 会提高视觉权重并降低误差；默认值 <code>400</code> `+
-       `不再处于发散边界。该趋势不能替代真实数据上的残差统计与噪声标定。</div>`;
+       `默认值 <code>1e-2</code> 是 30 秒四场景扫描后选择的稳健折中；继续减小会在滑窗充分运行后放大线性化和 gauge 漂移。`+
+       `该趋势不能替代真实数据上的残差统计与噪声标定。</div>`;
   }
   if(okPR.length){
     const allStable=okPR.length===sweepPR.length;
     n+=`<div class="note"><b>过程噪声</b>：扫描区间 scale ∈ [${Math.min(...okPR)}, ${Math.max(...okPR)}] `+
        `${allStable?'全部稳定':'内存在稳定配置'}。采样点中的最优值为 `+
-       `<code>${sweepPR.reduce((a,b)=>a.rmse_p<b.rmse_p?a:b).proc_scale}</code>，`+
-       `说明默认 scale=1 在本仿真里偏保守；仍应依据真实 IMU Allan 方差标定，而不是直接采用扫描极值。</div>`;
+       `<code>${sweepPR.reduce((a,b)=>a.rmse_p<b.rmse_p?a:b).proc_scale}</code>。`+
+       `默认 scale=1 以四类轨迹的平均与最坏误差折中为准；真实 IMU 仍应使用 Allan 方差标定。</div>`;
   }
   document.getElementById('sweepNotes').innerHTML=n;
 })();
@@ -987,6 +1120,9 @@ barSweep('csweep2', sweepPR, 'proc_scale', '过程噪声缩放 scale');
 (function(){
   const lmk=U.map(r=>r.n_lmk), meas=T.map(r=>r.n_meas), win=U.map(r=>r.win);
   const keyframes=U.filter(r=>r.is_kf).length;
+  const used=U.reduce((a,r)=>a+(r.obs_used||0),0);
+  const down=U.reduce((a,r)=>a+(r.obs_downweighted||0),0);
+  const rejected=U.reduce((a,r)=>a+(r.obs_rejected||0),0);
   const maxWin=Math.max(...win);
   const fullRate=100*win.filter(v=>v===maxWin).length/Math.max(win.length,1);
   const cards=[
@@ -994,6 +1130,8 @@ barSweep('csweep2', sweepPR, 'proc_scale', '过程噪声缩放 scale');
     ['原始观测中位数',fmt(quantile(meas,0.5),0),`P10–P90: ${fmt(quantile(meas,0.1),0)}–${fmt(quantile(meas,0.9),0)}`,''],
     ['关键帧比例',fmt(100*keyframes/Math.max(U.length,1),1)+'%',`${keyframes}/${U.length} 次更新`,''],
     ['最大窗口占用率',fmt(fullRate,1)+'%',`最大 ${maxWin} 帧`,''],
+    ['Huber 降权率',fmt(100*down/Math.max(used,1),2)+'%',`${down}/${used} 条已用观测`,''],
+    ['硬拒绝率',fmt(100*rejected/Math.max(used+rejected,1),3)+'%',`${rejected} 条深度/残差异常`,''],
   ];
   document.getElementById('obsStats').innerHTML=cards.map(c=>
     `<div class="kpi"><div class="k">${c[0]}</div>`+

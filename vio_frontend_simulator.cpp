@@ -5,14 +5,13 @@
 #include "vio_frontend_simulator.h"
 #include <iostream>
 
-static std::random_device rd;
-std::mt19937 VIOFrontendSimulator::random_generator_(0123);
-
 // 生成圆环形分布的特征点
 void VIOFrontendSimulator::generateCircularFeatures() {
     size_t id = 0;
     feature_positions_.clear();
     feature_positions_.reserve(num_features_ << 1);
+    // 几何与传感器噪声使用独立固定随机流，改变特征数不会改变 IMU/图像噪声序列。
+    std::mt19937 feature_generator(0xC011u);
 
     // 如果没有指定圆环半径，默认添加一个
     if (ring_radii_.empty()) {
@@ -34,8 +33,8 @@ void VIOFrontendSimulator::generateCircularFeatures() {
             std::uniform_real_distribution<double> dist_theta(ring_min_theta_, ring_max_theta_);
             std::uniform_real_distribution<double> dist_phi(ring_min_phi_, ring_max_phi_);
 
-            double theta = dist_theta(random_generator_);  // 方位角（绕z轴）
-            double phi = dist_phi(random_generator_);      // 极角（偏离xy平面）
+            double theta = dist_theta(feature_generator);  // 方位角（绕z轴）
+            double phi = dist_phi(feature_generator);      // 极角（偏离xy平面）
 
             // 球坐标转笛卡尔坐标
             double x = radius * cos(theta) * cos(phi);
@@ -54,6 +53,7 @@ void VIOFrontendSimulator::generateCircularFeatures() {
 // 生成真实轨迹（圆周运动）
 std::vector<State> VIOFrontendSimulator::generateGroundTruth() const {
     std::vector<State> ground_truth;
+    std::mt19937 bias_generator(0xC012u);
 
     double total_time = trajectory_duration_;
     double dt = 1.0 / imu_rate_;  // 按IMU频率生成真实状态
@@ -95,15 +95,15 @@ std::vector<State> VIOFrontendSimulator::generateGroundTruth() const {
         R.col(2) = -right_dir;
         current.q = Eigen::Quaterniond(R);
 
-        // 模拟IMU偏置缓慢变化（随机游走）
-//        std::normal_distribution<double> ba_noise(0, imu_acc_bias_noise_std_ * sqrt(dt));
-//        std::normal_distribution<double> bg_noise(0, imu_gyro_bias_noise_std_ * sqrt(dt));
-//        current.ba.x() += ba_noise(random_generator_);
-//        current.ba.y() += ba_noise(random_generator_);
-//        current.ba.z() += ba_noise(random_generator_);
-//        current.bg.x() += bg_noise(random_generator_);
-//        current.bg.y() += bg_noise(random_generator_);
-//        current.bg.z() += bg_noise(random_generator_);
+        // 模拟 IMU 偏置随机游走：连续时间密度离散化后乘 sqrt(dt)。
+        std::normal_distribution<double> ba_noise(0, imu_acc_bias_noise_std_ * sqrt(dt));
+        std::normal_distribution<double> bg_noise(0, imu_gyro_bias_noise_std_ * sqrt(dt));
+        current.ba += Eigen::Vector3d(ba_noise(bias_generator),
+                                      ba_noise(bias_generator),
+                                      ba_noise(bias_generator));
+        current.bg += Eigen::Vector3d(bg_noise(bias_generator),
+                                      bg_noise(bias_generator),
+                                      bg_noise(bias_generator));
 
         ground_truth.push_back(current);
     }
@@ -114,6 +114,7 @@ std::vector<State> VIOFrontendSimulator::generateGroundTruth() const {
 // 生成IMU测量数据
 std::vector<ImuData> VIOFrontendSimulator::generateImuData(const std::vector<State>& ground_truth) const {
     std::vector<ImuData> imu_data;
+    std::mt19937 imu_generator(0xC013u);
 
     // 重力加速度
     Eigen::Vector3d g(0, 0, 9.81);
@@ -131,10 +132,10 @@ std::vector<ImuData> VIOFrontendSimulator::generateImuData(const std::vector<Sta
         Eigen::Vector3d acc_ideal = curr.q.inverse() * ((curr.v - prev.v) / dt - g);
         // 添加偏置和噪声
         data.accel = acc_ideal + curr.ba;
-        std::normal_distribution<double> acc_noise(0, imu_acc_noise_std_ / sqrt(imu_rate_));
-        data.accel += Eigen::Vector3d(acc_noise(random_generator_),
-                                      acc_noise(random_generator_),
-                                      acc_noise(random_generator_));
+        std::normal_distribution<double> acc_noise(0, imu_acc_noise_std_ * sqrt(imu_rate_));
+        data.accel += Eigen::Vector3d(acc_noise(imu_generator),
+                                      acc_noise(imu_generator),
+                                      acc_noise(imu_generator));
 
         // 计算理想角速度（机体坐标系）
         Eigen::Quaterniond dq = prev.q.inverse() * curr.q;
@@ -143,10 +144,10 @@ std::vector<ImuData> VIOFrontendSimulator::generateImuData(const std::vector<Sta
         Eigen::Vector3d gyro_ideal = slam::quat2vec(dq) / dt;
         // 添加偏置和噪声
         data.gyro = gyro_ideal + curr.bg;
-        std::normal_distribution<double> gyro_noise(0, imu_gyro_noise_std_ / sqrt(imu_rate_));
-        data.gyro += Eigen::Vector3d(gyro_noise(random_generator_),
-                                     gyro_noise(random_generator_),
-                                     gyro_noise(random_generator_));
+        std::normal_distribution<double> gyro_noise(0, imu_gyro_noise_std_ * sqrt(imu_rate_));
+        data.gyro += Eigen::Vector3d(gyro_noise(imu_generator),
+                                     gyro_noise(imu_generator),
+                                     gyro_noise(imu_generator));
 
         imu_data.push_back(data);
     }
@@ -157,6 +158,7 @@ std::vector<ImuData> VIOFrontendSimulator::generateImuData(const std::vector<Sta
 // 生成相机测量数据
 std::vector<CameraData> VIOFrontendSimulator::generateCameraData(const std::vector<State>& ground_truth) const {
     std::vector<CameraData> camera_data;
+    std::mt19937 camera_generator(0xC014u);
 
     double camera_dt = 1.0 / camera_rate_;
     auto camera_dt_us = static_cast<uint64_t>(camera_dt * 1e6);
@@ -195,8 +197,8 @@ std::vector<CameraData> VIOFrontendSimulator::generateCameraData(const std::vect
 
                 // 添加噪声
                 std::normal_distribution<double> noise(0, camera_noise_std_);
-                uv.x() += noise(random_generator_);
-                uv.y() += noise(random_generator_);
+                uv.x() += noise(camera_generator);
+                uv.y() += noise(camera_generator);
 
 //                // 添加到观测数据
 //                data.measurements.emplace(id, uv);

@@ -56,6 +56,8 @@ SchurVINS::triangulateLandmark(const Landmark &landmark) const {
     views.reserve(landmark.frm2fet.size());
     const Mat3_3 Ric = ext_.q_ic.toRotationMatrix();
 
+    // 先把数据结构中的观测转换成统一的几何量：世界系相机中心 C_i 和单位视线 d_i。
+    // 后续线性初始化、视差判断和非线性重投影都复用它们，避免循环中重复做外参变换。
     for (const auto &[frame_id, feature] : landmark.frm2fet) {
         (void)frame_id;
         if (!feature || !feature->frame || !feature->obs[0]) {
@@ -100,6 +102,8 @@ SchurVINS::triangulateLandmark(const Landmark &landmark) const {
             (view.relative_pose_covariance + view.relative_pose_covariance.transpose());
     }
 
+    // 两条世界系单位视线的夹角 theta_ij=acos(d_i^T d_j) 决定深度条件数。
+    // 使用所有观测对的最大夹角，而不是只比较首末帧，可兼容轨迹回头或观测中断。
     TYPE max_parallax = TYPE(0);
     for (size_t i = 0; i + 1 < views.size(); ++i) {
         for (size_t j = i + 1; j < views.size(); ++j) {
@@ -113,7 +117,11 @@ SchurVINS::triangulateLandmark(const Landmark &landmark) const {
         return finish(TriangulationStatus::LowParallax);
     }
 
-    // 射线最小二乘初始化：sum(I-dd^T) * Pw = sum((I-dd^T) * Cw)。
+    // 射线最小二乘初始化：点 P 到射线 (C_i,d_i) 的垂直残差为
+    //   e_i=(I-d_i d_i^T)(P-C_i)。
+    // 最小化 sum ||e_i||^2 后的正规方程为
+    //   sum(I-d_i d_i^T) P = sum(I-d_i d_i^T) C_i。
+    // 当所有视线近似平行时，沿视线方向的特征值趋近 0，因此求解前必须检查条件数。
     Mat3_3 ray_hessian = Mat3_3::Zero();
     Vec3 ray_gradient = Vec3::Zero();
     for (const auto &view : views) {
@@ -170,6 +178,8 @@ SchurVINS::triangulateLandmark(const Landmark &landmark) const {
                 return false;
             }
 
+            // 归一化针孔投影 pi([x,y,z])=[x/z,y/z] 的雅可比；随后分别链式得到
+            // 对世界点和 clone 位姿误差 [delta_theta,delta_p] 的雅可比。
             Mat2_3 J_projection;
             J_projection << inv_depth, TYPE(0), -d_camera.x() * inv_depth2,
                             TYPE(0), inv_depth, -d_camera.y() * inv_depth2;
@@ -180,6 +190,8 @@ SchurVINS::triangulateLandmark(const Landmark &landmark) const {
             J_pose.leftCols<3>().noalias() = J_landmark * hat(d_world);
             J_pose.rightCols<3>().noalias() = -J_landmark;
 
+            // S_i = sigma_uv^2 I + J_pose P_rel J_pose^T。
+            // 这里用相对 clone 协方差，避免把所有帧共有的全局 gauge 不确定度反复计入。
             Mat2_2 residual_covariance =
                 J_pose * view.relative_pose_covariance * J_pose.transpose();
             residual_covariance = TYPE(0.5) *
@@ -208,6 +220,8 @@ SchurVINS::triangulateLandmark(const Landmark &landmark) const {
                 return false;
             }
             const Mat2_2 weight_matrix = residual_covariance.inverse();
+            // 在白化残差上使用 3-sigma Huber。正常观测保持二次代价；异常观测的
+            // 影响随 1/||r|| 衰减，但仍保留方向信息，最终再由重投影硬门限判成失败。
             const TYPE mahalanobis2 = std::max(TYPE(0), residual.dot(weight_matrix * residual));
             const TYPE mahalanobis = std::sqrt(mahalanobis2);
             const TYPE huber_weight = mahalanobis > TYPE(3) ? TYPE(3) / mahalanobis : TYPE(1);
@@ -227,6 +241,8 @@ SchurVINS::triangulateLandmark(const Landmark &landmark) const {
     Vec3 gradient;
     TYPE squared_error = TYPE(0);
     TYPE normalized_error = TYPE(0);
+    // 以射线解为初值做最多 5 次 Gauss-Newton。当前 residual=measurement-estimate，
+    // 且 J_landmark=d(estimate)/dP，所以正规方程是 H*delta=J^T W residual，更新 P+=delta。
     for (size_t iteration = 0; iteration < 5; ++iteration) {
         if (!accumulateReprojection(position, information, gradient,
                                     squared_error, normalized_error)) {
@@ -269,6 +285,8 @@ SchurVINS::triangulateLandmark(const Landmark &landmark) const {
     }
     result.condition_number = information_max / information_min;
 
+    // 条件信息矩阵给出 P_l|poses = Lambda^-1；若白化残差的 chi^2/dof>1，
+    // 再按该比例膨胀协方差，防止模型失配时给出虚假的高精度初值。
     const TYPE degrees_of_freedom = std::max<TYPE>(
         TYPE(1), TYPE(2) * static_cast<TYPE>(views.size()) - TYPE(3));
     const TYPE covariance_scale = std::max(TYPE(1), normalized_error / degrees_of_freedom);
@@ -515,7 +533,9 @@ void SchurVINS::predict(const slam::IMUData &imu_data, const double dt) {
         }
         AP.middleRows<3>(I::BG).noalias() = cov_.middleRows<3>(I::BG);
         AP.middleRows<3>(I::BA).noalias() = cov_.middleRows<3>(I::BA);
-        AP.middleRows<3>(I::G).noalias() = cov_.middleRows<3>(I::G);
+        if constexpr (INSState::ESTIMATE_GRAVITY) {
+            AP.middleRows<3>(I::G).noalias() = cov_.middleRows<3>(I::G);
+        }
 
         cov.middleCols<3>(I::Q).noalias() = AP.middleCols<3>(I::Q)
                                             + AP.middleCols<3>(I::BG) * nRdt.transpose();
@@ -702,8 +722,13 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     }
 
 
+// 当前项目的统一验证/报告路径。QR 实现保留用于历史 A/B 对照，但默认不编译执行。
+// 后续视觉算法修改应先保证 USE_SCHUR 路径正确，再按需单独回归 QR。
 //#define USE_QR
 #define USE_SCHUR
+#if defined(USE_QR) && defined(USE_SCHUR)
+#error "USE_QR and USE_SCHUR are mutually exclusive"
+#endif
 #if defined(USE_QR)
     auto t1 = clock();
 
@@ -1039,13 +1064,43 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     VecX gl(lmk_size);
     gp.setZero();
     gl.setZero();
+    std::vector<size_t> valid_observations_per_landmark(ids.size(), 0);
 
     // 优化: 外参相关量对整帧是常量，提到所有循环外(原本每个观测都重算一次)
     const Mat3_3 Ric = ext_.q_ic.toRotationMatrix();
+    size_t observations_used = 0;
+    size_t observations_downweighted = 0;
+    size_t observations_rejected = 0;
+
+    // 单个观测无法在消元 landmark 后约束位姿。先暂存每个点的第一条有效观测，
+    // 只有第二条到来后才一起写入全局 Hessian；否则 Hpp 会错误地把该点当成固定地图点。
+    struct LinearizedObservation {
+        Mat2_6 J_pose;
+        Mat2_3 J_landmark;
+        Vec2 residual;
+        TYPE weight{TYPE(1)};
+        size_t frame_index{0};
+    };
+    std::vector<LinearizedObservation> first_observation(ids.size());
+    auto accumulate_observation = [&](const size_t landmark_index,
+                                      const LinearizedObservation &linearized) {
+        Hpp.block<6, 6>(linearized.frame_index, linearized.frame_index)
+            .triangularView<Eigen::Upper>() +=
+                linearized.weight * linearized.J_pose.transpose() * linearized.J_pose;
+        Hll_diag.middleRows<3>(landmark_index).triangularView<Eigen::Upper>() +=
+            linearized.weight * linearized.J_landmark.transpose() * linearized.J_landmark;
+        Hpl.block<6, 3>(linearized.frame_index, landmark_index).noalias() +=
+            linearized.weight * linearized.J_pose.transpose() * linearized.J_landmark;
+        gp.segment<6>(linearized.frame_index).noalias() +=
+            linearized.weight * linearized.J_pose.transpose() * linearized.residual;
+        gl.segment<3>(landmark_index).noalias() +=
+            linearized.weight * linearized.J_landmark.transpose() * linearized.residual;
+        ++observations_used;
+        observations_downweighted += linearized.weight < TYPE(1) ? 1 : 0;
+    };
 
     // 遍历 landmarks
     for (size_t i = 0; i < ids.size(); ++i) {
-        const auto id = ids[i].first;
         auto lmk = ids[i].second;
         const size_t lmk_index = LMK_SIZE * i;
 
@@ -1065,10 +1120,24 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             const Vec3 d_ij_w = lmk->position - frm->p();
             const Vec3 d_cj_i = Rwi.transpose() * d_ij_w - ext_.t_ic;
             const Vec3 d_cj_c = Ric.transpose() * d_cj_i;
+            if (!d_cj_c.allFinite() || d_cj_c.z() <= TYPE(0.05)) {
+                ++observations_rejected;
+                continue;
+            }
             const auto inv_d = TYPE(1) / d_cj_c.z();
             const auto inv_d2 = inv_d * inv_d;
             const Vec2 est = d_cj_c.head<2>() * inv_d;
             const Vec2 err = obs->un_pt.head<2>() - est;
+            const TYPE residual_norm = err.norm();
+            if (!std::isfinite(residual_norm) ||
+                residual_norm > visual_hard_reprojection_limit) {
+                ++observations_rejected;
+                continue;
+            }
+            const TYPE huber_delta = std::max(
+                visual_huber_delta_sigma * triangulation_uv_std, TYPE(1e-8));
+            const TYPE robust_weight = residual_norm > huber_delta
+                ? huber_delta / residual_norm : TYPE(1);
 
             Mat2_3 J;
             J << inv_d, TYPE(0), -d_cj_c.x() * inv_d2,
@@ -1093,13 +1162,18 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             }
 
             const size_t frm_index = INSState::SIZE + AugState::SIZE * frm->ordering;
-
-            Hpp.block<6, 6>(frm_index, frm_index).triangularView<Eigen::Upper>() += J_pose.transpose() * J_pose;
-            Hll_diag.middleRows<3>(lmk_index).triangularView<Eigen::Upper>() += J_lmk.transpose() * J_lmk;
-            Hpl.block<6, 3>(frm_index, lmk_index).noalias() += J_pose.transpose() * J_lmk;
-
-            gp.segment<6>(frm_index).noalias() += J_pose.transpose() * err;
-            gl.segment<3>(lmk_index).noalias() += J_lmk.transpose() * err;
+            LinearizedObservation current{J_pose, J_lmk, err, robust_weight, frm_index};
+            auto &valid_count = valid_observations_per_landmark[i];
+            if (valid_count == 0) {
+                first_observation[i] = current;
+                valid_count = 1;
+                continue;
+            }
+            if (valid_count == 1) {
+                accumulate_observation(lmk_index, first_observation[i]);
+            }
+            accumulate_observation(lmk_index, current);
+            ++valid_count;
         }
     }
     Hpp.triangularView<Eigen::StrictlyLower>() = Hpp.triangularView<Eigen::StrictlyUpper>().transpose();
@@ -1120,6 +1194,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     //   标量索引开销超过了省下的乘零。稠密 GEMM 的向量化更划算，保持原样。
     MatXX tmp(COV_SIZE, LMK_SIZE);
     for (size_t i = 0; i < ids.size(); ++i) {
+        if (valid_observations_per_landmark[i] < 2) {
+            continue;
+        }
         auto index = i * LMK_SIZE;
 
         // STEP1: 对 Hll 求逆
@@ -1271,6 +1348,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         log.cov_v_trace = cov_.diagonal().segment<3>(I::V).sum();
         log.nis_mean = nis_count ? nis_sum / static_cast<TYPE>(nis_count) : TYPE(0);
         log.nis_dof = nis_count;
+        log.n_obs_used = observations_used;
+        log.n_obs_downweighted = observations_downweighted;
+        log.n_obs_rejected = observations_rejected;
         logs_.emplace_back(log);
     }
 
@@ -1281,6 +1361,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     // [[ 更新 Landmark ]]
     gl -= Hpl.transpose() * dx_p;
     for (size_t i = 0; i < ids.size(); ++i) {
+        if (valid_observations_per_landmark[i] < 2) {
+            continue;
+        }
         auto id = ids[i].first;
         auto lmk = ids[i].second;
         auto index = i * LMK_SIZE;

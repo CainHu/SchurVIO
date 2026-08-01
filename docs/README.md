@@ -29,6 +29,7 @@
 | [QR_VS_SCHUR.md](QR_VS_SCHUR.md) | 理论：为什么 QR 比 Schur 慢 5 倍；两条失败的优化尝试 |
 | [ANALYSIS_REPORT.md](ANALYSIS_REPORT.md) | **精度分析**：视觉后验的修正作用、噪声敏感度、协方差问题（配套 `out/report.html` 交互图表） |
 | [TRIANGULATION.md](TRIANGULATION.md) | 多视图三角化、失败门限、初始 landmark 协方差和真值离线评估 |
+| [SIMULATION_SCENARIOS.md](SIMULATION_SCENARIOS.md) | Circle-out / Circle-in / Helix-3D / Stop-go 场景与统一噪声模型 |
 | [HPP_NULLSPACE.md](HPP_NULLSPACE.md) | 理论：为什么 `Hpp` 恒有 ~31 维零空间；跳过策略是否正确 |
 | [HLL_STRUCTURE.md](HLL_STRUCTURE.md) | 理论：`Hll` 的零特征值 = 深度方向；`Hll` 换 LDLT |
 
@@ -49,7 +50,7 @@
 
 | 开关 | 位置 | 默认 | 说明 |
 |---|---|---|---|
-| `INSState::ESTIMATE_GRAVITY` | `common.h` | `true` | 是否估计重力向量 |
+| `INSState::ESTIMATE_GRAVITY` | `common.h` | `false` | 仿真重力已知时固定；真实设备可重新开启 |
 | `ExtState::ESTIMATE_EXTRINSIC` | `common.h` | `false` | 是否估计相机-IMU 外参 |
 | `USE_LDLT_FOR_HPP` | `eskf/schur_vins.h` | `true` | `Hpp` 分解：`true`=LDLT，`false`=特征分解 |
 | `USE_LDLT_FOR_HLL` | `eskf/schur_vins.h` | `true` | `Hll` 分解，同上（性能上两者无差别） |

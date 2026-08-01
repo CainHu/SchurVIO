@@ -21,10 +21,10 @@ private:
     // 模拟器参数
     double imu_rate_ = 200.0;  // IMU采样频率(Hz)
     double camera_rate_ = 20.0;  // 相机采样频率(Hz)
-    double imu_acc_noise_std_ = 0.02;  // 加速度计噪声标准差(m/s²)
-    double imu_gyro_noise_std_ = 0.01;  // 陀螺仪噪声标准差(rad/s)
-    double imu_acc_bias_noise_std_ = 0.001;  // 加速度计偏置噪声标准差(m/s²)
-    double imu_gyro_bias_noise_std_ = 0.0001;  // 陀螺仪偏置噪声标准差(rad/s)
+    double imu_acc_noise_std_ = 0.02;  // 加速度计白噪声密度(m/s²/sqrt(Hz))
+    double imu_gyro_noise_std_ = 0.01;  // 陀螺仪白噪声密度(rad/s/sqrt(Hz))
+    double imu_acc_bias_noise_std_ = 0.001;  // 加速度计偏置随机游走密度
+    double imu_gyro_bias_noise_std_ = 0.0001;  // 陀螺仪偏置随机游走密度
     double fov_ = 2. * M_PI / 3.;
     double camera_cx_ = 320.0; // 相机内参
     double camera_cy_ = 320.0;
@@ -46,8 +46,6 @@ private:
 
     std::unordered_map<size_t, Eigen::Vector3d> feature_positions_; // 特征点3D位置
 
-    static std::mt19937 random_generator_;  // 随机数生成器
-
     // 生成真实轨迹
     [[nodiscard]] std::vector<State> generateGroundTruth() const;
 
@@ -66,7 +64,7 @@ public:
         generateCircularFeatures();
     }
 
-    // 设置IMU噪声参数
+    // 设置 IMU 噪声参数：白噪声密度与偏置随机游走密度，离散化规则同 Simulator0。
     void setImuNoise(double acc_noise_std, double gyro_noise_std,
                      double acc_bias_noise_std, double gyro_bias_noise_std) {
         imu_acc_noise_std_ = acc_noise_std;
@@ -105,4 +103,7 @@ public:
     const auto& getFeaturePositions() const {
         return feature_positions_;
     }
+
+    [[nodiscard]] double getCameraFocalLength() const { return camera_fx_; }
+    [[nodiscard]] double getCameraNoiseStd() const { return camera_noise_std_; }
 };

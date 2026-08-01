@@ -64,6 +64,8 @@ add_executable(VinsEKF main.cpp
         common.h
         vio_frontend_simulator1.cpp
         vio_frontend_simulator1.h
+        vio_representative_simulator.cpp
+        vio_representative_simulator.h
         data_structure/sliding_window.cpp
         data_structure/sliding_window.h
         data_structure/observation.cpp
@@ -82,6 +84,8 @@ add_executable(VinsAnalysis tools/analysis_main.cpp
         data_structure/map.cpp
         data_structure/pool.cpp
         vio_frontend_simulator.cpp
+        vio_frontend_simulator1.cpp
+        vio_representative_simulator.cpp
         eskf/schur_vins.cpp
         data_structure/sliding_window.cpp
         data_structure/observation.cpp

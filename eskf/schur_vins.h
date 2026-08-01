@@ -165,9 +165,10 @@ namespace slam {
 
         constexpr static size_t LMK_SIZE = 3;
 
-        // 量测噪声(视觉). 原先是 constexpr，改为成员变量以便做噪声敏感度扫描。
-        // 默认值与此前一致，不改变行为。
-        TYPE uv_var = TYPE(400);
+        // Schur 序贯伪量测的噪声密度。更新中使用 R_i=uv_var/(d_i*dt)，
+        // 因此它不是像素方差。30 s / 600 点四场景长时扫描后取 1e-2：
+        // 1e-4 在滑窗充分运行后会放大线性化/gauge 漂移，1e-2 的最坏误差更稳健。
+        TYPE uv_var = TYPE(1e-2);
         // 过程噪声整体缩放因子(1.0 = 使用 INSState 中配置的原值)，用于敏感度扫描
         TYPE proc_noise_scale_ = TYPE(1);
         constexpr static TYPE lmk_var = TYPE(0.01);
@@ -178,6 +179,11 @@ namespace slam {
         TYPE triangulation_min_parallax_deg = TYPE(5.0);
         TYPE triangulation_max_reprojection_rmse = TYPE(0.03);
         TYPE triangulation_max_position_std = TYPE(50);
+
+        // Schur 重投影残差采用 Huber 权重；阈值以归一化像平面标准差为单位。
+        TYPE visual_huber_delta_sigma = TYPE(3);
+        // 超过该归一化残差的观测视为明显错误，避免错误深度/关联造成灾难性更新。
+        TYPE visual_hard_reprojection_limit = TYPE(0.1);
 
         // ---- 数据采集(用于可视化/分析，见 tools/) ----
         struct UpdateLog {
@@ -195,6 +201,9 @@ namespace slam {
             TYPE nis_mean;
             size_t nis_dof;
             size_t n_lmk;      // 参与本次更新的 landmark 数
+            size_t n_obs_used;
+            size_t n_obs_downweighted;
+            size_t n_obs_rejected;
             size_t win_size;   // 滑窗帧数
             bool is_keyframe;
         };

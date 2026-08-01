@@ -1,17 +1,21 @@
 // 分析工具: 跑仿真并导出 CSV，供 tools/report.html 可视化
 //
 // 用法:
-//   VinsAnalysis [uv_var] [tag]
-//     uv_var  视觉量测噪声方差(默认 400)
+//   VinsAnalysis [uv_var] [tag] [proc_scale] [scenario] [duration] [features]
+//     uv_var  Schur 序贯伪量测的噪声密度
 //     tag     输出文件名后缀，用于噪声扫描时区分多组结果
+//     scenario circle_out / circle_in / helix_3d / stop_go
 //
 // 输出(写到 out/ 目录):
-//   traj_<tag>.csv     每相机帧: GT / EST 位姿速度、误差、协方差
-//   update_<tag>.csv   每次视觉更新: 先验/后验状态、修正量、NEES
-//   lmk.csv            landmark 真值位置(只在 tag=base 时写)
+//   traj_<scenario>_<tag>.csv   每相机帧: GT / EST 位姿速度、误差、协方差
+//   update_<scenario>_<tag>.csv 每次视觉更新: 先验/后验、修正量、NIS/鲁棒门控
+//   lmk_<scenario>.csv          landmark 真值位置(只在 tag=base 时写)
+//   triangulation_<scenario>_<tag>.csv  三角化质量与真值离线对比
 //   summary.csv        每组参数一行汇总(追加)
 
 #include "../vio_frontend_simulator.h"
+#include "../vio_frontend_simulator1.h"
+#include "../vio_representative_simulator.h"
 #include "../eskf/schur_vins.h"
 
 #include <cstdio>
@@ -71,26 +75,92 @@ const char *triangulationStatusName(const slam::SchurVINS::TriangulationStatus s
     return "unknown";
 }
 
+struct ScenarioData {
+    std::vector<ImuData> imu;
+    std::vector<CameraData> camera;
+    std::vector<State> ground_truth;
+    std::unordered_map<size_t, Eigen::Vector3d> landmarks;
+    double focal_length{};
+    double camera_noise_std{};
+};
+
+bool generateScenario(const std::string &name,
+                      const double duration,
+                      const size_t feature_count,
+                      ScenarioData &data) {
+    constexpr double acc_noise_density = 0.02;
+    constexpr double gyro_noise_density = 0.002;
+    constexpr double acc_bias_random_walk = 0.0005;
+    constexpr double gyro_bias_random_walk = 0.0001;
+
+    auto collect = [&](auto &simulator) {
+        simulator.generateData(data.imu, data.camera, data.ground_truth);
+        data.landmarks = simulator.getFeaturePositions();
+        data.focal_length = simulator.getCameraFocalLength();
+        data.camera_noise_std = simulator.getCameraNoiseStd();
+    };
+
+    if (name == "circle_out") {
+        VIOFrontendSimulator simulator;
+        simulator.setImuNoise(acc_noise_density, gyro_noise_density,
+                              acc_bias_random_walk, gyro_bias_random_walk);
+        simulator.setTrajectoryParams(5.0, 1.0, duration);
+        simulator.setCircularFeaturesParams(feature_count, {8.0, 10.0, 12.0},
+                                             Eigen::Vector3d(0, 0, 1.5));
+        collect(simulator);
+        return true;
+    }
+    if (name == "circle_in") {
+        VIOFrontendSimulator1 simulator;
+        simulator.setImuNoise(acc_noise_density, gyro_noise_density,
+                              acc_bias_random_walk, gyro_bias_random_walk);
+        simulator.setTrajectoryParams(10.0, 1.0, duration);
+        simulator.setCircularFeaturesParams(feature_count, {3.0, 5.0, 7.0},
+                                             Eigen::Vector3d(0, 0, 1.5));
+        collect(simulator);
+        return true;
+    }
+    if (name == "helix_3d" || name == "stop_go") {
+        const auto trajectory = name == "helix_3d"
+            ? VIORepresentativeSimulator::Trajectory::Helix3D
+            : VIORepresentativeSimulator::Trajectory::StopGo;
+        VIORepresentativeSimulator simulator(trajectory);
+        simulator.setImuNoise(acc_noise_density, gyro_noise_density,
+                              acc_bias_random_walk, gyro_bias_random_walk);
+        simulator.setDuration(duration);
+        simulator.setFeatureCount(feature_count);
+        collect(simulator);
+        return true;
+    }
+    return false;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
-    const double uv_var = (argc > 1) ? std::atof(argv[1]) : 400.0;
+    const double uv_var = (argc > 1) ? std::atof(argv[1]) : 1e-2;
     const std::string tag = (argc > 2) ? argv[2] : "base";
     const double proc_scale = (argc > 3) ? std::atof(argv[3]) : 1.0;
+    const std::string scenario = (argc > 4) ? argv[4] : "circle_out";
+    const double duration = (argc > 5) ? std::atof(argv[5]) : 60.0;
+    const size_t feature_count = (argc > 6) ? static_cast<size_t>(std::strtoull(argv[6], nullptr, 10)) : 1000;
     const std::string out_dir = "out";
+    const std::string run_name = scenario + "_" + tag;
 
     // ---- 仿真 ----
-    VIOFrontendSimulator simulator;
-    simulator.setImuNoise(0.01, 0.01, 0.001, 0.001);
-    simulator.setTrajectoryParams(5.0, 1.0, 100.0);
-    std::vector<double> ring_radii = {8.0, 10.0, 12.0};
-    simulator.setCircularFeaturesParams(1000, ring_radii, Eigen::Vector3d(0, 0, 1.5));
-
-    std::vector<ImuData> imu_data;
-    std::vector<CameraData> camera_data;
-    std::vector<State> ground_truth;
-    simulator.generateData(imu_data, camera_data, ground_truth);
-    const auto &feature_positions = simulator.getFeaturePositions();
+    ScenarioData simulation;
+    if (!generateScenario(scenario, duration, feature_count, simulation)) {
+        std::fprintf(stderr, "unknown scenario: %s\n", scenario.c_str());
+        return 2;
+    }
+    const auto &imu_data = simulation.imu;
+    const auto &camera_data = simulation.camera;
+    const auto &ground_truth = simulation.ground_truth;
+    const auto &feature_positions = simulation.landmarks;
+    if (ground_truth.empty() || camera_data.empty()) {
+        std::fprintf(stderr, "scenario %s generated no data\n", scenario.c_str());
+        return 2;
+    }
 
     // ---- EKF ----
     slam::Map map;
@@ -98,6 +168,7 @@ int main(int argc, char **argv) {
     ekf.uv_var = uv_var;
     ekf.proc_noise_scale_ = proc_scale;
     ekf.enable_logging_ = true;
+    ekf.triangulation_uv_std = simulation.camera_noise_std / simulation.focal_length;
     ekf.setQPV(ground_truth[0].q, ground_truth[0].p, ground_truth[0].v);
 
     // 每相机帧的轨迹记录
@@ -105,7 +176,7 @@ int main(int argc, char **argv) {
         double t;
         Eigen::Vector3d p_gt, p_est, v_gt, v_est;
         Eigen::Quaterniond q_gt, q_est;
-        Eigen::Vector3d bg_est, ba_est, g_est;
+        Eigen::Vector3d bg_gt, bg_est, ba_gt, ba_est, g_est;
         double cov_p, cov_q, cov_v;   // trace
         double nees_p, nees_q, nees_v, nees_qpv;
         size_t n_meas;
@@ -134,6 +205,8 @@ int main(int argc, char **argv) {
         r.p_gt = ground_truth[gt_idx].p;
         r.q_gt = ground_truth[gt_idx].q;
         r.v_gt = ground_truth[gt_idx].v;
+        r.bg_gt = ground_truth[gt_idx].bg;
+        r.ba_gt = ground_truth[gt_idx].ba;
         r.p_est = ekf.state_.position;
         r.q_est = ekf.state_.orientation;
         r.v_est = ekf.state_.velocity;
@@ -170,7 +243,7 @@ int main(int argc, char **argv) {
 
     // ---- 写 traj CSV ----
     {
-        const auto path = joinPath(out_dir, "traj_" + tag + ".csv");
+        const auto path = joinPath(out_dir, "traj_" + run_name + ".csv");
         FILE *f = std::fopen(path.c_str(), "w");
         if (!f) { std::fprintf(stderr, "cannot open %s\n", path.c_str()); return 1; }
         std::fprintf(f, "t,"
@@ -179,7 +252,8 @@ int main(int argc, char **argv) {
                         "qw_gt,qx_gt,qy_gt,qz_gt,qw_est,qx_est,qy_est,qz_est,"
                         "err_p,err_v,err_att,"
                         "ex,ey,ez,eroll,epitch,eyaw,"
-                        "bgx,bgy,bgz,bax,bay,baz,gx,gy,gz,"
+                        "bgx_gt,bgy_gt,bgz_gt,bgx,bgy,bgz,"
+                        "bax_gt,bay_gt,baz_gt,bax,bay,baz,gx,gy,gz,"
                         "sigma_p,sigma_q,sigma_v,"
                         "nees_p,nees_q,nees_v,nees_qpv,n_meas\n");
         for (const auto &r : traj) {
@@ -193,6 +267,7 @@ int main(int argc, char **argv) {
                 "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
                 "%.6f,%.6f,%.6f,"
                 "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
+                "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
                 "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
                 "%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%zu\n",
                 r.t,
@@ -202,7 +277,9 @@ int main(int argc, char **argv) {
                 r.q_est.w(), r.q_est.x(), r.q_est.y(), r.q_est.z(),
                 dp.norm(), dv.norm(), da.norm(),
                 dp.x(), dp.y(), dp.z(), da.x(), da.y(), da.z(),
+                r.bg_gt.x(), r.bg_gt.y(), r.bg_gt.z(),
                 r.bg_est.x(), r.bg_est.y(), r.bg_est.z(),
+                r.ba_gt.x(), r.ba_gt.y(), r.ba_gt.z(),
                 r.ba_est.x(), r.ba_est.y(), r.ba_est.z(),
                 r.g_est.x(), r.g_est.y(), r.g_est.z(),
                 // 协方差 trace 可能因数值问题变负；此时输出负的 sqrt(|.|) 作为标记,
@@ -221,14 +298,14 @@ int main(int argc, char **argv) {
     // 关键: 把每次更新的先验/后验状态与同时刻 GT 对比，
     //       就能看出视觉后验是否真的把状态【拉近】了真值。
     {
-        const auto path = joinPath(out_dir, "update_" + tag + ".csv");
+        const auto path = joinPath(out_dir, "update_" + run_name + ".csv");
         FILE *f = std::fopen(path.c_str(), "w");
         if (!f) { std::fprintf(stderr, "cannot open %s\n", path.c_str()); return 1; }
         std::fprintf(f, "t,is_kf,n_lmk,win,"
                         "errp_prior,errp_post,errv_prior,errv_post,"
                         "erra_prior,erra_post,"
                         "dxp,dxq,dxv,sigma_p,sigma_q,sigma_v,"
-                        "nis_mean,nis_dof,improve_p\n");
+                        "nis_mean,nis_dof,obs_used,obs_downweighted,obs_rejected,improve_p\n");
 
         size_t g = 0;
         size_t n_improve = 0, n_total = 0;
@@ -248,13 +325,14 @@ int main(int argc, char **argv) {
 
             std::fprintf(f, "%.6f,%d,%zu,%zu,"
                             "%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,"
-                            "%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%zu,%d\n",
+                            "%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%zu,%zu,%zu,%zu,%d\n",
                 static_cast<double>(L.timestamp - t0) * 1e-6,
                 L.is_keyframe ? 1 : 0, L.n_lmk, L.win_size,
                 ep0, ep1, ev0, ev1, ea0, ea1,
                 L.dx_p_norm, L.dx_q_norm, L.dx_v_norm,
                 std::sqrt(L.cov_p_trace), std::sqrt(L.cov_q_trace), std::sqrt(L.cov_v_trace),
                 L.nis_mean, L.nis_dof,
+                L.n_obs_used, L.n_obs_downweighted, L.n_obs_rejected,
                 improved);
         }
         std::fclose(f);
@@ -265,7 +343,7 @@ int main(int argc, char **argv) {
 
     // ---- 写 triangulation CSV：初始化质量、失败原因、后续修正与真值对比 ----
     {
-        const auto path = joinPath(out_dir, "triangulation_" + tag + ".csv");
+        const auto path = joinPath(out_dir, "triangulation_" + run_name + ".csv");
         FILE *f = std::fopen(path.c_str(), "w");
         if (!f) { std::fprintf(stderr, "cannot open %s\n", path.c_str()); return 1; }
         std::fprintf(f,
@@ -309,7 +387,7 @@ int main(int argc, char **argv) {
 
     // ---- 写 landmark 真值(只写一次) ----
     if (tag == "base") {
-        const auto path = joinPath(out_dir, "lmk.csv");
+        const auto path = joinPath(out_dir, "lmk_" + scenario + ".csv");
         FILE *f = std::fopen(path.c_str(), "w");
         if (f) {
             std::fprintf(f, "id,x,y,z\n");
@@ -324,8 +402,9 @@ int main(int argc, char **argv) {
 
     // ---- 汇总(追加到 summary.csv) ----
     {
-        double sp = 0, sv = 0, sa = 0, mp = 0;
-        size_t n_imp = 0;
+        double sp = 0, sv = 0, sa = 0, sbg = 0, sba = 0, mp = 0;
+        double nees_sum = 0;
+        size_t nees_count = 0;
         // 统计协方差失去正定性的帧数(trace < 0)，这是数值健康度指标
         size_t n_neg_cov = 0;
         for (const auto &r : traj) {
@@ -341,19 +420,43 @@ int main(int argc, char **argv) {
             sp += e * e;
             sv += (r.v_est - r.v_gt).squaredNorm();
             sa += attitudeError(r.q_gt, r.q_est).squaredNorm();
+            sbg += (r.bg_est - r.bg_gt).squaredNorm();
+            sba += (r.ba_est - r.ba_gt).squaredNorm();
+            if (std::isfinite(r.nees_qpv)) {
+                nees_sum += r.nees_qpv / 9.0;
+                ++nees_count;
+            }
             if (e > mp) mp = e;
         }
-        for (const auto &L : ekf.logs_) {
-            // 只统计有 GT 对照的改善率(与 update csv 一致的口径在那里算过，这里重算简版)
-            (void)L;
+        double nis_sum = 0;
+        size_t nis_count = 0;
+        for (const auto &log : ekf.logs_) {
+            if (log.nis_dof && std::isfinite(log.nis_mean)) {
+                nis_sum += log.nis_mean;
+                ++nis_count;
+            }
         }
         const double n = traj.empty() ? 1.0 : (double)traj.size();
         const double rmse_p = std::sqrt(sp / n);
         const double rmse_v = std::sqrt(sv / n);
         const double rmse_a = std::sqrt(sa / n);
+        const double rmse_bg = std::sqrt(sbg / n);
+        const double rmse_ba = std::sqrt(sba / n);
+        const double mean_nees = nees_count ? nees_sum / static_cast<double>(nees_count)
+                                             : std::numeric_limits<double>::quiet_NaN();
+        const double mean_nis = nis_count ? nis_sum / static_cast<double>(nis_count)
+                                           : std::numeric_limits<double>::quiet_NaN();
+        const double gravity_error = traj.empty()
+            ? std::numeric_limits<double>::quiet_NaN()
+            : (traj.back().g_est - Eigen::Vector3d(0.0, 0.0, 9.81)).norm();
+        size_t triangulation_success = 0;
+        for (const auto &log : ekf.triangulation_logs_) {
+            triangulation_success +=
+                log.status == slam::SchurVINS::TriangulationStatus::Success ? 1 : 0;
+        }
 
         const auto path = joinPath(out_dir, "summary.csv");
-        const bool reset_summary = tag == "base";
+        const bool reset_summary = tag == "base" && scenario == "circle_out";
         const bool exists = !reset_summary && [&] {
             FILE *t = std::fopen(path.c_str(), "r");
             if (t) { std::fclose(t); return true; }
@@ -362,16 +465,25 @@ int main(int argc, char **argv) {
         // base 是一组新实验的起点：先清掉旧算法留下的扫描结果，避免报告混用数据。
         FILE *f = std::fopen(path.c_str(), reset_summary ? "w" : "a");
         if (f) {
-            if (!exists) std::fprintf(f, "tag,uv_var,proc_scale,rmse_p,rmse_v,rmse_att,max_err_p,t_cost,updates\n");
-            std::fprintf(f, "%s,%.1f,%.4f,%.6f,%.6f,%.6f,%.6f,%.3f,%zu\n",
-                         tag.c_str(), uv_var, proc_scale, rmse_p, rmse_v, rmse_a, mp,
+            if (!exists) std::fprintf(f,
+                "scenario,tag,uv_var,proc_scale,estimate_gravity,duration,features,"
+                "rmse_p,rmse_v,rmse_att,rmse_bg,rmse_ba,max_err_p,mean_nees,mean_nis,"
+                "gravity_error,neg_cov,t_cost,updates,tri_success,tri_attempts\n");
+            std::fprintf(f,
+                         "%s,%s,%.9g,%.4f,%d,%.1f,%zu,"
+                         "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6e,%.6e,"
+                         "%.6e,%zu,%.3f,%zu,%zu,%zu\n",
+                         scenario.c_str(), tag.c_str(), uv_var, proc_scale,
+                         slam::INSState::ESTIMATE_GRAVITY ? 1 : 0, duration, feature_count,
+                         rmse_p, rmse_v, rmse_a, rmse_bg, rmse_ba, mp, mean_nees, mean_nis,
+                         gravity_error, n_neg_cov,
                          (double)ekf.t_cost_ / (double)CLOCKS_PER_SEC,
-                         ekf.posterior_times_);
+                         ekf.posterior_times_, triangulation_success,
+                         ekf.triangulation_logs_.size());
             std::fclose(f);
         }
-        (void)n_imp;
-        std::printf("[%s] uv_var=%.1f  RMSE p=%.4f m  v=%.4f m/s  att=%.4f rad  max_p=%.4f m\n",
-                    tag.c_str(), uv_var, rmse_p, rmse_v, rmse_a, mp);
+        std::printf("[%s/%s] uv_var=%.9g  RMSE p=%.4f m  v=%.4f m/s  att=%.4f rad  max_p=%.4f m\n",
+                    scenario.c_str(), tag.c_str(), uv_var, rmse_p, rmse_v, rmse_a, mp);
     }
 
     return 0;

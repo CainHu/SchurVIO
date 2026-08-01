@@ -3,6 +3,7 @@
 // 用法: VinsReport            (读 out/*.csv，生成 out/report.html)
 
 #include <cstdio>
+#include <cctype>
 #include <string>
 #include <vector>
 
@@ -36,14 +37,24 @@ std::string esc(const std::string &s) {
 extern const char *kReportTemplate;   // 在 report_template.h 里
 
 int main() {
-    const std::string traj = readFile("out/traj_base.csv");
-    const std::string upd  = readFile("out/update_base.csv");
-    const std::string lmk  = readFile("out/lmk.csv");
-    const std::string tri  = readFile("out/triangulation_base.csv");
+    const std::vector<std::string> scenarios{
+        "circle_out", "circle_in", "helix_3d", "stop_go"
+    };
+    std::vector<std::string> trajectories, updates, landmarks;
+    trajectories.reserve(scenarios.size());
+    updates.reserve(scenarios.size());
+    landmarks.reserve(scenarios.size());
+    for (const auto &scenario : scenarios) {
+        trajectories.emplace_back(readFile("out/traj_" + scenario + "_base.csv"));
+        updates.emplace_back(readFile("out/update_" + scenario + "_base.csv"));
+        landmarks.emplace_back(readFile("out/lmk_" + scenario + ".csv"));
+    }
+    const std::string tri = readFile("out/triangulation_circle_out_base.csv");
     const std::string sum  = readFile("out/summary.csv");
 
-    if (traj.empty()) {
-        std::fprintf(stderr, "error: out/traj_base.csv not found. Run VinsAnalysis first.\n");
+    if (trajectories.front().empty()) {
+        std::fprintf(stderr,
+                     "error: out/traj_circle_out_base.csv not found. Run the multi-scenario analysis first.\n");
         return 1;
     }
 
@@ -56,9 +67,13 @@ int main() {
         const auto p = html.find(key);
         if (p != std::string::npos) html.replace(p, key.size(), val);
     };
-    sub("%%DATA_TRAJ%%", esc(traj));
-    sub("%%DATA_UPDATE%%", esc(upd));
-    sub("%%DATA_LMK%%", esc(lmk));
+    for (size_t i = 0; i < scenarios.size(); ++i) {
+        std::string key = scenarios[i];
+        for (auto &c : key) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        sub("%%DATA_TRAJ_" + key + "%%", esc(trajectories[i]));
+        sub("%%DATA_UPDATE_" + key + "%%", esc(updates[i]));
+        sub("%%DATA_LMK_" + key + "%%", esc(landmarks[i]));
+    }
     sub("%%DATA_TRIANGULATION%%", esc(tri));
     sub("%%DATA_SUMMARY%%", esc(sum));
 
