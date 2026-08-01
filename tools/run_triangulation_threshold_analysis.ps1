@@ -8,12 +8,10 @@ $ErrorActionPreference = "Stop"
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $buildPath = [IO.Path]::GetFullPath((Join-Path $projectRoot $BuildDirectory))
 $analysis = Join-Path $buildPath "VinsAnalysis.exe"
-
 if (-not (Test-Path -LiteralPath $analysis)) {
     throw "Build VinsAnalysis first: cmake --build $BuildDirectory --target VinsAnalysis"
 }
 
-# Locate the MinGW runtime used by this build.
 $cache = Join-Path $buildPath "CMakeCache.txt"
 if (Test-Path -LiteralPath $cache) {
     $compilerLine = Select-String -Path $cache -Pattern '^CMAKE_CXX_COMPILER:(?:STRING|FILEPATH)=(.+)$' |
@@ -26,32 +24,19 @@ if (Test-Path -LiteralPath $cache) {
     }
 }
 
-$configs = @(
-    [pscustomobject]@{ Tag = "oc_on";  Enabled = "1" },
-    [pscustomobject]@{ Tag = "oc_off"; Enabled = "0" }
-)
-$scenarios = @("circle_out", "circle_in", "helix_3d", "stop_go")
-
 Push-Location $projectRoot
 try {
-    $runningAnalysis = Get-Process -Name "VinsAnalysis" -ErrorAction SilentlyContinue
-    if ($runningAnalysis) {
-        throw "Another VinsAnalysis process is still running (PID $($runningAnalysis.Id -join ', '))."
-    }
-
-    foreach ($config in $configs) {
-        foreach ($scenario in $scenarios) {
-            Write-Host "Observability $($config.Tag) / $scenario"
-            & $analysis "0.01" $config.Tag "1.0" $scenario "$Duration" "$Features" `
-                "tri" "1" "density" "1" "observability" $config.Enabled "0" `
-                "independent" "5.0"
-            if ($LASTEXITCODE -ne 0) {
-                throw "Observability $($config.Tag) / $scenario failed with exit code $LASTEXITCODE"
-            }
+    foreach ($parallax in @(3, 5, 7, 8, 10)) {
+        $tag = "tri_p$parallax"
+        Write-Host "Circle-out triangulation / $parallax deg"
+        & $analysis "0.01" $tag "1.0" "circle_out" "$Duration" "$Features" `
+            "tri" "1" "density" "1" "triangulation" "1" "0" `
+            "retriangulate" "$parallax"
+        if ($LASTEXITCODE -ne 0) {
+            throw "Triangulation threshold $parallax failed with exit code $LASTEXITCODE"
         }
     }
-
-    Write-Host "Done: $projectRoot\out\observability_summary.csv"
+    Write-Host "Done: $projectRoot\out\triangulation_threshold_summary.csv"
 }
 finally {
     Pop-Location

@@ -93,7 +93,7 @@ try {
             $ocProjection = if ($ObservabilityProjection) { "1" } else { "0" }
             & $analysis "0.01" $config.Tag "1.0" $scenario "$Duration" "$Features" `
                 $config.Init $config.Refine $config.Noise $config.BiasRw "ablation" `
-                $ocEnabled $ocProjection
+                $ocEnabled $ocProjection "independent" "5.0"
             if ($LASTEXITCODE -ne 0) {
                 throw "Ablation $($config.Tag) / $scenario failed with exit code $LASTEXITCODE"
             }

@@ -85,12 +85,48 @@ SchurVINS::triangulateLandmark(const Landmark &landmark) const {
         return finish(TriangulationStatus::InsufficientViews);
     }
 
-    // 三角化由相机之间的相对运动提供约束。直接使用每帧绝对边缘协方差会把全局
-    // 平移/旋转等共同不确定度重复计入；利用 clone 间交叉块构造相对协方差，
-    // P(δx_i-δx_a)=P_ii+P_aa-P_ia-P_ai，可抵消共同模态。
+    // frm2fet 是 unordered_map。排序可避免锚点和浮点累加顺序依赖哈希桶布局。
+    std::sort(views.begin(), views.end(), [](const View &lhs, const View &rhs) {
+        return lhs.frame->ordering < rhs.frame->ordering;
+    });
+
+    // 两条世界系单位视线的夹角 theta_ij=acos(d_i^T d_j) 决定深度条件数。
+    // 使用所有观测对的最大夹角，而不是只比较首末帧，可兼容轨迹回头或观测中断。
+    TYPE max_parallax = TYPE(0);
+    size_t best_view_i = 0;
+    size_t best_view_j = 1;
+    for (size_t i = 0; i + 1 < views.size(); ++i) {
+        for (size_t j = i + 1; j < views.size(); ++j) {
+            const TYPE cosine = std::clamp(
+                views[i].bearing_world.dot(views[j].bearing_world), TYPE(-1), TYPE(1));
+            const TYPE parallax = std::acos(cosine);
+            if (parallax > max_parallax) {
+                max_parallax = parallax;
+                best_view_i = i;
+                best_view_j = j;
+            }
+        }
+    }
+    result.max_parallax_deg = max_parallax * TYPE(180) / std::numbers::pi_v<TYPE>;
+    if (result.max_parallax_deg < triangulation_min_parallax_deg) {
+        return finish(TriangulationStatus::LowParallax);
+    }
+
+    // 最大视差观测对对深度最敏感。在这两个候选中选择位姿协方差 trace 更小的
+    // clone 作锚点；锚点仅用于不确定度传播，不会被当成额外量测。
+    auto poseCovarianceTrace = [&](const size_t view_index) {
+        const size_t state_index = INSState::SIZE +
+            AugState::SIZE * views[view_index].frame->ordering;
+        return cov_.block<6, 6>(state_index, state_index).trace();
+    };
+    const size_t anchor_view = poseCovarianceTrace(best_view_i)
+        <= poseCovarianceTrace(best_view_j) ? best_view_i : best_view_j;
     const size_t anchor_index = INSState::SIZE +
-                                AugState::SIZE * views.front().frame->ordering;
+        AugState::SIZE * views[anchor_view].frame->ordering;
     const Mat6_6 anchor_covariance = cov_.block<6, 6>(anchor_index, anchor_index);
+
+    // 使用 clone 间交叉块构造相对协方差：
+    // P(δx_i-δx_a)=P_ii+P_aa-P_ia-P_ai，可抵消共同模态。
     for (auto &view : views) {
         const size_t pose_index = INSState::SIZE +
                                   AugState::SIZE * view.frame->ordering;
@@ -100,21 +136,6 @@ SchurVINS::triangulateLandmark(const Landmark &landmark) const {
             - cov_.block<6, 6>(anchor_index, pose_index);
         view.relative_pose_covariance = TYPE(0.5) *
             (view.relative_pose_covariance + view.relative_pose_covariance.transpose());
-    }
-
-    // 两条世界系单位视线的夹角 theta_ij=acos(d_i^T d_j) 决定深度条件数。
-    // 使用所有观测对的最大夹角，而不是只比较首末帧，可兼容轨迹回头或观测中断。
-    TYPE max_parallax = TYPE(0);
-    for (size_t i = 0; i + 1 < views.size(); ++i) {
-        for (size_t j = i + 1; j < views.size(); ++j) {
-            const TYPE cosine = std::clamp(
-                views[i].bearing_world.dot(views[j].bearing_world), TYPE(-1), TYPE(1));
-            max_parallax = std::max(max_parallax, std::acos(cosine));
-        }
-    }
-    result.max_parallax_deg = max_parallax * TYPE(180) / std::numbers::pi_v<TYPE>;
-    if (result.max_parallax_deg < triangulation_min_parallax_deg) {
-        return finish(TriangulationStatus::LowParallax);
     }
 
     // 射线最小二乘初始化：点 P 到射线 (C_i,d_i) 的垂直残差为
@@ -306,7 +327,7 @@ SchurVINS::triangulateLandmark(const Landmark &landmark) const {
     // 绝对位姿不确定度。质量门限在上面只检查 conditional_covariance，避免全局 gauge
     // 不确定度把几何上可靠的点拒绝掉。
     Mat3_6 J_anchor_world;
-    J_anchor_world.leftCols<3>() = -hat(position - views.front().frame->p());
+    J_anchor_world.leftCols<3>() = -hat(position - views[anchor_view].frame->p());
     J_anchor_world.rightCols<3>().setIdentity();
     result.covariance = conditional_covariance
                       + J_anchor_world * anchor_covariance * J_anchor_world.transpose();
@@ -1472,79 +1493,202 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 
 //    std::cout << "Update Landmark" << std::endl;
     // [[ 更新 Landmark ]]
-    if (refine_landmarks_) {
-        gl -= Hpl.transpose() * dx_p;
+    //
+    // The old IndependentEkf path is retained only as an experiment/reference:
+    // it repeatedly treats the same window observations as new measurements of
+    // an independent landmark even though P_xl is not stored. Fixed,
+    // Retriangulate, and SchurBackSubstitution avoid that false independence.
+    const LandmarkUpdateMode landmark_mode = refine_landmarks_
+        ? landmark_update_mode_
+        : LandmarkUpdateMode::Fixed;
+    if (landmark_mode == LandmarkUpdateMode::IndependentEkf ||
+        (landmark_mode == LandmarkUpdateMode::SchurBackSubstitution && is_keyframe)) {
+        gl.noalias() -= Hpl.transpose() * dx_p;
     }
-    for (size_t i = 0; refine_landmarks_ && i < ids.size(); ++i) {
-        if (valid_observations_per_landmark[i] < 2) {
-            continue;
+
+    const Mat3_3 Ric_landmark = ext_.q_ic.toRotationMatrix();
+    auto landmarkReprojectionCost = [&](const Landmark &landmark,
+                                        const Vec3 &position) -> TYPE {
+        const TYPE huber_delta = std::max(
+            visual_huber_delta_sigma * triangulation_uv_std, TYPE(1e-8));
+        TYPE cost = TYPE(0);
+        size_t count = 0;
+        for (const auto &[frame_id, feature] : landmark.frm2fet) {
+            (void)frame_id;
+            if (!feature || !feature->frame || !feature->obs[0]) {
+                continue;
+            }
+            const auto *frame = feature->frame;
+            const Mat3_3 Rwi = frame->q().toRotationMatrix();
+            const Vec3 d_camera = Ric_landmark.transpose() *
+                (Rwi.transpose() * (position - frame->p()) - ext_.t_ic);
+            if (!d_camera.allFinite() || d_camera.z() <= TYPE(0.05)) {
+                return std::numeric_limits<TYPE>::infinity();
+            }
+            const Vec2 estimate = d_camera.head<2>() / d_camera.z();
+            const TYPE residual_norm =
+                (feature->obs[0]->un_pt.head<2>() - estimate).norm();
+            if (!std::isfinite(residual_norm)) {
+                return std::numeric_limits<TYPE>::infinity();
+            }
+            cost += residual_norm <= huber_delta
+                ? TYPE(0.5) * residual_norm * residual_norm
+                : huber_delta * (residual_norm - TYPE(0.5) * huber_delta);
+            ++count;
         }
-        auto id = ids[i].first;
-        auto lmk = ids[i].second;
-        auto index = i * LMK_SIZE;
+        return count >= 2 ? cost / static_cast<TYPE>(count)
+                          : std::numeric_limits<TYPE>::infinity();
+    };
 
-        Vec3 dx_l = Vec3::Zero();
+    // Schur 路径的量测只来自持久关键帧。若本次没有为该点加入新的关键帧观测，
+    // 再次修正只是在重复求解几乎相同的批次，会放大相关量测的重复使用并浪费计算。
+    auto observedInCurrentKeyframe = [&](const Landmark &landmark) {
+        if (!is_keyframe) {
+            return false;
+        }
+        for (const auto &[frame_id, feature] : landmark.frm2fet) {
+            (void)frame_id;
+            if (feature && feature->frame &&
+                feature->frame->timestamp == cam_data.timestamp) {
+                return true;
+            }
+        }
+        return false;
+    };
 
-        auto &&cov_p = lmk->cov_position;
-        const Mat3_3 hll = Hll_diag.middleRows<LMK_SIZE>(index);
-        auto &&el = gl.segment<3>(index);
+    if (landmark_mode == LandmarkUpdateMode::Retriangulate && is_keyframe) {
+        for (const auto &[id, lmk] : ids) {
+            (void)id;
+            if (!observedInCurrentKeyframe(*lmk)) {
+                continue;
+            }
+            ++n_lmk_update_attempts_;
+            const TYPE cost_before = landmarkReprojectionCost(*lmk, lmk->position);
+            const TriangulationResult triangulation = triangulateLandmark(*lmk);
+            if (triangulation.status != TriangulationStatus::Success) {
+                continue;
+            }
+            const TYPE cost_after =
+                landmarkReprojectionCost(*lmk, triangulation.position);
+            if (!std::isfinite(cost_after) || cost_after > cost_before + TYPE(1e-15)) {
+                continue;
+            }
+            lmk->position = triangulation.position;
+            lmk->cov_position = triangulation.covariance;
+            ++n_lmk_update_accepted_;
+            ++n_lmk_retriangulation_success_;
+            lmk_reprojection_cost_reduction_ += cost_before - cost_after;
+            recordLandmarkRefinement(*lmk);
+        }
+    } else if (landmark_mode == LandmarkUpdateMode::SchurBackSubstitution && is_keyframe) {
+        for (size_t i = 0; i < ids.size(); ++i) {
+            if (valid_observations_per_landmark[i] < 2) {
+                continue;
+            }
+            auto lmk = ids[i].second;
+            if (!observedInCurrentKeyframe(*lmk)) {
+                continue;
+            }
+            const size_t index = i * LMK_SIZE;
+            const Mat3_3 hll = Hll_diag.middleRows<LMK_SIZE>(index);
+            const Vec3 el = gl.segment<LMK_SIZE>(index);
+            ++n_lmk_update_attempts_;
 
-        // 与 Hpp 同理: 序贯更新只要求把 Cov[e] = σ²·Hll 对角化，
-        // 特征分解和 LDLT 都可以。见 docs/HPP_NULLSPACE.md 与 docs/OPT_LDLT.md。
-        //
-        // 注意 Hll 恒有 1 个接近 0 的特征值(对应深度/视线方向)，
-        // 详见 docs/HLL_STRUCTURE.md —— 所以这里的零空间过滤不是可选项，是必需的。
-        Vec3 hll_diag;    // λ 或 D
-        Mat3_3 hll_basis; // V 或 M
-        Vec3 hll_rhs;     // V^T·el 或 M^-1·el
-
-        if constexpr (USE_LDLT_FOR_HLL) {
-            Eigen::LDLT<Mat3_3> ldlt(hll);
-            hll_basis = ldlt.transpositionsP().transpose() * Mat3_3(ldlt.matrixL());
-            hll_diag = ldlt.vectorD();
-            hll_rhs = ldlt.transpositionsP() * el;
-            ldlt.matrixL().solveInPlace(hll_rhs);
-        } else {
             Eigen::SelfAdjointEigenSolver<Mat3_3> es(hll);
-            hll_basis = es.eigenvectors();
-            hll_diag = es.eigenvalues();
-            hll_rhs.noalias() = hll_basis.transpose() * el;
-        }
-
-        // Step-0: 过滤掉(近似)为 0 的对角元
-        //   特征分解的 eigenvalues 升序，LDLT 的 D 无序，故统一逐个判断
-        const TYPE hll_max = hll_diag.maxCoeff();
-        const TYPE hll_thresh = TYPE(1e-6) * hll_max;
-        if (hll_max <= TYPE(0)) {
-            std::cerr << "Hll not positive: id = " << id
-                      << ", diag = " << hll_diag.transpose() << std::endl;
-        }
-
-        // Step-1: 序贯
-        for (size_t j = 0; j < LMK_SIZE; ++j) {
-            const auto d = hll_diag(j);
-            if (d <= hll_thresh) {
-                continue;   // 零空间方向(通常是深度方向)，不提供信息
+            if (es.info() != Eigen::Success || !es.eigenvalues().allFinite()) {
+                continue;
+            }
+            const TYPE hll_max = es.eigenvalues().maxCoeff();
+            if (!(hll_max > TYPE(0))) {
+                continue;
+            }
+            const TYPE threshold = TYPE(1e-6) * hll_max;
+            const Vec3 inverse = (es.eigenvalues().array() > threshold)
+                .select(es.eigenvalues().array().inverse(), TYPE(0));
+            const Vec3 increment = es.eigenvectors() * inverse.asDiagonal()
+                                 * es.eigenvectors().transpose() * el;
+            if (!increment.allFinite() || increment.norm() > TYPE(100)) {
+                continue;
             }
 
-            const auto R = uv_var / d / dt;
-            const auto hT = hll_basis.col(j);
-
-            Vec3 PhT = cov_p * hT;
-            TYPE var = hT.dot(PhT) + R;
-            Vec3 K = PhT / var;
-            cov_p -= K * PhT.transpose();
-
-            PhT = cov_p * hT;
-            cov_p.triangularView<Eigen::Upper>() += (K * R - PhT) * K.transpose();
-            cov_p.triangularView<Eigen::StrictlyLower>() = cov_p.triangularView<Eigen::StrictlyUpper>().transpose();
-
-            const auto e = hll_rhs(j) / d - hT.dot(dx_l);
-            dx_l += K * e;
+            const TYPE cost_before = landmarkReprojectionCost(*lmk, lmk->position);
+            TYPE step = TYPE(1);
+            bool accepted = false;
+            for (size_t line_search = 0; line_search < 5; ++line_search) {
+                const Vec3 candidate = lmk->position + step * increment;
+                const TYPE cost_after = landmarkReprojectionCost(*lmk, candidate);
+                if (std::isfinite(cost_after) && cost_after <= cost_before + TYPE(1e-15)) {
+                    lmk->position = candidate;
+                    ++n_lmk_update_accepted_;
+                    lmk_reprojection_cost_reduction_ += cost_before - cost_after;
+                    recordLandmarkRefinement(*lmk);
+                    accepted = true;
+                    break;
+                }
+                step *= TYPE(0.5);
+            }
+            (void)accepted;
         }
+    } else if (landmark_mode == LandmarkUpdateMode::IndependentEkf) {
+        for (size_t i = 0; i < ids.size(); ++i) {
+            if (valid_observations_per_landmark[i] < 2) {
+                continue;
+            }
+            auto id = ids[i].first;
+            auto lmk = ids[i].second;
+            const size_t index = i * LMK_SIZE;
+            Vec3 dx_l = Vec3::Zero();
+            auto &&cov_p = lmk->cov_position;
+            const Mat3_3 hll = Hll_diag.middleRows<LMK_SIZE>(index);
+            const Vec3 el = gl.segment<LMK_SIZE>(index);
+            ++n_lmk_update_attempts_;
 
-        lmk->position += dx_l;
-        recordLandmarkRefinement(*lmk);
+            Vec3 hll_diag;
+            Mat3_3 hll_basis;
+            Vec3 hll_rhs;
+            if constexpr (USE_LDLT_FOR_HLL) {
+                Eigen::LDLT<Mat3_3> ldlt(hll);
+                hll_basis = ldlt.transpositionsP().transpose() * Mat3_3(ldlt.matrixL());
+                hll_diag = ldlt.vectorD();
+                hll_rhs = ldlt.transpositionsP() * el;
+                ldlt.matrixL().solveInPlace(hll_rhs);
+            } else {
+                Eigen::SelfAdjointEigenSolver<Mat3_3> es(hll);
+                hll_basis = es.eigenvectors();
+                hll_diag = es.eigenvalues();
+                hll_rhs.noalias() = hll_basis.transpose() * el;
+            }
+
+            const TYPE hll_max = hll_diag.maxCoeff();
+            const TYPE hll_thresh = TYPE(1e-6) * hll_max;
+            if (hll_max <= TYPE(0)) {
+                std::cerr << "Hll not positive: id = " << id
+                          << ", diag = " << hll_diag.transpose() << std::endl;
+                continue;
+            }
+            for (size_t j = 0; j < LMK_SIZE; ++j) {
+                const TYPE d = hll_diag(j);
+                if (d <= hll_thresh) {
+                    continue;
+                }
+                const TYPE R = uv_var / d / dt;
+                const Vec3 hT = hll_basis.col(j);
+                Vec3 PhT = cov_p * hT;
+                const TYPE var = hT.dot(PhT) + R;
+                const Vec3 K = PhT / var;
+                cov_p -= K * PhT.transpose();
+                PhT = cov_p * hT;
+                cov_p.triangularView<Eigen::Upper>() +=
+                    (K * R - PhT) * K.transpose();
+                cov_p.triangularView<Eigen::StrictlyLower>() =
+                    cov_p.triangularView<Eigen::StrictlyUpper>().transpose();
+                const TYPE e = hll_rhs(j) / d - hT.dot(dx_l);
+                dx_l += K * e;
+            }
+            lmk->position += dx_l;
+            ++n_lmk_update_accepted_;
+            recordLandmarkRefinement(*lmk);
+        }
     }
 //    std::cout << "Update Landmark Finished" << std::endl;
 

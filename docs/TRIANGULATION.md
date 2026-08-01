@@ -63,7 +63,7 @@ e_i=(I-d_i d_i^T)(p_w-C_i).
 \theta_{max}=\max_{i,j}\arccos(\operatorname{clamp}(d_i^Td_j,-1,1)),
 ```
 
-默认要求 `theta_max >= 5°`，并检查 `H_ray` 的最小特征值和条件数。使用所有观测对而
+默认要求 `theta_max >= 8°`，并检查 `H_ray` 的最小特征值和条件数。使用所有观测对而
 不只比较首末帧，可正确处理轨迹回头和中间观测中断。
 
 ## 3. 带位姿不确定度的鲁棒 Gauss–Newton
@@ -138,7 +138,7 @@ P_{l,world}\approx P_{l|a}+G_aP_{aa}G_a^T.
 | 状态 | 触发条件 | 后续行为 |
 |---|---|---|
 | `insufficient_views` | 有效关键帧观测少于 2 | 等新观测 |
-| `low_parallax` | 最大视差小于 5° | 等基线增大 |
+| `low_parallax` | 最大视差小于配置门限（默认 8°） | 等基线增大 |
 | `ill_conditioned` | 射线/重投影信息矩阵病态 | 等几何改善 |
 | `negative_depth` | 任一参与视图深度小于 0.05 m | 拒绝本次初始化 |
 | `high_reprojection_error` | 归一化 RMSE 大于 0.03 | 拒绝疑似误匹配/坏初值 |
@@ -168,3 +168,18 @@ P_{l,world}\approx P_{l|a}+G_aP_{aa}G_a^T.
 `VinsReport` 的详细三角化页默认展示 `circle_out/base`，并在多场景表中汇总各仿真的
 成功率。真值只在 `logTriangulationAttempt` 的日志分支中读取，关闭日志后在线算法完全
 不访问 `lmk_map` 的位置值。
+## 8. 最大视差对锚点与确定性
+
+`Landmark::frm2fet` 使用无序容器，不能把遍历到的第一个观测当作稳定锚点。当前实现先按 clone 顺序排序，再遍历所有观测对寻找最大视差对；在该观测对的两个端点中，选择位姿协方差 trace 较小者作为不确定度传播锚点。
+
+该选择不改变全部视线参与的射线最小二乘和重投影优化，只影响相对位姿协方差
+
+$$
+P_{i-a}=P_{ii}+P_{aa}-P_{ia}-P_{ai}
+$$
+
+以及条件点协方差向世界系传播时使用的绝对锚点协方差。这样既利用了对深度最敏感的基线，也消除了结果对哈希遍历顺序的依赖。
+
+Circle-out 的 30 s 视差扫描比较了 3°、5°、7°、8° 和 10°。低门限会更早接纳点，但初始深度误差明显更大；10° 的成功点数和局部 RPE 又开始变差。综合初始几何质量、最终地图点误差和保留约束数量，默认值设为 8°，完整数据见 [LANDMARK_UPDATE_STRATEGIES.md](LANDMARK_UPDATE_STRATEGIES.md)。
+
+扫描可通过 `tools/run_triangulation_threshold_analysis.ps1` 复现，汇总写入 `out/triangulation_threshold_summary.csv`。

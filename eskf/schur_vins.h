@@ -82,6 +82,20 @@ namespace slam {
             GroundTruth
         };
 
+        enum class LandmarkUpdateMode : uint8_t {
+            // Keep the initialized point fixed while it remains in the map.
+            Fixed = 0,
+            // Historical path: independent landmark EKF without P_xl.
+            IndependentEkf,
+            // Re-solve the point from all raw keyframe observations after a
+            // keyframe pose update; failed re-triangulation keeps the old point.
+            Retriangulate,
+            // Back-substitute the joint Schur normal equation and accept only
+            // a reprojection-cost-decreasing step. No independent covariance
+            // accumulation and therefore no false persistent independence.
+            SchurBackSubstitution
+        };
+
         struct TriangulationLog {
             Tus timestamp{};
             LandmarkID id{};
@@ -181,6 +195,9 @@ namespace slam {
         // landmark refinement enabled; GT initialization is analysis-only.
         LandmarkInitializationMode landmark_initialization_mode_ =
             LandmarkInitializationMode::Triangulation;
+        LandmarkUpdateMode landmark_update_mode_ = LandmarkUpdateMode::Retriangulate;
+        // Compatibility switch used by the historical strict-ablation CLI.
+        // false always forces Fixed regardless of landmark_update_mode_.
         bool refine_landmarks_ = true;
         // FEJ-based observability constraint for the Schur visual update.
         // It preserves the four VIO gauge directions: global translation (3)
@@ -197,7 +214,7 @@ namespace slam {
         // 三角化使用归一化像平面噪声；仿真中约为 1 pixel / fx = 0.0054。
         // 它与历史视觉后验中的 uv_var（聚合伪量测噪声）含义不同，不能直接复用 400。
         TYPE triangulation_uv_std = TYPE(0.0054);
-        TYPE triangulation_min_parallax_deg = TYPE(5.0);
+        TYPE triangulation_min_parallax_deg = TYPE(8.0);
         TYPE triangulation_max_reprojection_rmse = TYPE(0.03);
         TYPE triangulation_max_position_std = TYPE(50);
 
@@ -259,6 +276,10 @@ namespace slam {
         size_t n_oc_projections_ = 0;
         TYPE oc_max_leak_before_ = TYPE(0);
         TYPE oc_max_leak_after_ = TYPE(0);
+        size_t n_lmk_update_attempts_ = 0;
+        size_t n_lmk_update_accepted_ = 0;
+        size_t n_lmk_retriangulation_success_ = 0;
+        TYPE lmk_reprojection_cost_reduction_ = TYPE(0);
     };
 }
 

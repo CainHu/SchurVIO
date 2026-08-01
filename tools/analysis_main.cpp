@@ -3,7 +3,7 @@
 // 用法:
 //   VinsAnalysis [uv_var] [tag] [proc_scale] [scenario] [duration] [features]
 //                [landmark_init] [refine] [imu_noise] [bias_rw] [summary_group]
-//                [oc_fej] [oc_projection]
+//                [oc_fej] [oc_projection] [landmark_update] [tri_min_parallax_deg]
 //     uv_var  Schur 序贯伪量测的噪声密度
 //     tag     输出文件名后缀，用于噪声扫描时区分多组结果
 //     scenario circle_out / circle_in / helix_3d / stop_go
@@ -74,6 +74,17 @@ const char *triangulationStatusName(const slam::SchurVINS::TriangulationStatus s
         case Status::NegativeDepth: return "negative_depth";
         case Status::HighReprojectionError: return "high_reprojection_error";
         case Status::ExcessiveUncertainty: return "excessive_uncertainty";
+    }
+    return "unknown";
+}
+
+const char *landmarkUpdateModeName(const slam::SchurVINS::LandmarkUpdateMode mode) {
+    using Mode = slam::SchurVINS::LandmarkUpdateMode;
+    switch (mode) {
+        case Mode::Fixed: return "fixed";
+        case Mode::IndependentEkf: return "independent";
+        case Mode::Retriangulate: return "retriangulate";
+        case Mode::SchurBackSubstitution: return "schur_backsub";
     }
     return "unknown";
 }
@@ -160,6 +171,9 @@ int main(int argc, char **argv) {
     const std::string summary_group = (argc > 11) ? argv[11] : "main";
     const bool observability_constraint = (argc > 12) ? std::atoi(argv[12]) != 0 : true;
     const bool observability_projection = (argc > 13) ? std::atoi(argv[13]) != 0 : false;
+    const std::string landmark_update = (argc > 14) ? argv[14] : "retriangulate";
+    const double triangulation_min_parallax_deg =
+        (argc > 15) ? std::atof(argv[15]) : 8.0;
     const bool legacy_white_noise = imu_noise_model == "legacy";
     using LandmarkInit = slam::SchurVINS::LandmarkInitializationMode;
     const LandmarkInit landmark_initialization_mode = landmark_init == "gt"
@@ -167,6 +181,16 @@ int main(int argc, char **argv) {
         : (landmark_init == "tri_gt"
            ? LandmarkInit::TriangulationWithOraclePosition
            : LandmarkInit::Triangulation);
+    using LandmarkUpdate = slam::SchurVINS::LandmarkUpdateMode;
+    const LandmarkUpdate landmark_update_mode = !refine_landmarks
+        ? LandmarkUpdate::Fixed
+        : (landmark_update == "fixed"
+           ? LandmarkUpdate::Fixed
+           : (landmark_update == "retriangulate"
+              ? LandmarkUpdate::Retriangulate
+              : (landmark_update == "schur" || landmark_update == "schur_backsub"
+                 ? LandmarkUpdate::SchurBackSubstitution
+                 : LandmarkUpdate::IndependentEkf)));
     const std::string out_dir = "out";
     const std::string run_name = scenario + "_" + tag;
 
@@ -194,9 +218,11 @@ int main(int argc, char **argv) {
     ekf.enable_logging_ = true;
     ekf.landmark_initialization_mode_ = landmark_initialization_mode;
     ekf.refine_landmarks_ = refine_landmarks;
+    ekf.landmark_update_mode_ = landmark_update_mode;
     ekf.enforce_observability_constraint_ = observability_constraint;
     ekf.project_observability_constraint_ = observability_projection;
     ekf.triangulation_uv_std = simulation.camera_noise_std / simulation.focal_length;
+    ekf.triangulation_min_parallax_deg = triangulation_min_parallax_deg;
     ekf.setQPV(ground_truth[0].q, ground_truth[0].p, ground_truth[0].v);
 
     // 每相机帧的轨迹记录
@@ -481,6 +507,8 @@ int main(int argc, char **argv) {
         // Absolute trajectory error after one rigid SE(3) alignment. Scale is
         // deliberately fixed so monocular/VIO scale errors remain visible.
         double rmse_p_aligned = std::numeric_limits<double>::quiet_NaN();
+        Eigen::Matrix3d alignment_rotation = Eigen::Matrix3d::Identity();
+        Eigen::Vector3d alignment_translation = Eigen::Vector3d::Zero();
         if (traj.size() >= 3) {
             Eigen::Vector3d estimate_mean = Eigen::Vector3d::Zero();
             Eigen::Vector3d truth_mean = Eigen::Vector3d::Zero();
@@ -500,15 +528,51 @@ int main(int argc, char **argv) {
                 cross_covariance, Eigen::ComputeFullU | Eigen::ComputeFullV);
             Eigen::Matrix3d reflection = Eigen::Matrix3d::Identity();
             reflection(2, 2) = (svd.matrixV() * svd.matrixU().transpose()).determinant();
-            const Eigen::Matrix3d rotation =
-                svd.matrixV() * reflection * svd.matrixU().transpose();
-            const Eigen::Vector3d translation = truth_mean - rotation * estimate_mean;
+            alignment_rotation = svd.matrixV() * reflection * svd.matrixU().transpose();
+            alignment_translation = truth_mean - alignment_rotation * estimate_mean;
             double aligned_squared_error = 0.0;
             for (const auto &row : traj) {
-                const Eigen::Vector3d aligned = rotation * row.p_est + translation;
+                const Eigen::Vector3d aligned =
+                    alignment_rotation * row.p_est + alignment_translation;
                 aligned_squared_error += (aligned - row.p_gt).squaredNorm();
             }
             rmse_p_aligned = std::sqrt(aligned_squared_error / n);
+        }
+
+        // Landmark error should remove only VIO's four gauge freedoms, not an
+        // arbitrary roll/pitch rotation. Estimate the global yaw from attitude
+        // pairs, then the common translation from trajectory centroids. This
+        // remains well-defined for Stop-go where a full position-only SE(3)
+        // alignment is rank deficient.
+        Eigen::Matrix3d landmark_gauge_rotation = Eigen::Matrix3d::Identity();
+        Eigen::Vector3d landmark_gauge_translation = Eigen::Vector3d::Zero();
+        bool has_landmark_gauge_alignment = false;
+        if (!traj.empty()) {
+            double yaw_sine_sum = 0.0;
+            double yaw_cosine_sum = 0.0;
+            Eigen::Vector3d estimate_mean = Eigen::Vector3d::Zero();
+            Eigen::Vector3d truth_mean = Eigen::Vector3d::Zero();
+            for (const auto &row : traj) {
+                const Eigen::Matrix3d relative_rotation =
+                    (row.q_gt * row.q_est.inverse()).normalized().toRotationMatrix();
+                const double yaw = std::atan2(relative_rotation(1, 0),
+                                              relative_rotation(0, 0));
+                yaw_sine_sum += std::sin(yaw);
+                yaw_cosine_sum += std::cos(yaw);
+                estimate_mean += row.p_est;
+                truth_mean += row.p_gt;
+            }
+            const double gauge_yaw = std::atan2(yaw_sine_sum, yaw_cosine_sum);
+            const double cosine = std::cos(gauge_yaw);
+            const double sine = std::sin(gauge_yaw);
+            landmark_gauge_rotation << cosine, -sine, 0.0,
+                                       sine,  cosine, 0.0,
+                                       0.0,    0.0,   1.0;
+            estimate_mean /= n;
+            truth_mean /= n;
+            landmark_gauge_translation =
+                truth_mean - landmark_gauge_rotation * estimate_mean;
+            has_landmark_gauge_alignment = true;
         }
 
         // One-second relative pose error in each pose's local frame. This is
@@ -554,10 +618,63 @@ int main(int argc, char **argv) {
             ? std::numeric_limits<double>::quiet_NaN()
             : (traj.back().g_est - Eigen::Vector3d(0.0, 0.0, 9.81)).norm();
         size_t triangulation_success = 0;
+        size_t triangulation_gt_count = 0;
+        size_t triangulation_improved = 0;
+        double triangulation_initial_error_sum = 0.0;
+        double triangulation_final_error_sum = 0.0;
+        double triangulation_initial_aligned_error_sum = 0.0;
+        double triangulation_final_aligned_error_sum = 0.0;
         for (const auto &log : ekf.triangulation_logs_) {
-            triangulation_success +=
-                log.status == slam::SchurVINS::TriangulationStatus::Success ? 1 : 0;
+            const bool success =
+                log.status == slam::SchurVINS::TriangulationStatus::Success;
+            triangulation_success += success ? 1 : 0;
+            if (success && log.has_ground_truth) {
+                const double initial_error =
+                    (log.initial_position - log.ground_truth).norm();
+                const double final_error =
+                    (log.latest_position - log.ground_truth).norm();
+                triangulation_initial_error_sum += initial_error;
+                triangulation_final_error_sum += final_error;
+                if (has_landmark_gauge_alignment) {
+                    const Eigen::Vector3d initial_aligned =
+                        landmark_gauge_rotation * log.initial_position
+                        + landmark_gauge_translation;
+                    const Eigen::Vector3d final_aligned =
+                        landmark_gauge_rotation * log.latest_position
+                        + landmark_gauge_translation;
+                    triangulation_initial_aligned_error_sum +=
+                        (initial_aligned - log.ground_truth).norm();
+                    triangulation_final_aligned_error_sum +=
+                        (final_aligned - log.ground_truth).norm();
+                }
+                triangulation_improved += final_error < initial_error ? 1 : 0;
+                ++triangulation_gt_count;
+            }
         }
+        const double triangulation_initial_error_mean = triangulation_gt_count
+            ? triangulation_initial_error_sum / static_cast<double>(triangulation_gt_count)
+            : std::numeric_limits<double>::quiet_NaN();
+        const double triangulation_final_error_mean = triangulation_gt_count
+            ? triangulation_final_error_sum / static_cast<double>(triangulation_gt_count)
+            : std::numeric_limits<double>::quiet_NaN();
+        const double triangulation_initial_aligned_error_mean =
+            triangulation_gt_count && has_landmark_gauge_alignment
+            ? triangulation_initial_aligned_error_sum
+              / static_cast<double>(triangulation_gt_count)
+            : std::numeric_limits<double>::quiet_NaN();
+        const double triangulation_final_aligned_error_mean =
+            triangulation_gt_count && has_landmark_gauge_alignment
+            ? triangulation_final_aligned_error_sum
+              / static_cast<double>(triangulation_gt_count)
+            : std::numeric_limits<double>::quiet_NaN();
+        const double triangulation_improve_rate = triangulation_gt_count
+            ? static_cast<double>(triangulation_improved)
+              / static_cast<double>(triangulation_gt_count)
+            : std::numeric_limits<double>::quiet_NaN();
+        const double landmark_update_accept_rate = ekf.n_lmk_update_attempts_
+            ? static_cast<double>(ekf.n_lmk_update_accepted_)
+              / static_cast<double>(ekf.n_lmk_update_attempts_)
+            : std::numeric_limits<double>::quiet_NaN();
 
         size_t observations_used = 0;
         size_t observations_downweighted = 0;
@@ -596,14 +713,23 @@ int main(int argc, char **argv) {
 
         const bool is_ablation = summary_group == "ablation";
         const bool is_observability = summary_group == "observability";
+        const bool is_landmark_strategy = summary_group == "landmark";
+        const bool is_triangulation_scan = summary_group == "triangulation";
+        const bool is_landmark = is_landmark_strategy || is_triangulation_scan;
         const auto path = joinPath(out_dir,
                                    is_ablation ? "ablation_summary.csv"
                                    : (is_observability ? "observability_summary.csv"
-                                                       : "summary.csv"));
+                                      : (is_triangulation_scan
+                                         ? "triangulation_threshold_summary.csv"
+                                         : (is_landmark_strategy
+                                            ? "landmark_strategy_summary.csv"
+                                            : "summary.csv"))));
         const bool reset_summary = scenario == "circle_out"
-            && ((!is_ablation && !is_observability && tag == "base")
+            && ((!is_ablation && !is_observability && !is_landmark && tag == "base")
                 || (is_ablation && tag == "abl_full")
-                || (is_observability && tag == "oc_on"));
+                || (is_observability && tag == "oc_on")
+                || (is_landmark_strategy && tag == "lmk_fixed")
+                || (is_triangulation_scan && tag == "tri_p3"));
         const bool exists = !reset_summary && [&] {
             FILE *t = std::fopen(path.c_str(), "r");
             if (t) { std::fclose(t); return true; }
@@ -629,6 +755,16 @@ int main(int argc, char **argv) {
                         "mean_oc_leak_before,mean_oc_leak_after,max_oc_leak_before,max_oc_leak_after,"
                         "oc_projections,skipped_directions_total,mean_skipped_directions,"
                         "negative_directions_total,mean_negative_directions,tri_success,tri_attempts\n");
+                } else if (is_landmark) {
+                    std::fprintf(f,
+                        "scenario,tag,landmark_update,tri_min_parallax_deg,uv_var,proc_scale,duration,features,"
+                        "rmse_p,rmse_p_aligned,rpe_1s_p,rpe_1s_att,rmse_v,rmse_att,"
+                        "rmse_bg,rmse_ba,max_err_p,mean_nees,mean_nis,gravity_error,neg_cov,"
+                        "t_cost,updates,posterior_improve_rate,obs_downweight_rate,obs_reject_rate,"
+                        "tri_success,tri_attempts,tri_initial_error_mean,tri_final_error_mean,"
+                        "tri_initial_gauge_aligned_error_mean,tri_final_gauge_aligned_error_mean,"
+                        "tri_improve_rate,lmk_update_attempts,lmk_update_accepted,lmk_update_accept_rate,"
+                        "lmk_retriangulation_success,reproj_cost_reduction\n");
                 } else {
                     std::fprintf(f,
                         "scenario,tag,uv_var,proc_scale,estimate_gravity,duration,features,"
@@ -678,6 +814,29 @@ int main(int argc, char **argv) {
                         : 0.0,
                     triangulation_success,
                     ekf.triangulation_logs_.size());
+            } else if (is_landmark) {
+                std::fprintf(f,
+                    "%s,%s,%s,%.6f,%.9g,%.4f,%.1f,%zu,"
+                    "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
+                    "%.6e,%.6e,%.6e,%zu,%.3f,%zu,%.6f,%.6f,%.6f,"
+                    "%zu,%zu,%.6f,%.6f,%.6f,%.6f,%.6f,%zu,%zu,%.6f,%zu,%.6e\n",
+                    scenario.c_str(), tag.c_str(),
+                    landmarkUpdateModeName(landmark_update_mode),
+                    triangulation_min_parallax_deg, uv_var, proc_scale,
+                    duration, feature_count, rmse_p, rmse_p_aligned,
+                    rpe_1s_p, rpe_1s_att, rmse_v, rmse_a, rmse_bg, rmse_ba,
+                    mp, mean_nees, mean_nis, gravity_error, n_neg_cov,
+                    static_cast<double>(ekf.t_cost_) / static_cast<double>(CLOCKS_PER_SEC),
+                    ekf.posterior_times_, posterior_improve_rate,
+                    obs_downweight_rate, obs_reject_rate, triangulation_success,
+                    ekf.triangulation_logs_.size(), triangulation_initial_error_mean,
+                    triangulation_final_error_mean,
+                    triangulation_initial_aligned_error_mean,
+                    triangulation_final_aligned_error_mean,
+                    triangulation_improve_rate,
+                    ekf.n_lmk_update_attempts_, ekf.n_lmk_update_accepted_,
+                    landmark_update_accept_rate, ekf.n_lmk_retriangulation_success_,
+                    ekf.lmk_reprojection_cost_reduction_);
             } else {
                 std::fprintf(f,
                     "%s,%s,%.9g,%.4f,%d,%.1f,%zu,"

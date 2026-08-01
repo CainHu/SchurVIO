@@ -1,13 +1,20 @@
 param(
     [double]$Duration = 30,
     [int]$Features = 600,
-    [string]$BuildDirectory = "cmake-build-release"
+    [string]$BuildDirectory = "cmake-build-release",
+    [double]$TriangulationMinParallaxDeg = 8,
+    [switch]$Quick
 )
 
 $ErrorActionPreference = "Stop"
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $buildPath = [IO.Path]::GetFullPath((Join-Path $projectRoot $BuildDirectory))
 $analysis = Join-Path $buildPath "VinsAnalysis.exe"
+
+if ($Quick) {
+    $Duration = [Math]::Min($Duration, 8)
+    $Features = [Math]::Min($Features, 250)
+}
 
 if (-not (Test-Path -LiteralPath $analysis)) {
     throw "Build VinsAnalysis first: cmake --build $BuildDirectory --target VinsAnalysis"
@@ -26,9 +33,13 @@ if (Test-Path -LiteralPath $cache) {
     }
 }
 
+# The three requested candidates are Fixed, Retriangulate and SchurBackSubstitution.
+# IndependentEkf is retained as the historical reference, not as a recommended policy.
 $configs = @(
-    [pscustomobject]@{ Tag = "oc_on";  Enabled = "1" },
-    [pscustomobject]@{ Tag = "oc_off"; Enabled = "0" }
+    [pscustomobject]@{ Tag = "lmk_fixed"; Mode = "fixed" },
+    [pscustomobject]@{ Tag = "lmk_retri"; Mode = "retriangulate" },
+    [pscustomobject]@{ Tag = "lmk_schur"; Mode = "schur" },
+    [pscustomobject]@{ Tag = "lmk_legacy"; Mode = "independent" }
 )
 $scenarios = @("circle_out", "circle_in", "helix_3d", "stop_go")
 
@@ -41,17 +52,17 @@ try {
 
     foreach ($config in $configs) {
         foreach ($scenario in $scenarios) {
-            Write-Host "Observability $($config.Tag) / $scenario"
+            Write-Host "Landmark $($config.Mode) / $scenario"
             & $analysis "0.01" $config.Tag "1.0" $scenario "$Duration" "$Features" `
-                "tri" "1" "density" "1" "observability" $config.Enabled "0" `
-                "independent" "5.0"
+                "tri" "1" "density" "1" "landmark" "1" "0" $config.Mode `
+                "$TriangulationMinParallaxDeg"
             if ($LASTEXITCODE -ne 0) {
-                throw "Observability $($config.Tag) / $scenario failed with exit code $LASTEXITCODE"
+                throw "Landmark $($config.Mode) / $scenario failed with exit code $LASTEXITCODE"
             }
         }
     }
 
-    Write-Host "Done: $projectRoot\out\observability_summary.csv"
+    Write-Host "Done: $projectRoot\out\landmark_strategy_summary.csv"
 }
 finally {
     Pop-Location
