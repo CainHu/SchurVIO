@@ -50,6 +50,11 @@ namespace slam {
     // 但用的是不同的基，结果不逐位相同(数值误差内应一致)。
     // 对比数据见 docs/OPT_LDLT.md。
     constexpr static bool USE_LDLT_FOR_HPP = true;
+
+    // Hll (每个 landmark 的 3x3 块) 的分解方式，含义同上。
+    // 注意 Hll 恒有 1 个接近 0 的特征值(深度/视线方向)，
+    // 无论用哪种分解都必须做零空间过滤。详见 docs/HLL_STRUCTURE.md。
+    constexpr static bool USE_LDLT_FOR_HLL = true;
     constexpr static Tus IMU_TS = 5000;
     constexpr static Tus CAM_TS = 50000;
 

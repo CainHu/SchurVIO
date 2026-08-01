@@ -904,56 +904,63 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         auto lmk = ids[i].second;
         auto index = i * LMK_SIZE;
 
-        VecX dx_l(LMK_SIZE);
-        dx_l.setZero();
+        Vec3 dx_l = Vec3::Zero();
 
         auto &&cov_p = lmk->cov_position;
         const Mat3_3 hll = Hll_diag.middleRows<LMK_SIZE>(index);
-        Eigen::SelfAdjointEigenSolver<Mat3_3> es(hll);
-
         auto &&el = gl.segment<3>(index);
-//        VecX VTe = es.eigenvectors().transpose() * el;
 
-        // Step-0: 过滤掉特征值为0的值
-        int zero_end = 0;
-        for (; zero_end < LMK_SIZE; ++zero_end) {
-            if (es.eigenvalues()(zero_end) > 1e-6 * es.eigenvalues()(LMK_SIZE - 1)) {
-                break;
-            }
+        // 与 Hpp 同理: 序贯更新只要求把 Cov[e] = σ²·Hll 对角化，
+        // 特征分解和 LDLT 都可以。见 docs/HPP_NULLSPACE.md 与 docs/OPT_LDLT.md。
+        //
+        // 注意 Hll 恒有 1 个接近 0 的特征值(对应深度/视线方向)，
+        // 详见 docs/HLL_STRUCTURE.md —— 所以这里的零空间过滤不是可选项，是必需的。
+        Vec3 hll_diag;    // λ 或 D
+        Mat3_3 hll_basis; // V 或 M
+        Vec3 hll_rhs;     // V^T·el 或 M^-1·el
+
+        if constexpr (USE_LDLT_FOR_HLL) {
+            Eigen::LDLT<Mat3_3> ldlt(hll);
+            hll_basis = ldlt.transpositionsP().transpose() * Mat3_3(ldlt.matrixL());
+            hll_diag = ldlt.vectorD();
+            hll_rhs = ldlt.transpositionsP() * el;
+            ldlt.matrixL().solveInPlace(hll_rhs);
+        } else {
+            Eigen::SelfAdjointEigenSolver<Mat3_3> es(hll);
+            hll_basis = es.eigenvectors();
+            hll_diag = es.eigenvalues();
+            hll_rhs.noalias() = hll_basis.transpose() * el;
         }
-//        while (zero_end < LMK_SIZE && es.eigenvalues()(zero_end) < 1e-6) {
-//            ++zero_end;
-//        }
-#ifdef ONE_SHOT
-#else
-//        if (zero_end != 0) {
-//            std::cerr << "zero_end = " << zero_end << ", eigen value = " << es.eigenvalues().transpose() << std::endl;
-//        }
-#endif
-        if (zero_end == LMK_SIZE) {
-            std::cerr << "id = " << id << ", eigen value = " << es.eigenvalues().transpose() << std::endl;
+
+        // Step-0: 过滤掉(近似)为 0 的对角元
+        //   特征分解的 eigenvalues 升序，LDLT 的 D 无序，故统一逐个判断
+        const TYPE hll_max = hll_diag.maxCoeff();
+        const TYPE hll_thresh = TYPE(1e-6) * hll_max;
+        if (hll_max <= TYPE(0)) {
+            std::cerr << "Hll not positive: id = " << id
+                      << ", diag = " << hll_diag.transpose() << std::endl;
         }
 
         // Step-1: 序贯
-        for (; zero_end < LMK_SIZE; ++zero_end) {
-            const auto R = uv_var / es.eigenvalues()(zero_end) / dt;
-            const auto hT = es.eigenvectors().col(zero_end);
+        for (size_t j = 0; j < LMK_SIZE; ++j) {
+            const auto d = hll_diag(j);
+            if (d <= hll_thresh) {
+                continue;   // 零空间方向(通常是深度方向)，不提供信息
+            }
 
-            VecX PhT = cov_p * hT;
+            const auto R = uv_var / d / dt;
+            const auto hT = hll_basis.col(j);
+
+            Vec3 PhT = cov_p * hT;
             TYPE var = hT.dot(PhT) + R;
-            VecX K = PhT / var;
+            Vec3 K = PhT / var;
             cov_p -= K * PhT.transpose();
 
             PhT = cov_p * hT;
             cov_p.triangularView<Eigen::Upper>() += (K * R - PhT) * K.transpose();
             cov_p.triangularView<Eigen::StrictlyLower>() = cov_p.triangularView<Eigen::StrictlyUpper>().transpose();
 
-//            // 更新误差 Ve
-//            auto dx = K * (VTe(zero_end) / es.eigenvalues()(zero_end));
-//            dx_l += dx;
-//            VTe -= es.eigenvalues().asDiagonal() * (es.eigenvectors().transpose() * dx);
-
-            auto e = hT.dot(el / es.eigenvalues()(zero_end) - dx_l);
+            const auto e = hll_rhs(j) / d - hT.dot(dx_l);
             dx_l += K * e;
         }
 
