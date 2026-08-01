@@ -157,43 +157,46 @@ void SchurVINS::predict(const slam::IMUData &imu_data, const double dt) {
     const Vec3 nRdv = accel_corr_world_ * (-dt);
     const Mat3_3 nRdv_X = hat(nRdv);
 
-    using MatINS = Eigen::Matrix<TYPE, I::SIZE, I::SIZE>;
-    MatINS A = MatINS::Identity();
-    A.template block<3, 3>(I::Q, I::BG) = nRdt;
-    A.template block<3, 3>(I::P, I::V) = Mat3_3::Identity() * dt;
-    A.template block<3, 3>(I::V, I::Q) = nRdv_X;
-    A.template block<3, 3>(I::V, I::BA) = nRdt;
-    if constexpr (INSState::ESTIMATE_GRAVITY) {
-        A.template block<3, 3>(I::V, I::G) = Mat3_3::Identity() * dt;
-    }
-
-    // 三条 P_ii 传播路径都必须共享同一份旧 P_ic。
-    using MatCross = Eigen::Matrix<TYPE, I::SIZE, COV_SIZE - I::SIZE>;
-    const MatCross P_cross_prev =
-        cov_.topRightCorner(I::SIZE, COV_SIZE - I::SIZE);
-
     if constexpr (USE_STABLE_COVARIANCE_PREDICTION) {
+        using MatINS = Eigen::Matrix<TYPE, I::SIZE, I::SIZE>;
+        using MatCross = Eigen::Matrix<TYPE, I::SIZE, COV_SIZE - I::SIZE>;
+        MatINS A = MatINS::Identity();
+        A.template block<3, 3>(I::Q, I::BG) = nRdt;
+        A.template block<3, 3>(I::P, I::V) = Mat3_3::Identity() * dt;
+        A.template block<3, 3>(I::V, I::Q) = nRdv_X;
+        A.template block<3, 3>(I::V, I::BA) = nRdt;
+        if constexpr (INSState::ESTIMATE_GRAVITY) {
+            A.template block<3, 3>(I::V, I::G) = Mat3_3::Identity() * dt;
+        }
+
         // 合同变换保持半正定性：若 P >= 0，则 A*P*A^T >= 0。
         // 使用副本避免 Eigen 表达式在赋值时与 cov alias。
         const MatINS P_prev = cov.selfadjointView<Eigen::Upper>();
+        const MatCross P_cross_prev =
+            cov_.topRightCorner(I::SIZE, COV_SIZE - I::SIZE);
         cov.noalias() = A * P_prev * A.transpose();
         cov = TYPE(0.5) * (cov + cov.transpose());
+        cov_.topRightCorner(I::SIZE, COV_SIZE - I::SIZE).noalias() =
+            A * P_cross_prev;
+        cov_.bottomLeftCorner(COV_SIZE - I::SIZE, I::SIZE) =
+            cov_.topRightCorner(I::SIZE, COV_SIZE - I::SIZE).transpose();
     } else if constexpr (CONFIG_DEBUG) {
-        Eigen::Matrix<TYPE, INSState::SIZE, INSState::SIZE> AP;
+        // 显式计算联合传播的顶部块 A * [P_ii P_ic]，但不构造 A。
+        Eigen::Matrix<TYPE, I::SIZE, COV_SIZE> AP;
 
-        AP.middleRows<3>(I::Q).noalias() = cov.middleRows<3>(I::Q)
-                                           + nRdt * cov.middleRows<3>(I::BG);
-        AP.middleRows<3>(I::P).noalias() = cov.middleRows<3>(I::P)
-                                           + dt * cov.middleRows<3>(I::V);
-        AP.middleRows<3>(I::V).noalias() = cov.middleRows<3>(I::V)
-                                           + nRdv_X * cov.middleRows<3>(I::Q)
-                                           + nRdt * cov.middleRows<3>(I::BA);
+        AP.middleRows<3>(I::Q).noalias() = cov_.middleRows<3>(I::Q)
+                                           + nRdt * cov_.middleRows<3>(I::BG);
+        AP.middleRows<3>(I::P).noalias() = cov_.middleRows<3>(I::P)
+                                           + dt * cov_.middleRows<3>(I::V);
+        AP.middleRows<3>(I::V).noalias() = cov_.middleRows<3>(I::V)
+                                           + nRdv_X * cov_.middleRows<3>(I::Q)
+                                           + nRdt * cov_.middleRows<3>(I::BA);
         if constexpr (INSState::ESTIMATE_GRAVITY) {
-            AP.middleRows<3>(I::V).noalias() += dt * cov.middleRows<3>(I::G);
+            AP.middleRows<3>(I::V).noalias() += dt * cov_.middleRows<3>(I::G);
         }
-        AP.middleRows<3>(I::BG).noalias() = cov.middleRows<3>(I::BG);
-        AP.middleRows<3>(I::BA).noalias() = cov.middleRows<3>(I::BA);
-        AP.middleRows<3>(I::G).noalias() = cov.middleRows<3>(I::G);
+        AP.middleRows<3>(I::BG).noalias() = cov_.middleRows<3>(I::BG);
+        AP.middleRows<3>(I::BA).noalias() = cov_.middleRows<3>(I::BA);
+        AP.middleRows<3>(I::G).noalias() = cov_.middleRows<3>(I::G);
 
         cov.middleCols<3>(I::Q).noalias() = AP.middleCols<3>(I::Q)
                                             + AP.middleCols<3>(I::BG) * nRdt.transpose();
@@ -212,14 +215,20 @@ void SchurVINS::predict(const slam::IMUData &imu_data, const double dt) {
         }
 
         cov = 0.5 * (cov + cov.transpose());
+        cov_.topRightCorner(I::SIZE, COV_SIZE - I::SIZE) =
+            AP.rightCols(COV_SIZE - I::SIZE);
+        cov_.bottomLeftCorner(COV_SIZE - I::SIZE, I::SIZE) =
+            cov_.topRightCorner(I::SIZE, COV_SIZE - I::SIZE).transpose();
     } else {
-        cov.middleCols<3>(I::P).noalias() += cov.middleCols<3>(I::V) * dt;
-        cov.middleCols<3>(I::V).noalias() += cov.middleCols<3>(I::Q) * nRdv_X.transpose()
-                                             + cov.middleCols<3>(I::BA) * nRdt.transpose();
+        // 先就地计算 P * F^T。改动完整列可同时传播 P_ii 与 P_ci，
+        // 之后只需计算 P_ii 的非平凡行，P_ic 由 P_ci^T 恢复。
+        cov_.middleCols<3>(I::P).noalias() += cov_.middleCols<3>(I::V) * dt;
+        cov_.middleCols<3>(I::V).noalias() += cov_.middleCols<3>(I::Q) * nRdv_X.transpose()
+                                              + cov_.middleCols<3>(I::BA) * nRdt.transpose();
         if constexpr (INSState::ESTIMATE_GRAVITY) {
-            cov.middleCols<3>(I::V).noalias() += cov.middleCols<3>(I::G) * dt;
+            cov_.middleCols<3>(I::V).noalias() += cov_.middleCols<3>(I::G) * dt;
         }
-        cov.middleCols<3>(I::Q).noalias() += cov.middleCols<3>(I::BG) * nRdt.transpose();
+        cov_.middleCols<3>(I::Q).noalias() += cov_.middleCols<3>(I::BG) * nRdt.transpose();
 
         cov.leftCols<9>().middleRows<3>(I::P).noalias() += dt * cov.leftCols<9>().middleRows<3>(I::V);
         cov.leftCols<9>().middleRows<3>(I::V).noalias() += nRdv_X * cov.leftCols<9>().middleRows<3>(I::Q)
@@ -230,15 +239,9 @@ void SchurVINS::predict(const slam::IMUData &imu_data, const double dt) {
         cov.leftCols<9>().middleRows<3>(I::Q).noalias() += nRdt * cov.leftCols<9>().middleRows<3>(I::BG);
 
         cov.topRightCorner<9, I::SIZE - 9>().noalias() = cov.bottomLeftCorner<I::SIZE - 9, 9>().transpose();
+        cov_.topRightCorner(I::SIZE, COV_SIZE - I::SIZE) =
+            cov_.bottomLeftCorner(COV_SIZE - I::SIZE, I::SIZE).transpose();
     }
-
-    // 联合状态完整传播：F = diag(A, I)。上面的三个分支只负责
-    // P_ii' = A P_ii A^T；这里统一补齐 P_ic' = A P_ic。
-    // P_cc 对应静态增广位姿，在 IMU 预测中保持不变。
-    cov_.topRightCorner(I::SIZE, COV_SIZE - I::SIZE).noalias() =
-        A * P_cross_prev;
-    cov_.bottomLeftCorner(COV_SIZE - I::SIZE, I::SIZE) =
-        cov_.topRightCorner(I::SIZE, COV_SIZE - I::SIZE).transpose();
 
     // 叠加过程噪声
     cov += (state_.var_proc * (dt * proc_noise_scale_)).asDiagonal();
