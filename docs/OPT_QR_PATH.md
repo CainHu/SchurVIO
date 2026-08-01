@@ -29,7 +29,11 @@
 结论很明确：**唯一的瓶颈是 `J_STATE` 的 QR 分解**，其余全部加起来不到 15 %。
 
 `J_STATE` 的规模：`(2 · num_obs) × 180`，其中 `num_obs ≈ 1600`
-（约 326 个 landmark × 平均 14.8 个观测），即约 **3200 × 180**。
+**实测 `J_STATE` 的平均行数是 8678**，即约 **8678 × 180**。
+
+> 更正：本文档早先写的"约 3200 × 180"是算错的。
+> 正确的推导：每个 landmark 有 `2K = 30` 行观测，小 QR 消掉 3 维 landmark 后
+> 剩 `2K − 3 = 27` 行，共 `326 × 27 ≈ 8700` 行，与实测 8678 吻合。
 
 ## 二、有效的改动
 
@@ -45,7 +49,7 @@ auto qr = JE.householderQr();
 const MatXX H_red = QR.topLeftCorner(n_eff, n_cols).triangularView<Eigen::Upper>();
 ```
 
-列选主元（column pivoting）对 3200×180 的矩阵开销极大，而这里**不需要 rank-revealing**。
+列选主元（column pivoting）对 8678×180 的矩阵开销极大，而这里**不需要 rank-revealing**。
 顺带省掉了 `R * P^T` 这次矩阵乘法。
 
 **为什么去掉列选主元是安全的：**
