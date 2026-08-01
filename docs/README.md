@@ -14,6 +14,7 @@
 | QR 大分解优化 | QR | **61.8 s** | `colPivHouseholderQr` → `householderQr` |
 | 切换到 Schur 路径 | Schur | **18.3 s** | 原样就比优化后的 QR 快 3.4× |
 | Schur 路径优化 | Schur | **11.9 s** | `Hll` 块对角 + 序贯循环对称性 + 不变量提升 |
+| `Hpp` 分解改 LDLT | Schur | **9.7 s** | 分解本身 2.92 s → 0.39 s |
 
 > 方案2/方案4 单独看对总耗时无可测量影响（非关键帧 refine 仅占 0.05 s），
 > 它们解决的是**功能问题**（非关键帧此前被直接丢弃、不做后验更新），不是性能问题。
@@ -24,8 +25,10 @@
 |---|---|
 | [OPT_QR_PATH.md](OPT_QR_PATH.md) | QR 路径 203.5 s → 61.8 s |
 | [OPT_SCHUR_PATH.md](OPT_SCHUR_PATH.md) | Schur 路径 18.3 s → 11.9 s |
+| [OPT_LDLT.md](OPT_LDLT.md) | `Hpp` 分解改用 LDLT，11.9 s → 9.7 s |
+| [HPP_NULLSPACE.md](HPP_NULLSPACE.md) | 理论：为什么 `Hpp` 恒有 31 维零空间 |
 
-两份文档都记录了**失败的尝试和被数据推翻的判断**，不只记成功的部分。
+各文档都记录了**失败的尝试和被数据推翻的判断**，不只记成功的部分。
 
 ## 路径切换
 
@@ -44,6 +47,7 @@
 |---|---|---|---|
 | `INSState::ESTIMATE_GRAVITY` | `common.h` | `true` | 是否估计重力向量 |
 | `ExtState::ESTIMATE_EXTRINSIC` | `common.h` | `false` | 是否估计相机-IMU 外参 |
+| `USE_LDLT_FOR_HPP` | `eskf/schur_vins.h` | `true` | `Hpp` 分解：`true`=LDLT，`false`=特征分解 |
 
 `ESTIMATE_EXTRINSIC` 关闭时，外参雅可比 `J_ext` / `J_EXT` 的代码通过 `if constexpr`
 屏蔽——不参与运行，但始终参与语法和类型检查，不会腐烂。
