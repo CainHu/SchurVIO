@@ -693,12 +693,32 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             if (!lmk->is_triangulated &&
                 lmk->last_triangulation_obs_count < keyframe_obs) {
                 lmk->last_triangulation_obs_count = keyframe_obs;
-                const auto triangulation = triangulateLandmark(*lmk);
-                logTriangulationAttempt(*lmk, triangulation, cam_data.timestamp, lmk_map);
-                if (triangulation.status == TriangulationStatus::Success) {
-                    lmk->position = triangulation.position;
-                    lmk->cov_position = triangulation.covariance;
-                    lmk->is_triangulated = true;
+                if (landmark_initialization_mode_ == LandmarkInitializationMode::GroundTruth) {
+                    // Historical analysis-only oracle initialization: every point
+                    // with two views is accepted with the old fixed covariance.
+                    const auto truth = lmk_map.find(id);
+                    if (truth != lmk_map.end()) {
+                        lmk->position = truth->second;
+                        lmk->cov_position = Mat3_3::Identity() * TYPE(1e-4);
+                        lmk->is_triangulated = true;
+                    }
+                } else {
+                    const auto triangulation = triangulateLandmark(*lmk);
+                    logTriangulationAttempt(*lmk, triangulation, cam_data.timestamp, lmk_map);
+                    if (triangulation.status == TriangulationStatus::Success) {
+                        lmk->position = triangulation.position;
+                        lmk->cov_position = triangulation.covariance;
+                        // Strict oracle-position ablation: preserve triangulation
+                        // gating and covariance, replacing position only.
+                        if (landmark_initialization_mode_ ==
+                            LandmarkInitializationMode::TriangulationWithOraclePosition) {
+                            const auto truth = lmk_map.find(id);
+                            if (truth != lmk_map.end()) {
+                                lmk->position = truth->second;
+                            }
+                        }
+                        lmk->is_triangulated = true;
+                    }
                 }
             }
 
@@ -1359,8 +1379,10 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 
 //    std::cout << "Update Landmark" << std::endl;
     // [[ 更新 Landmark ]]
-    gl -= Hpl.transpose() * dx_p;
-    for (size_t i = 0; i < ids.size(); ++i) {
+    if (refine_landmarks_) {
+        gl -= Hpl.transpose() * dx_p;
+    }
+    for (size_t i = 0; refine_landmarks_ && i < ids.size(); ++i) {
         if (valid_observations_per_landmark[i] < 2) {
             continue;
         }

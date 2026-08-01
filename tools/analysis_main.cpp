@@ -2,6 +2,7 @@
 //
 // 用法:
 //   VinsAnalysis [uv_var] [tag] [proc_scale] [scenario] [duration] [features]
+//                [landmark_init] [refine] [imu_noise] [bias_rw] [summary_group]
 //     uv_var  Schur 序贯伪量测的噪声密度
 //     tag     输出文件名后缀，用于噪声扫描时区分多组结果
 //     scenario circle_out / circle_in / helix_3d / stop_go
@@ -25,6 +26,7 @@
 #include <vector>
 #include <cmath>
 #include <limits>
+#include <algorithm>
 
 namespace {
 
@@ -87,11 +89,20 @@ struct ScenarioData {
 bool generateScenario(const std::string &name,
                       const double duration,
                       const size_t feature_count,
+                      const bool legacy_white_noise,
+                      const bool enable_bias_random_walk,
                       ScenarioData &data) {
     constexpr double acc_noise_density = 0.02;
     constexpr double gyro_noise_density = 0.002;
     constexpr double acc_bias_random_walk = 0.0005;
     constexpr double gyro_bias_random_walk = 0.0001;
+
+    auto configure = [&](auto &simulator) {
+        simulator.setImuNoise(acc_noise_density, gyro_noise_density,
+                              enable_bias_random_walk ? acc_bias_random_walk : 0.0,
+                              enable_bias_random_walk ? gyro_bias_random_walk : 0.0);
+        simulator.setLegacyWhiteNoiseDiscretization(legacy_white_noise);
+    };
 
     auto collect = [&](auto &simulator) {
         simulator.generateData(data.imu, data.camera, data.ground_truth);
@@ -102,8 +113,7 @@ bool generateScenario(const std::string &name,
 
     if (name == "circle_out") {
         VIOFrontendSimulator simulator;
-        simulator.setImuNoise(acc_noise_density, gyro_noise_density,
-                              acc_bias_random_walk, gyro_bias_random_walk);
+        configure(simulator);
         simulator.setTrajectoryParams(5.0, 1.0, duration);
         simulator.setCircularFeaturesParams(feature_count, {8.0, 10.0, 12.0},
                                              Eigen::Vector3d(0, 0, 1.5));
@@ -112,8 +122,7 @@ bool generateScenario(const std::string &name,
     }
     if (name == "circle_in") {
         VIOFrontendSimulator1 simulator;
-        simulator.setImuNoise(acc_noise_density, gyro_noise_density,
-                              acc_bias_random_walk, gyro_bias_random_walk);
+        configure(simulator);
         simulator.setTrajectoryParams(10.0, 1.0, duration);
         simulator.setCircularFeaturesParams(feature_count, {3.0, 5.0, 7.0},
                                              Eigen::Vector3d(0, 0, 1.5));
@@ -125,8 +134,7 @@ bool generateScenario(const std::string &name,
             ? VIORepresentativeSimulator::Trajectory::Helix3D
             : VIORepresentativeSimulator::Trajectory::StopGo;
         VIORepresentativeSimulator simulator(trajectory);
-        simulator.setImuNoise(acc_noise_density, gyro_noise_density,
-                              acc_bias_random_walk, gyro_bias_random_walk);
+        configure(simulator);
         simulator.setDuration(duration);
         simulator.setFeatureCount(feature_count);
         collect(simulator);
@@ -144,12 +152,25 @@ int main(int argc, char **argv) {
     const std::string scenario = (argc > 4) ? argv[4] : "circle_out";
     const double duration = (argc > 5) ? std::atof(argv[5]) : 60.0;
     const size_t feature_count = (argc > 6) ? static_cast<size_t>(std::strtoull(argv[6], nullptr, 10)) : 1000;
+    const std::string landmark_init = (argc > 7) ? argv[7] : "tri";
+    const bool refine_landmarks = (argc > 8) ? std::atoi(argv[8]) != 0 : true;
+    const std::string imu_noise_model = (argc > 9) ? argv[9] : "density";
+    const bool enable_bias_random_walk = (argc > 10) ? std::atoi(argv[10]) != 0 : true;
+    const std::string summary_group = (argc > 11) ? argv[11] : "main";
+    const bool legacy_white_noise = imu_noise_model == "legacy";
+    using LandmarkInit = slam::SchurVINS::LandmarkInitializationMode;
+    const LandmarkInit landmark_initialization_mode = landmark_init == "gt"
+        ? LandmarkInit::GroundTruth
+        : (landmark_init == "tri_gt"
+           ? LandmarkInit::TriangulationWithOraclePosition
+           : LandmarkInit::Triangulation);
     const std::string out_dir = "out";
     const std::string run_name = scenario + "_" + tag;
 
     // ---- 仿真 ----
     ScenarioData simulation;
-    if (!generateScenario(scenario, duration, feature_count, simulation)) {
+    if (!generateScenario(scenario, duration, feature_count, legacy_white_noise,
+                          enable_bias_random_walk, simulation)) {
         std::fprintf(stderr, "unknown scenario: %s\n", scenario.c_str());
         return 2;
     }
@@ -168,6 +189,8 @@ int main(int argc, char **argv) {
     ekf.uv_var = uv_var;
     ekf.proc_noise_scale_ = proc_scale;
     ekf.enable_logging_ = true;
+    ekf.landmark_initialization_mode_ = landmark_initialization_mode;
+    ekf.refine_landmarks_ = refine_landmarks;
     ekf.triangulation_uv_std = simulation.camera_noise_std / simulation.focal_length;
     ekf.setQPV(ground_truth[0].q, ground_truth[0].p, ground_truth[0].v);
 
@@ -297,6 +320,7 @@ int main(int argc, char **argv) {
     // ---- 写 update CSV: 视觉更新的先验 vs 后验 ----
     // 关键: 把每次更新的先验/后验状态与同时刻 GT 对比，
     //       就能看出视觉后验是否真的把状态【拉近】了真值。
+    double posterior_improve_rate = std::numeric_limits<double>::quiet_NaN();
     {
         const auto path = joinPath(out_dir, "update_" + run_name + ".csv");
         FILE *f = std::fopen(path.c_str(), "w");
@@ -336,6 +360,9 @@ int main(int argc, char **argv) {
                 improved);
         }
         std::fclose(f);
+        posterior_improve_rate = n_total
+            ? static_cast<double>(n_improve) / static_cast<double>(n_total)
+            : std::numeric_limits<double>::quiet_NaN();
         std::printf("wrote %s (%zu updates, %.1f%% improved position)\n",
                     path.c_str(), ekf.logs_.size(),
                     n_total ? 100.0 * (double)n_improve / (double)n_total : 0.0);
@@ -442,6 +469,75 @@ int main(int argc, char **argv) {
         const double rmse_a = std::sqrt(sa / n);
         const double rmse_bg = std::sqrt(sbg / n);
         const double rmse_ba = std::sqrt(sba / n);
+
+        // Absolute trajectory error after one rigid SE(3) alignment. Scale is
+        // deliberately fixed so monocular/VIO scale errors remain visible.
+        double rmse_p_aligned = std::numeric_limits<double>::quiet_NaN();
+        if (traj.size() >= 3) {
+            Eigen::Vector3d estimate_mean = Eigen::Vector3d::Zero();
+            Eigen::Vector3d truth_mean = Eigen::Vector3d::Zero();
+            for (const auto &row : traj) {
+                estimate_mean += row.p_est;
+                truth_mean += row.p_gt;
+            }
+            estimate_mean /= n;
+            truth_mean /= n;
+
+            Eigen::Matrix3d cross_covariance = Eigen::Matrix3d::Zero();
+            for (const auto &row : traj) {
+                cross_covariance.noalias() +=
+                    (row.p_est - estimate_mean) * (row.p_gt - truth_mean).transpose();
+            }
+            const Eigen::JacobiSVD<Eigen::Matrix3d> svd(
+                cross_covariance, Eigen::ComputeFullU | Eigen::ComputeFullV);
+            Eigen::Matrix3d reflection = Eigen::Matrix3d::Identity();
+            reflection(2, 2) = (svd.matrixV() * svd.matrixU().transpose()).determinant();
+            const Eigen::Matrix3d rotation =
+                svd.matrixV() * reflection * svd.matrixU().transpose();
+            const Eigen::Vector3d translation = truth_mean - rotation * estimate_mean;
+            double aligned_squared_error = 0.0;
+            for (const auto &row : traj) {
+                const Eigen::Vector3d aligned = rotation * row.p_est + translation;
+                aligned_squared_error += (aligned - row.p_gt).squaredNorm();
+            }
+            rmse_p_aligned = std::sqrt(aligned_squared_error / n);
+        }
+
+        // One-second relative pose error in each pose's local frame. This is
+        // gauge invariant and therefore separates local odometry quality from
+        // unobservable global translation/yaw drift.
+        double rpe_p_sum = 0.0, rpe_a_sum = 0.0;
+        size_t rpe_count = 0;
+        size_t lag_index = 1;
+        for (size_t i = 0; i < traj.size(); ++i) {
+            lag_index = std::max(lag_index, i + 1);
+            const double target = traj[i].t + 1.0;
+            while (lag_index + 1 < traj.size()
+                   && std::abs(traj[lag_index + 1].t - target)
+                      < std::abs(traj[lag_index].t - target)) {
+                ++lag_index;
+            }
+            if (lag_index >= traj.size() || std::abs(traj[lag_index].t - target) > 0.1) {
+                continue;
+            }
+            const Eigen::Quaterniond q_gt_rel =
+                (traj[i].q_gt.inverse() * traj[lag_index].q_gt).normalized();
+            const Eigen::Quaterniond q_est_rel =
+                (traj[i].q_est.inverse() * traj[lag_index].q_est).normalized();
+            const Eigen::Vector3d p_gt_rel =
+                traj[i].q_gt.inverse() * (traj[lag_index].p_gt - traj[i].p_gt);
+            const Eigen::Vector3d p_est_rel =
+                traj[i].q_est.inverse() * (traj[lag_index].p_est - traj[i].p_est);
+            rpe_p_sum += (p_est_rel - p_gt_rel).squaredNorm();
+            rpe_a_sum += attitudeError(q_gt_rel, q_est_rel).squaredNorm();
+            ++rpe_count;
+        }
+        const double rpe_1s_p = rpe_count
+            ? std::sqrt(rpe_p_sum / static_cast<double>(rpe_count))
+            : std::numeric_limits<double>::quiet_NaN();
+        const double rpe_1s_att = rpe_count
+            ? std::sqrt(rpe_a_sum / static_cast<double>(rpe_count))
+            : std::numeric_limits<double>::quiet_NaN();
         const double mean_nees = nees_count ? nees_sum / static_cast<double>(nees_count)
                                              : std::numeric_limits<double>::quiet_NaN();
         const double mean_nis = nis_count ? nis_sum / static_cast<double>(nis_count)
@@ -455,8 +551,29 @@ int main(int argc, char **argv) {
                 log.status == slam::SchurVINS::TriangulationStatus::Success ? 1 : 0;
         }
 
-        const auto path = joinPath(out_dir, "summary.csv");
-        const bool reset_summary = tag == "base" && scenario == "circle_out";
+        size_t observations_used = 0;
+        size_t observations_downweighted = 0;
+        size_t observations_rejected = 0;
+        for (const auto &log : ekf.logs_) {
+            observations_used += log.n_obs_used;
+            observations_downweighted += log.n_obs_downweighted;
+            observations_rejected += log.n_obs_rejected;
+        }
+        const double obs_downweight_rate = observations_used
+            ? static_cast<double>(observations_downweighted)
+              / static_cast<double>(observations_used)
+            : std::numeric_limits<double>::quiet_NaN();
+        const size_t observations_considered = observations_used + observations_rejected;
+        const double obs_reject_rate = observations_considered
+            ? static_cast<double>(observations_rejected)
+              / static_cast<double>(observations_considered)
+            : std::numeric_limits<double>::quiet_NaN();
+
+        const bool is_ablation = summary_group == "ablation";
+        const auto path = joinPath(out_dir,
+                                   is_ablation ? "ablation_summary.csv" : "summary.csv");
+        const bool reset_summary = scenario == "circle_out"
+            && ((!is_ablation && tag == "base") || (is_ablation && tag == "abl_full"));
         const bool exists = !reset_summary && [&] {
             FILE *t = std::fopen(path.c_str(), "r");
             if (t) { std::fclose(t); return true; }
@@ -465,21 +582,49 @@ int main(int argc, char **argv) {
         // base 是一组新实验的起点：先清掉旧算法留下的扫描结果，避免报告混用数据。
         FILE *f = std::fopen(path.c_str(), reset_summary ? "w" : "a");
         if (f) {
-            if (!exists) std::fprintf(f,
-                "scenario,tag,uv_var,proc_scale,estimate_gravity,duration,features,"
-                "rmse_p,rmse_v,rmse_att,rmse_bg,rmse_ba,max_err_p,mean_nees,mean_nis,"
-                "gravity_error,neg_cov,t_cost,updates,tri_success,tri_attempts\n");
-            std::fprintf(f,
-                         "%s,%s,%.9g,%.4f,%d,%.1f,%zu,"
-                         "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6e,%.6e,"
-                         "%.6e,%zu,%.3f,%zu,%zu,%zu\n",
-                         scenario.c_str(), tag.c_str(), uv_var, proc_scale,
-                         slam::INSState::ESTIMATE_GRAVITY ? 1 : 0, duration, feature_count,
-                         rmse_p, rmse_v, rmse_a, rmse_bg, rmse_ba, mp, mean_nees, mean_nis,
-                         gravity_error, n_neg_cov,
-                         (double)ekf.t_cost_ / (double)CLOCKS_PER_SEC,
-                         ekf.posterior_times_, triangulation_success,
-                         ekf.triangulation_logs_.size());
+            if (!exists) {
+                if (is_ablation) {
+                    std::fprintf(f,
+                        "scenario,tag,landmark_init,refine_landmarks,imu_noise_model,bias_random_walk,"
+                        "uv_var,proc_scale,duration,features,rmse_p,rmse_p_aligned,rpe_1s_p,rpe_1s_att,"
+                        "rmse_v,rmse_att,rmse_bg,rmse_ba,max_err_p,mean_nees,mean_nis,gravity_error,"
+                        "neg_cov,t_cost,updates,posterior_improve_rate,obs_downweight_rate,obs_reject_rate,"
+                        "tri_success,tri_attempts\n");
+                } else {
+                    std::fprintf(f,
+                        "scenario,tag,uv_var,proc_scale,estimate_gravity,duration,features,"
+                        "rmse_p,rmse_v,rmse_att,rmse_bg,rmse_ba,max_err_p,mean_nees,mean_nis,"
+                        "gravity_error,neg_cov,t_cost,updates,tri_success,tri_attempts\n");
+                }
+            }
+            if (is_ablation) {
+                std::fprintf(f,
+                    "%s,%s,%s,%d,%s,%d,%.9g,%.4f,%.1f,%zu,"
+                    "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6e,%.6e,%.6e,"
+                    "%zu,%.3f,%zu,%.6f,%.6f,%.6f,%zu,%zu\n",
+                    scenario.c_str(), tag.c_str(), landmark_init.c_str(),
+                    refine_landmarks ? 1 : 0, imu_noise_model.c_str(),
+                    enable_bias_random_walk ? 1 : 0, uv_var, proc_scale,
+                    duration, feature_count, rmse_p, rmse_p_aligned, rpe_1s_p,
+                    rpe_1s_att, rmse_v, rmse_a, rmse_bg, rmse_ba, mp,
+                    mean_nees, mean_nis, gravity_error, n_neg_cov,
+                    static_cast<double>(ekf.t_cost_) / static_cast<double>(CLOCKS_PER_SEC),
+                    ekf.posterior_times_, posterior_improve_rate,
+                    obs_downweight_rate, obs_reject_rate, triangulation_success,
+                    ekf.triangulation_logs_.size());
+            } else {
+                std::fprintf(f,
+                    "%s,%s,%.9g,%.4f,%d,%.1f,%zu,"
+                    "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6e,%.6e,"
+                    "%.6e,%zu,%.3f,%zu,%zu,%zu\n",
+                    scenario.c_str(), tag.c_str(), uv_var, proc_scale,
+                    slam::INSState::ESTIMATE_GRAVITY ? 1 : 0, duration, feature_count,
+                    rmse_p, rmse_v, rmse_a, rmse_bg, rmse_ba, mp, mean_nees, mean_nis,
+                    gravity_error, n_neg_cov,
+                    static_cast<double>(ekf.t_cost_) / static_cast<double>(CLOCKS_PER_SEC),
+                    ekf.posterior_times_, triangulation_success,
+                    ekf.triangulation_logs_.size());
+            }
             std::fclose(f);
         }
         std::printf("[%s/%s] uv_var=%.9g  RMSE p=%.4f m  v=%.4f m/s  att=%.4f rad  max_p=%.4f m\n",

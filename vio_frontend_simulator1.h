@@ -25,6 +25,7 @@ private:
     double imu_gyro_noise_std_ = 0.01;  // 陀螺仪白噪声密度(rad/s/sqrt(Hz))
     double imu_acc_bias_noise_std_ = 0.001;  // 加速度计偏置随机游走密度
     double imu_gyro_bias_noise_std_ = 0.0001;  // 陀螺仪偏置随机游走密度
+    bool use_legacy_white_noise_discretization_ = false;
     double fov_ = 2. * M_PI / 3.;
     double camera_cx_ = 320.0; // 相机内参
     double camera_cy_ = 320.0;
@@ -71,6 +72,10 @@ public:
         imu_gyro_noise_std_ = gyro_noise_std;
         imu_acc_bias_noise_std_ = acc_bias_noise_std;
         imu_gyro_bias_noise_std_ = gyro_bias_noise_std;
+    }
+
+    void setLegacyWhiteNoiseDiscretization(bool enabled) {
+        use_legacy_white_noise_discretization_ = enabled;
     }
 
     // 设置轨迹参数

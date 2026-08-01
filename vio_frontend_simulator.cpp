@@ -132,7 +132,10 @@ std::vector<ImuData> VIOFrontendSimulator::generateImuData(const std::vector<Sta
         Eigen::Vector3d acc_ideal = curr.q.inverse() * ((curr.v - prev.v) / dt - g);
         // 添加偏置和噪声
         data.accel = acc_ideal + curr.ba;
-        std::normal_distribution<double> acc_noise(0, imu_acc_noise_std_ * sqrt(imu_rate_));
+        const double white_noise_scale = use_legacy_white_noise_discretization_
+                                         ? 1.0 / sqrt(imu_rate_)
+                                         : sqrt(imu_rate_);
+        std::normal_distribution<double> acc_noise(0, imu_acc_noise_std_ * white_noise_scale);
         data.accel += Eigen::Vector3d(acc_noise(imu_generator),
                                       acc_noise(imu_generator),
                                       acc_noise(imu_generator));
@@ -144,7 +147,7 @@ std::vector<ImuData> VIOFrontendSimulator::generateImuData(const std::vector<Sta
         Eigen::Vector3d gyro_ideal = slam::quat2vec(dq) / dt;
         // 添加偏置和噪声
         data.gyro = gyro_ideal + curr.bg;
-        std::normal_distribution<double> gyro_noise(0, imu_gyro_noise_std_ * sqrt(imu_rate_));
+        std::normal_distribution<double> gyro_noise(0, imu_gyro_noise_std_ * white_noise_scale);
         data.gyro += Eigen::Vector3d(gyro_noise(imu_generator),
                                      gyro_noise(imu_generator),
                                      gyro_noise(imu_generator));

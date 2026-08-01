@@ -30,6 +30,7 @@
 | [ANALYSIS_REPORT.md](ANALYSIS_REPORT.md) | **精度分析**：视觉后验的修正作用、噪声敏感度、协方差问题（配套 `out/report.html` 交互图表） |
 | [TRIANGULATION.md](TRIANGULATION.md) | 多视图三角化、失败门限、初始 landmark 协方差和真值离线评估 |
 | [SIMULATION_SCENARIOS.md](SIMULATION_SCENARIOS.md) | Circle-out / Circle-in / Helix-3D / Stop-go 场景与统一噪声模型 |
+| [ABLATION_STUDY.md](ABLATION_STUDY.md) | 四场景严格消融：三角化、landmark 修正、IMU 白噪声离散化与偏置随机游走 |
 | [HPP_NULLSPACE.md](HPP_NULLSPACE.md) | 理论：为什么 `Hpp` 恒有 ~31 维零空间；跳过策略是否正确 |
 | [HLL_STRUCTURE.md](HLL_STRUCTURE.md) | 理论：`Hll` 的零特征值 = 深度方向；`Hll` 换 LDLT |
 

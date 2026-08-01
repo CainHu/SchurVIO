@@ -140,7 +140,9 @@ std::vector<ImuData> VIORepresentativeSimulator::generateImuData(
     imu_data.reserve(ground_truth.size());
     const Eigen::Vector3d gravity(0.0, 0.0, 9.81);
     std::mt19937 imu_generator(0x5A13u);
-    const double white_noise_scale = std::sqrt(imu_rate_);
+    const double white_noise_scale = use_legacy_white_noise_discretization_
+                                     ? 1.0 / std::sqrt(imu_rate_)
+                                     : std::sqrt(imu_rate_);
     std::normal_distribution<double> acc_noise(0.0, imu_acc_noise_density_ * white_noise_scale);
     std::normal_distribution<double> gyro_noise(0.0, imu_gyro_noise_density_ * white_noise_scale);
 

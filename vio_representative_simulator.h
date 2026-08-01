@@ -23,6 +23,9 @@ public:
                      double gyro_noise_density,
                      double acc_bias_random_walk,
                      double gyro_bias_random_walk);
+    void setLegacyWhiteNoiseDiscretization(bool enabled) {
+        use_legacy_white_noise_discretization_ = enabled;
+    }
     void setDuration(double duration_seconds) { duration_ = duration_seconds; }
     void setFeatureCount(size_t count);
 
@@ -51,6 +54,7 @@ private:
     double imu_gyro_noise_density_{0.002};
     double imu_acc_bias_random_walk_{0.0005};
     double imu_gyro_bias_random_walk_{0.0001};
+    bool use_legacy_white_noise_discretization_{false};
     double fov_{2.0 * M_PI / 3.0};
     double camera_cx_{320.0};
     double camera_cy_{320.0};

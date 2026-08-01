@@ -76,6 +76,12 @@ namespace slam {
             ExcessiveUncertainty
         };
 
+        enum class LandmarkInitializationMode : uint8_t {
+            Triangulation = 0,
+            TriangulationWithOraclePosition,
+            GroundTruth
+        };
+
         struct TriangulationLog {
             Tus timestamp{};
             LandmarkID id{};
@@ -171,6 +177,11 @@ namespace slam {
         TYPE uv_var = TYPE(1e-2);
         // 过程噪声整体缩放因子(1.0 = 使用 INSState 中配置的原值)，用于敏感度扫描
         TYPE proc_noise_scale_ = TYPE(1);
+        // Strict-ablation switches. Production defaults keep real triangulation and
+        // landmark refinement enabled; GT initialization is analysis-only.
+        LandmarkInitializationMode landmark_initialization_mode_ =
+            LandmarkInitializationMode::Triangulation;
+        bool refine_landmarks_ = true;
         constexpr static TYPE lmk_var = TYPE(0.01);
 
         // 三角化使用归一化像平面噪声；仿真中约为 1 pixel / fx = 0.0054。

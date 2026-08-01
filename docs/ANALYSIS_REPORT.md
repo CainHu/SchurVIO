@@ -177,6 +177,7 @@ clone 协方差的鲁棒重投影优化、质量门限和初始 landmark 协方�
 
 - [SIMULATION_SCENARIOS.md](SIMULATION_SCENARIOS.md)：四类仿真和统一噪声模型
 - [TRIANGULATION.md](TRIANGULATION.md)：多视图三角化与初始协方差
+- [ABLATION_STUDY.md](ABLATION_STUDY.md)：24 组严格单因素/组合消融、SE(3) 对齐 ATE 与 1 秒 RPE
 - [OPT_SCHUR_PATH.md](OPT_SCHUR_PATH.md)：Schur 性能优化
 - [OPT_LDLT.md](OPT_LDLT.md)：Hpp/Hll LDLT 开关与验证
 - [HPP_NULLSPACE.md](HPP_NULLSPACE.md)：Hpp 结构性零空间

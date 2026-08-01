@@ -35,6 +35,8 @@ canvas{display:block;width:100%;background:#12141a;border-radius:6px}
 .kpi .n{color:var(--dim);font-size:11px;margin-top:3px}
 .good{color:var(--ok)} .bad{color:var(--bad)} .warn{color:var(--err)}
 table{border-collapse:collapse;width:100%;font-size:13px;font-variant-numeric:tabular-nums}
+#ablationTable{overflow-x:auto}
+#ablationTable table{min-width:1480px}
 th,td{padding:7px 10px;text-align:right;border-bottom:1px solid var(--line)}
 th{color:var(--dim);font-weight:500;text-align:right}
 th:first-child,td:first-child{text-align:left}
@@ -204,8 +206,28 @@ code{background:#0b0d12;padding:1px 5px;border-radius:3px;font-size:12px}
   <div id="sweepNotes"></div>
 </section>
 
+<section id="strict-ablation">
+  <h2>9. 严格消融实验</h2>
+  <h3>固定场景、随机种子、时长、特征数、uv_var 与过程噪声；每个单因素配置只切换一项</h3>
+  <div class="grid g2">
+    <div class="panel"><h3>Circle-out</h3><canvas id="ablCircleOut" height="320" role="img" aria-label="Circle-out 严格消融的对齐 ATE 和一秒相对位置 RPE"></canvas></div>
+    <div class="panel"><h3>Circle-in</h3><canvas id="ablCircleIn" height="320" role="img" aria-label="Circle-in 严格消融的对齐 ATE 和一秒相对位置 RPE"></canvas></div>
+    <div class="panel"><h3>Helix-3D</h3><canvas id="ablHelix" height="320" role="img" aria-label="Helix-3D 严格消融的对齐 ATE 和一秒相对位置 RPE"></canvas></div>
+    <div class="panel"><h3>Stop-go</h3><canvas id="ablStopGo" height="320" role="img" aria-label="Stop-go 严格消融的对齐 ATE 和一秒相对位置 RPE"></canvas></div>
+  </div>
+  <div class="legend">
+    <span><i style="background:var(--gt)"></i>刚体对齐位置 ATE</span>
+    <span><i style="background:var(--est)"></i>1 秒相对位置 RPE</span>
+  </div>
+  <div class="panel" style="margin-top:16px">
+    <h3>全部受控实验结果</h3>
+    <div id="ablationTable"></div>
+  </div>
+  <div id="ablationNotes"></div>
+</section>
+
 <section>
-  <h2>9. 观测数量、鲁棒门控与滑窗状态</h2>
+  <h2>10. 观测数量、鲁棒门控与滑窗状态</h2>
   <div class="grid g4" id="obsStats"></div>
   <div class="grid g2" style="margin-top:16px">
     <div class="panel"><h3>每帧参与更新的 landmark 数</h3><canvas id="cnlmk" height="280"></canvas></div>
@@ -231,6 +253,7 @@ const RAW_UPDATE_STOP_GO = `%%DATA_UPDATE_STOP_GO%%`;
 const RAW_LMK_STOP_GO = `%%DATA_LMK_STOP_GO%%`;
 const RAW_TRI  = `%%DATA_TRIANGULATION%%`;
 const RAW_SUM  = `%%DATA_SUMMARY%%`;
+const RAW_ABLATION = `%%DATA_ABLATION%%`;
 
 function parseCSV(txt){
   const lines = txt.trim().split('\n');
@@ -268,6 +291,7 @@ const U   = SCENARIOS[0].update;
 const LMK = SCENARIOS[0].landmarks;
 const TRI = parseCSV(RAW_TRI).rows;
 const SUM = parseCSV(RAW_SUM).rows;
+const ABL = parseCSV(RAW_ABLATION).rows;
 
 const fmt=(v,n=4)=>{
   if(!isFinite(v)) return '—';
@@ -283,16 +307,26 @@ const quantile=(a,q)=>{
   const p=(v.length-1)*q, i=Math.floor(p), f=p-i;
   return v[i]+(v[Math.min(i+1,v.length-1)]-v[i])*f;
 };
+const rotateWorldToLocal=(row,prefix,v)=>{
+  const w=row['qw_'+prefix],x=row['qx_'+prefix],y=row['qy_'+prefix],z=row['qz_'+prefix];
+  return [
+    (1-2*(y*y+z*z))*v[0]+2*(x*y+z*w)*v[1]+2*(x*z-y*w)*v[2],
+    2*(x*y-z*w)*v[0]+(1-2*(x*x+z*z))*v[1]+2*(y*z+x*w)*v[2],
+    2*(x*z+y*w)*v[0]+2*(y*z-x*w)*v[1]+(1-2*(x*x+y*y))*v[2],
+  ];
+};
 const positionRpe=(rows,horizon=1)=>{
   const errors=[]; let j=0;
   for(let i=0;i<rows.length;i++){
     j=Math.max(j,i+1);
-    while(j<rows.length && rows[j].t<rows[i].t+horizon)j++;
-    if(j>=rows.length)break;
-    const dx=(rows[j].px_est-rows[i].px_est)-(rows[j].px_gt-rows[i].px_gt);
-    const dy=(rows[j].py_est-rows[i].py_est)-(rows[j].py_gt-rows[i].py_gt);
-    const dz=(rows[j].pz_est-rows[i].pz_est)-(rows[j].pz_gt-rows[i].pz_gt);
-    errors.push(dx*dx+dy*dy+dz*dz);
+    const target=rows[i].t+horizon;
+    while(j+1<rows.length&&Math.abs(rows[j+1].t-target)<Math.abs(rows[j].t-target))j++;
+    if(j>=rows.length||Math.abs(rows[j].t-target)>0.1)continue;
+    const gt=rotateWorldToLocal(rows[i],'gt',[
+      rows[j].px_gt-rows[i].px_gt,rows[j].py_gt-rows[i].py_gt,rows[j].pz_gt-rows[i].pz_gt]);
+    const est=rotateWorldToLocal(rows[i],'est',[
+      rows[j].px_est-rows[i].px_est,rows[j].py_est-rows[i].py_est,rows[j].pz_est-rows[i].pz_est]);
+    errors.push((est[0]-gt[0])**2+(est[1]-gt[1])**2+(est[2]-gt[2])**2);
   }
   return errors.length?Math.sqrt(errors.reduce((a,b)=>a+b,0)/errors.length):NaN;
 };
@@ -1116,7 +1150,133 @@ barSweep('csweep2', sweepPR, 'proc_scale', '过程噪声缩放 scale');
   document.getElementById('sweepNotes').innerHTML=n;
 })();
 
-// ================= 7. 观测数 / 滑窗 =================
+// ================= 7. 严格消融 =================
+const ABLATION_CONFIGS = [
+  {tag:'abl_full',label:'完整'},
+  {tag:'abl_gt_init',label:'真值位置'},
+  {tag:'abl_no_refine',label:'关修正'},
+  {tag:'abl_legacy_white',label:'旧白噪声'},
+  {tag:'abl_no_bias_rw',label:'关偏置RW'},
+  {tag:'abl_old_pipeline',label:'旧流程'},
+];
+
+function drawAblation(id, scenario){
+  const cv=document.getElementById(id); if(!cv)return;
+  const {g,w,h}=setupHiDPI(cv);
+  const rows=ABLATION_CONFIGS.map(c=>ABL.find(r=>String(r.scenario)===scenario&&String(r.tag)===c.tag));
+  if(!rows.some(Boolean)){
+    g.fillStyle=C('--dim');g.font='12px system-ui';g.textAlign='center';
+    g.fillText('尚未运行 tools/run_strict_ablation.ps1',w/2,h/2);return;
+  }
+  const M={l:58,r:14,t:18,b:58},pw=w-M.l-M.r,ph=h-M.t-M.b;
+  const values=[];
+  rows.forEach(r=>{if(r){values.push(r.rmse_p_aligned,r.rpe_1s_p);}});
+  const positive=finiteValues(values).filter(v=>v>0);
+  const lo=Math.max(1e-4,Math.min(...positive)*0.65);
+  const hi=Math.max(lo*2,Math.max(...positive)*1.45);
+  const logLo=Math.log10(lo),logHi=Math.log10(hi);
+  const Y=v=>M.t+ph-(Math.log10(Math.max(v,lo))-logLo)/((logHi-logLo)||1)*ph;
+  g.strokeStyle=C('--grid');g.fillStyle=C('--dim');g.font='10px system-ui';
+  for(let i=0;i<=4;i++){
+    const v=Math.pow(10,logLo+(logHi-logLo)*i/4),y=Y(v);
+    g.beginPath();g.moveTo(M.l,y);g.lineTo(M.l+pw,y);g.stroke();
+    g.textAlign='right';g.textBaseline='middle';g.fillText(fmt(v,3),M.l-6,y);
+  }
+  const groupWidth=pw/ABLATION_CONFIGS.length;
+  rows.forEach((r,i)=>{
+    const center=M.l+(i+0.5)*groupWidth;
+    if(r){
+      const barWidth=Math.max(3,Math.min(18,groupWidth*0.25));
+      const marks=[{v:r.rmse_p_aligned,c:C('--gt'),x:center-barWidth-1},
+                   {v:r.rpe_1s_p,c:C('--est'),x:center+1}];
+      marks.forEach(m=>{
+        const y=Y(m.v);g.fillStyle=m.c;g.fillRect(m.x,y,barWidth,M.t+ph-y);
+      });
+    }
+    g.save();g.translate(center,M.t+ph+8);g.rotate(-Math.PI/5);
+    g.fillStyle=C('--dim');g.font='10px system-ui';g.textAlign='right';g.textBaseline='middle';
+    g.fillText(ABLATION_CONFIGS[i].label,0,0);g.restore();
+  });
+  g.save();g.translate(13,M.t+ph/2);g.rotate(-Math.PI/2);
+  g.fillStyle=C('--dim');g.font='11px system-ui';g.textAlign='center';
+  g.fillText('误差 (m，对数轴)',0,0);g.restore();
+}
+
+drawAblation('ablCircleOut','circle_out');
+drawAblation('ablCircleIn','circle_in');
+drawAblation('ablHelix','helix_3d');
+drawAblation('ablStopGo','stop_go');
+
+(function(){
+  if(!ABL.length){
+    document.getElementById('ablationTable').innerHTML='<div class="sub">尚无消融数据。</div>';
+    return;
+  }
+  const scenarioOrder=['circle_out','circle_in','helix_3d','stop_go'];
+  const tagOrder=ABLATION_CONFIGS.map(c=>c.tag);
+  const sorted=ABL.slice().sort((a,b)=>{
+    const ds=scenarioOrder.indexOf(String(a.scenario))-scenarioOrder.indexOf(String(b.scenario));
+    return ds||tagOrder.indexOf(String(a.tag))-tagOrder.indexOf(String(b.tag));
+  });
+  const baselines={};
+  ABL.filter(r=>String(r.tag)==='abl_full').forEach(r=>baselines[String(r.scenario)]=r);
+  let html='<table><tr><th>场景</th><th>配置</th><th>点初始化</th><th>修正点</th>'+
+           '<th>IMU 白噪声</th><th>偏置 RW</th><th>原始 ATE (m)</th><th>对齐 ATE (m)</th>'+
+           '<th>相对基线</th><th>1 s RPE (m)</th><th>相对基线</th><th>后验改善</th>'+
+           '<th>降权</th><th>拒绝</th><th>耗时 (s)</th><th>负协方差帧</th></tr>';
+  sorted.forEach(r=>{
+    const base=baselines[String(r.scenario)];
+    const dA=base?100*(r.rmse_p_aligned/base.rmse_p_aligned-1):NaN;
+    const dR=base?100*(r.rpe_1s_p/base.rpe_1s_p-1):NaN;
+    html+=`<tr class="${String(r.tag)==='abl_full'?'best':''}"><td>${r.scenario}</td>`+
+      `<td>${ABLATION_CONFIGS.find(c=>c.tag===String(r.tag))?.label||r.tag}</td>`+
+      `<td>${r.landmark_init}</td><td>${r.refine_landmarks?'开':'关'}</td>`+
+      `<td>${r.imu_noise_model}</td><td>${r.bias_random_walk?'开':'关'}</td>`+
+      `<td>${fmt(r.rmse_p,4)}</td><td>${fmt(r.rmse_p_aligned,4)}</td>`+
+      `<td>${String(r.tag)==='abl_full'?'基线':(dA>=0?'+':'')+fmt(dA,1)+'%'}</td>`+
+      `<td>${fmt(r.rpe_1s_p,4)}</td>`+
+      `<td>${String(r.tag)==='abl_full'?'基线':(dR>=0?'+':'')+fmt(dR,1)+'%'}</td>`+
+      `<td>${fmt(100*r.posterior_improve_rate,1)}%</td>`+
+      `<td>${fmt(100*r.obs_downweight_rate,1)}%</td><td>${fmt(100*r.obs_reject_rate,2)}%</td>`+
+      `<td>${fmt(r.t_cost,2)}</td><td>${r.neg_cov}</td></tr>`;
+  });
+  html+='</table>';document.getElementById('ablationTable').innerHTML=html;
+
+  const ratioSummary=tag=>{
+    const ratios=ABL.filter(r=>String(r.tag)===tag).map(r=>{
+      const b=baselines[String(r.scenario)];
+      return b&&b.rmse_p_aligned>0&&b.rpe_1s_p>0
+        ? [r.rmse_p_aligned/b.rmse_p_aligned,r.rpe_1s_p/b.rpe_1s_p]:null;
+    }).filter(Boolean);
+    return ratios.length?[mean(ratios.map(x=>x[0])),mean(ratios.map(x=>x[1]))]:[NaN,NaN];
+  };
+  const gt=ratioSummary('abl_gt_init'),refine=ratioSummary('abl_no_refine');
+  const legacy=ratioSummary('abl_legacy_white'),bias=ratioSummary('abl_no_bias_rw');
+  const delta=v=>`${v>=1?'+':''}${fmt(100*(v-1),1)}%`;
+  const baseDown=mean(ABL.filter(r=>String(r.tag)==='abl_full').map(r=>100*r.obs_downweight_rate));
+  const noRefineDown=mean(ABL.filter(r=>String(r.tag)==='abl_no_refine').map(r=>100*r.obs_downweight_rate));
+  const helixBase=ABL.find(r=>String(r.scenario)==='helix_3d'&&String(r.tag)==='abl_full');
+  const helixNoRefine=ABL.find(r=>String(r.scenario)==='helix_3d'&&String(r.tag)==='abl_no_refine');
+  const helixRpeDelta=helixBase&&helixNoRefine
+    ? 100*(helixNoRefine.rpe_1s_p/helixBase.rpe_1s_p-1):NaN;
+  document.getElementById('ablationNotes').innerHTML=
+    `<div class="note"><b>单因素平均变化（四场景，等权）</b>：保持门控/协方差，仅替换为真值位置 `+
+    `ATE ${delta(gt[0])} / RPE ${delta(gt[1])}；关闭 landmark 修正 `+
+    `ATE ${delta(refine[0])} / RPE ${delta(refine[1])}；旧白噪声离散化 `+
+    `ATE ${delta(legacy[0])} / RPE ${delta(legacy[1])}；关闭偏置随机游走 `+
+    `ATE ${delta(bias[0])} / RPE ${delta(bias[1])}。</div>`+
+    `<div class="note"><b>Landmark 修正诊断</b>：关闭修正虽使四场景等权平均 ATE/RPE 下降，`+
+    `Huber 降权率却从 ${fmt(baseDown,1)}% 上升到 ${fmt(noRefineDown,1)}%，`+
+    `且 Helix 的 1 秒 RPE ${helixRpeDelta>=0?'+':''}${fmt(helixRpeDelta,1)}%。`+
+    `这不是“应永久关闭修正”的充分证据，而是说明当前独立 landmark 协方差更新、`+
+    `状态—landmark 相关性忽略和重复线性化反馈需要单独修复并再消融。</div>`+
+    `<div class="note bad"><b>解释边界</b>：旧白噪声配置把 200 Hz IMU 的单样本白噪声标准差缩小 200 倍，`+
+    `关闭偏置随机游走也会让输入数据更容易；若误差降低，不能据此认为旧算法更正确。`+
+    `<code>旧流程</code>同时改变三项，只用于检查交互效应，不参与单因素归因。`+
+    `本实验固定一个随机种子，是严格确定性回归，不等同于多随机种子的统计置信区间。</div>`;
+})();
+
+// ================= 8. 观测数 / 滑窗 =================
 (function(){
   const lmk=U.map(r=>r.n_lmk), meas=T.map(r=>r.n_meas), win=U.map(r=>r.win);
   const keyframes=U.filter(r=>r.is_kf).length;
