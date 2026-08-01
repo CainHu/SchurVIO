@@ -3,6 +3,7 @@
 // 用法:
 //   VinsAnalysis [uv_var] [tag] [proc_scale] [scenario] [duration] [features]
 //                [landmark_init] [refine] [imu_noise] [bias_rw] [summary_group]
+//                [oc_fej] [oc_projection]
 //     uv_var  Schur 序贯伪量测的噪声密度
 //     tag     输出文件名后缀，用于噪声扫描时区分多组结果
 //     scenario circle_out / circle_in / helix_3d / stop_go
@@ -157,6 +158,8 @@ int main(int argc, char **argv) {
     const std::string imu_noise_model = (argc > 9) ? argv[9] : "density";
     const bool enable_bias_random_walk = (argc > 10) ? std::atoi(argv[10]) != 0 : true;
     const std::string summary_group = (argc > 11) ? argv[11] : "main";
+    const bool observability_constraint = (argc > 12) ? std::atoi(argv[12]) != 0 : true;
+    const bool observability_projection = (argc > 13) ? std::atoi(argv[13]) != 0 : false;
     const bool legacy_white_noise = imu_noise_model == "legacy";
     using LandmarkInit = slam::SchurVINS::LandmarkInitializationMode;
     const LandmarkInit landmark_initialization_mode = landmark_init == "gt"
@@ -191,6 +194,8 @@ int main(int argc, char **argv) {
     ekf.enable_logging_ = true;
     ekf.landmark_initialization_mode_ = landmark_initialization_mode;
     ekf.refine_landmarks_ = refine_landmarks;
+    ekf.enforce_observability_constraint_ = observability_constraint;
+    ekf.project_observability_constraint_ = observability_projection;
     ekf.triangulation_uv_std = simulation.camera_noise_std / simulation.focal_length;
     ekf.setQPV(ground_truth[0].q, ground_truth[0].p, ground_truth[0].v);
 
@@ -329,7 +334,8 @@ int main(int argc, char **argv) {
                         "errp_prior,errp_post,errv_prior,errv_post,"
                         "erra_prior,erra_post,"
                         "dxp,dxq,dxv,sigma_p,sigma_q,sigma_v,"
-                        "nis_mean,nis_dof,obs_used,obs_downweighted,obs_rejected,improve_p\n");
+                        "nis_mean,nis_dof,obs_used,obs_downweighted,obs_rejected,"
+                        "oc_leak_before,oc_leak_after,improve_p\n");
 
         size_t g = 0;
         size_t n_improve = 0, n_total = 0;
@@ -349,7 +355,8 @@ int main(int argc, char **argv) {
 
             std::fprintf(f, "%.6f,%d,%zu,%zu,"
                             "%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,"
-                            "%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%zu,%zu,%zu,%zu,%d\n",
+                            "%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%zu,%zu,%zu,%zu,"
+                            "%.6e,%.6e,%d\n",
                 static_cast<double>(L.timestamp - t0) * 1e-6,
                 L.is_keyframe ? 1 : 0, L.n_lmk, L.win_size,
                 ep0, ep1, ev0, ev1, ea0, ea1,
@@ -357,6 +364,7 @@ int main(int argc, char **argv) {
                 std::sqrt(L.cov_p_trace), std::sqrt(L.cov_q_trace), std::sqrt(L.cov_v_trace),
                 L.nis_mean, L.nis_dof,
                 L.n_obs_used, L.n_obs_downweighted, L.n_obs_rejected,
+                L.oc_leak_before, L.oc_leak_after,
                 improved);
         }
         std::fclose(f);
@@ -569,11 +577,33 @@ int main(int argc, char **argv) {
               / static_cast<double>(observations_considered)
             : std::numeric_limits<double>::quiet_NaN();
 
+        double oc_leak_before_sum = 0.0;
+        double oc_leak_after_sum = 0.0;
+        size_t oc_leak_count = 0;
+        for (const auto &log : ekf.logs_) {
+            if (std::isfinite(log.oc_leak_before) && std::isfinite(log.oc_leak_after)) {
+                oc_leak_before_sum += log.oc_leak_before;
+                oc_leak_after_sum += log.oc_leak_after;
+                ++oc_leak_count;
+            }
+        }
+        const double mean_oc_leak_before = oc_leak_count
+            ? oc_leak_before_sum / static_cast<double>(oc_leak_count)
+            : std::numeric_limits<double>::quiet_NaN();
+        const double mean_oc_leak_after = oc_leak_count
+            ? oc_leak_after_sum / static_cast<double>(oc_leak_count)
+            : std::numeric_limits<double>::quiet_NaN();
+
         const bool is_ablation = summary_group == "ablation";
+        const bool is_observability = summary_group == "observability";
         const auto path = joinPath(out_dir,
-                                   is_ablation ? "ablation_summary.csv" : "summary.csv");
+                                   is_ablation ? "ablation_summary.csv"
+                                   : (is_observability ? "observability_summary.csv"
+                                                       : "summary.csv"));
         const bool reset_summary = scenario == "circle_out"
-            && ((!is_ablation && tag == "base") || (is_ablation && tag == "abl_full"));
+            && ((!is_ablation && !is_observability && tag == "base")
+                || (is_ablation && tag == "abl_full")
+                || (is_observability && tag == "oc_on"));
         const bool exists = !reset_summary && [&] {
             FILE *t = std::fopen(path.c_str(), "r");
             if (t) { std::fclose(t); return true; }
@@ -590,6 +620,15 @@ int main(int argc, char **argv) {
                         "rmse_v,rmse_att,rmse_bg,rmse_ba,max_err_p,mean_nees,mean_nis,gravity_error,"
                         "neg_cov,t_cost,updates,posterior_improve_rate,obs_downweight_rate,obs_reject_rate,"
                         "tri_success,tri_attempts\n");
+                } else if (is_observability) {
+                    std::fprintf(f,
+                        "scenario,tag,oc_enabled,oc_projection_enabled,uv_var,proc_scale,duration,features,"
+                        "rmse_p,rmse_p_aligned,rpe_1s_p,rpe_1s_att,rmse_v,rmse_att,"
+                        "rmse_bg,rmse_ba,max_err_p,mean_nees,mean_nis,gravity_error,neg_cov,"
+                        "t_cost,updates,posterior_improve_rate,obs_downweight_rate,obs_reject_rate,"
+                        "mean_oc_leak_before,mean_oc_leak_after,max_oc_leak_before,max_oc_leak_after,"
+                        "oc_projections,skipped_directions_total,mean_skipped_directions,"
+                        "negative_directions_total,mean_negative_directions,tri_success,tri_attempts\n");
                 } else {
                     std::fprintf(f,
                         "scenario,tag,uv_var,proc_scale,estimate_gravity,duration,features,"
@@ -611,6 +650,33 @@ int main(int argc, char **argv) {
                     static_cast<double>(ekf.t_cost_) / static_cast<double>(CLOCKS_PER_SEC),
                     ekf.posterior_times_, posterior_improve_rate,
                     obs_downweight_rate, obs_reject_rate, triangulation_success,
+                    ekf.triangulation_logs_.size());
+            } else if (is_observability) {
+                std::fprintf(f,
+                    "%s,%s,%d,%d,%.9g,%.4f,%.1f,%zu,"
+                    "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
+                    "%.6e,%.6e,%.6e,%zu,%.3f,%zu,%.6f,%.6f,%.6f,"
+                    "%.6e,%.6e,%.6e,%.6e,%zu,%zu,%.6f,%zu,%.6f,%zu,%zu\n",
+                    scenario.c_str(), tag.c_str(), observability_constraint ? 1 : 0,
+                    observability_projection ? 1 : 0,
+                    uv_var, proc_scale, duration, feature_count,
+                    rmse_p, rmse_p_aligned, rpe_1s_p, rpe_1s_att,
+                    rmse_v, rmse_a, rmse_bg, rmse_ba, mp,
+                    mean_nees, mean_nis, gravity_error, n_neg_cov,
+                    static_cast<double>(ekf.t_cost_) / static_cast<double>(CLOCKS_PER_SEC),
+                    ekf.posterior_times_, posterior_improve_rate,
+                    obs_downweight_rate, obs_reject_rate,
+                    mean_oc_leak_before, mean_oc_leak_after,
+                    ekf.oc_max_leak_before_, ekf.oc_max_leak_after_,
+                    ekf.n_oc_projections_, ekf.n_skipped_,
+                    ekf.posterior_times_ > 0
+                        ? static_cast<double>(ekf.n_skipped_) / ekf.posterior_times_
+                        : 0.0,
+                    ekf.n_negative_,
+                    ekf.posterior_times_ > 0
+                        ? static_cast<double>(ekf.n_negative_) / ekf.posterior_times_
+                        : 0.0,
+                    triangulation_success,
                     ekf.triangulation_logs_.size());
             } else {
                 std::fprintf(f,

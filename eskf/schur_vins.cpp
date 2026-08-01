@@ -603,6 +603,9 @@ void SchurVINS::pushFrame(const CameraData &cam_data, bool is_keyframe) {
     frm->timestamp = state_.timestamp;
     frm->q() = state_.orientation;
     frm->p() = state_.position;
+    // First-estimate Jacobian reference. The nominal pose will continue to be
+    // corrected, while this copy remains fixed for the OC nullspace basis.
+    frm->record_to_state_fej();
 
     // 增广状态
     auto idx = map_.getWinLatestIndex();
@@ -1145,7 +1148,6 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
                 continue;
             }
             const auto inv_d = TYPE(1) / d_cj_c.z();
-            const auto inv_d2 = inv_d * inv_d;
             const Vec2 est = d_cj_c.head<2>() * inv_d;
             const Vec2 err = obs->un_pt.head<2>() - est;
             const TYPE residual_norm = err.norm();
@@ -1159,17 +1161,38 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             const TYPE robust_weight = residual_norm > huber_delta
                 ? huber_delta / residual_norm : TYPE(1);
 
+            // Residuals are evaluated at the current estimate. With the
+            // observability constraint enabled, Jacobians use the first
+            // estimate of each clone (FEJ). The persistent landmark is
+            // relinearized at its current estimate so long tracks do not keep a
+            // stale depth; using one common landmark point for all observations
+            // still preserves the same joint gauge nullspace.
+            const Mat3_3 Rwi_jac = enforce_observability_constraint_
+                ? frm->q_fej().toRotationMatrix()
+                : Rwi;
+            const Vec3 d_ij_w_jac = enforce_observability_constraint_
+                ? lmk->position - frm->p_fej()
+                : d_ij_w;
+            const Vec3 d_cj_i_jac = Rwi_jac.transpose() * d_ij_w_jac - ext_.t_ic;
+            const Vec3 d_cj_c_jac = Ric.transpose() * d_cj_i_jac;
+            if (!d_cj_c_jac.allFinite() || d_cj_c_jac.z() <= TYPE(0.05)) {
+                ++observations_rejected;
+                continue;
+            }
+            const TYPE inv_d_jac = TYPE(1) / d_cj_c_jac.z();
+            const TYPE inv_d2_jac = inv_d_jac * inv_d_jac;
+
             Mat2_3 J;
-            J << inv_d, TYPE(0), -d_cj_c.x() * inv_d2,
-                    TYPE(0), inv_d, -d_cj_c.y() * inv_d2;
+            J << inv_d_jac, TYPE(0), -d_cj_c_jac.x() * inv_d2_jac,
+                    TYPE(0), inv_d_jac, -d_cj_c_jac.y() * inv_d2_jac;
 
             // Rwc^T = (Rwi * Ric)^T = Ric^T * Rwi^T，复用已算好的 Rwi/Ric,
             // 避免再做一次四元数乘法 + 求逆 + toRotationMatrix
             Mat2_3 J_lmk;
-            J_lmk.noalias() = J * (Ric.transpose() * Rwi.transpose());
+            J_lmk.noalias() = J * (Ric.transpose() * Rwi_jac.transpose());
 
             Mat2_6 J_pose;
-            J_pose.leftCols<3>().noalias() = J_lmk * hat(d_ij_w);
+            J_pose.leftCols<3>().noalias() = J_lmk * hat(d_ij_w_jac);
             J_pose.rightCols<3>().noalias() = -J_lmk;
 
             // 外参雅可比: 保留代码但默认不运行(外参目前不在状态里，算了也没人读)。
@@ -1178,7 +1201,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             if constexpr (ExtState::ESTIMATE_EXTRINSIC) {
                 Mat2_6 J_ext;
                 J_ext.rightCols<3>().noalias() = -J * Ric.transpose();
-                J_ext.leftCols<3>().noalias() = -J_ext.rightCols<3>() * hat(d_cj_i);
+                J_ext.leftCols<3>().noalias() =
+                    -J_ext.rightCols<3>() * hat(d_cj_i_jac);
             }
 
             const size_t frm_index = INSState::SIZE + AugState::SIZE * frm->ordering;
@@ -1201,6 +1225,34 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     for (size_t i = 0; i < ids.size(); ++i) {
         auto &&h = Hll_diag.middleRows<LMK_SIZE>(i * LMK_SIZE);
         h.triangularView<Eigen::StrictlyLower>() = h.triangularView<Eigen::StrictlyUpper>().transpose();
+    }
+
+    // Build the FEJ nullspace basis for diagnostics and the optional projection
+    // below. Before Schur elimination a gauge vector contains both pose and
+    // landmark components; projecting only the pose block would break the joint
+    // normal equation. Any pose-only projection must therefore be delayed until
+    // the landmark components have been eliminated.
+    constexpr int OC_DIM = 4;
+    Eigen::Matrix<TYPE, Eigen::Dynamic, OC_DIM> oc_basis(COV_SIZE, OC_DIM);
+    oc_basis.setZero();
+    TYPE oc_leak_before = TYPE(0);
+    TYPE oc_leak_after = TYPE(0);
+    if (map_.sfw.size() > 0) {
+        Vec3 gravity_axis = state_.gravity;
+        if (!gravity_axis.allFinite() || gravity_axis.norm() < TYPE(1e-8)) {
+            gravity_axis = Vec3::UnitZ();
+        } else {
+            gravity_axis.normalize();
+        }
+        const Vec3 anchor_position = map_.sfw[0]->p_fej();
+        for (size_t frame_number = 0; frame_number < map_.sfw.size(); ++frame_number) {
+            const auto frame = map_.sfw[frame_number];
+            const size_t offset = INSState::SIZE + AugState::SIZE * frame->ordering;
+            oc_basis.block<3, 3>(offset + AugState::P, 0).setIdentity();
+            oc_basis.block<3, 1>(offset + AugState::Q, 3) = gravity_axis;
+            oc_basis.block<3, 1>(offset + AugState::P, 3) =
+                -hat(frame->p_fej() - anchor_position) * gravity_axis;
+        }
     }
 
     auto t_sc1 = clock();
@@ -1233,6 +1285,45 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         gp.noalias() -= tmp * gl.segment<LMK_SIZE>(index);
     }
     Hpp.triangularView<Eigen::StrictlyLower>() = Hpp.triangularView<Eigen::StrictlyUpper>().transpose();
+
+    // Diagnose FEJ-nullspace leakage on the Schur-reduced pose system. The
+    // optional minimum projection Π = I - N(N^T N)^-1N^T enforces Hpp*N_fej=0,
+    // but remains disabled by default because projecting gp was experimentally
+    // harmful near the numerically truncated Schur nullspace (see docs).
+    if (map_.sfw.size() > 0) {
+        const TYPE hpp_norm = std::max(Hpp.norm(), TYPE(1e-15));
+        const TYPE basis_norm = std::max(oc_basis.norm(), TYPE(1e-15));
+        oc_leak_before = (Hpp * oc_basis).norm() / (hpp_norm * basis_norm);
+
+        if (enforce_observability_constraint_ && project_observability_constraint_) {
+            const Eigen::Matrix<TYPE, OC_DIM, OC_DIM> gram =
+                oc_basis.transpose() * oc_basis;
+            Eigen::LDLT<Eigen::Matrix<TYPE, OC_DIM, OC_DIM>> gram_ldlt(gram);
+            if (gram_ldlt.info() == Eigen::Success &&
+                gram_ldlt.vectorD().minCoeff() > TYPE(1e-12)) {
+                // N^+ = (N^T N)^-1 N^T. Apply Π*Hpp*Π and Π*gp in low-rank
+                // form; no COV_SIZE x COV_SIZE projector is materialized.
+                const Eigen::Matrix<TYPE, OC_DIM, Eigen::Dynamic> basis_pinv =
+                    gram_ldlt.solve(oc_basis.transpose());
+                const Eigen::Matrix<TYPE, OC_DIM, Eigen::Dynamic> reduced_hpp =
+                    basis_pinv * Hpp;
+                MatXX hpp_left = Hpp - oc_basis * reduced_hpp;
+                const Eigen::Matrix<TYPE, Eigen::Dynamic, OC_DIM> hpp_left_basis =
+                    hpp_left * oc_basis;
+                Hpp.noalias() = hpp_left - hpp_left_basis * basis_pinv;
+                Hpp = TYPE(0.5) * (Hpp + Hpp.transpose());
+
+                const Eigen::Matrix<TYPE, OC_DIM, 1> reduced_gp = basis_pinv * gp;
+                gp.noalias() -= oc_basis * reduced_gp;
+                ++n_oc_projections_;
+            }
+        }
+
+        const TYPE projected_hpp_norm = std::max(Hpp.norm(), TYPE(1e-15));
+        oc_leak_after = (Hpp * oc_basis).norm() / (projected_hpp_norm * basis_norm);
+        oc_max_leak_before_ = std::max(oc_max_leak_before_, oc_leak_before);
+        oc_max_leak_after_ = std::max(oc_max_leak_after_, oc_leak_after);
+    }
 
     auto t_sc2 = clock();
     t_schur_ += t_sc2 - t_sc1;
@@ -1371,6 +1462,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         log.n_obs_used = observations_used;
         log.n_obs_downweighted = observations_downweighted;
         log.n_obs_rejected = observations_rejected;
+        log.oc_leak_before = oc_leak_before;
+        log.oc_leak_after = oc_leak_after;
         logs_.emplace_back(log);
     }
 

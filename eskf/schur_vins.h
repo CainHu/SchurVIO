@@ -182,6 +182,16 @@ namespace slam {
         LandmarkInitializationMode landmark_initialization_mode_ =
             LandmarkInitializationMode::Triangulation;
         bool refine_landmarks_ = true;
+        // FEJ-based observability constraint for the Schur visual update.
+        // It preserves the four VIO gauge directions: global translation (3)
+        // and global yaw about gravity (1). Enabled by default; analysis can
+        // disable it for a controlled A/B comparison.
+        bool enforce_observability_constraint_ = true;
+        // Optional hard projection of the Schur-reduced normal equation. FEJ
+        // is the primary constraint; keep this experimental projection off
+        // unless explicitly evaluating it, because projecting the gradient can
+        // amplify residual inconsistency near the numerical nullspace.
+        bool project_observability_constraint_ = false;
         constexpr static TYPE lmk_var = TYPE(0.01);
 
         // 三角化使用归一化像平面噪声；仿真中约为 1 pixel / fx = 0.0054。
@@ -217,6 +227,8 @@ namespace slam {
             size_t n_obs_rejected;
             size_t win_size;   // 滑窗帧数
             bool is_keyframe;
+            TYPE oc_leak_before;
+            TYPE oc_leak_after;
         };
         std::vector<UpdateLog> logs_;
         std::vector<TriangulationLog> triangulation_logs_;
@@ -244,6 +256,9 @@ namespace slam {
         size_t t_eig_decomp_ = 0;  // 仅 Hpp 的分解(特征分解或 LDLT)
         size_t n_skipped_ = 0;     // 被判定为零空间而跳过的方向数
         size_t n_negative_ = 0;    // 对角元严格为负的方向数(Hpp 不定)
+        size_t n_oc_projections_ = 0;
+        TYPE oc_max_leak_before_ = TYPE(0);
+        TYPE oc_max_leak_after_ = TYPE(0);
     };
 }
 

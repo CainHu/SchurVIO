@@ -65,6 +65,9 @@ namespace slam {
         [[nodiscard]] auto ba() const { return Eigen::Map<const Vec3>(state.data() + BAX); }
         [[nodiscard]] auto g() const { return Eigen::Map<const Vec3>(state.data() + GX); }
 
+        [[nodiscard]] auto q_fej() const { return Eigen::Map<const Quat>(state_fej.data() + QX); }
+        [[nodiscard]] auto p_fej() const { return Eigen::Map<const Vec3>(state_fej.data() + PX); }
+
         void reset() {
             is_initialized = false;
             is_key_frame = false;

@@ -3,7 +3,9 @@ param(
     [int]$Features = 600,
     [string]$BuildDirectory = "cmake-build-release",
     [switch]$Resume,
-    [string[]]$ForceTags = @()
+    [string[]]$ForceTags = @(),
+    [bool]$ObservabilityConstraint = $true,
+    [bool]$ObservabilityProjection = $false
 )
 
 $ErrorActionPreference = "Stop"
@@ -87,8 +89,11 @@ try {
                 continue
             }
             Write-Host "Ablation $($config.Tag) / $scenario"
+            $ocEnabled = if ($ObservabilityConstraint) { "1" } else { "0" }
+            $ocProjection = if ($ObservabilityProjection) { "1" } else { "0" }
             & $analysis "0.01" $config.Tag "1.0" $scenario "$Duration" "$Features" `
-                $config.Init $config.Refine $config.Noise $config.BiasRw "ablation"
+                $config.Init $config.Refine $config.Noise $config.BiasRw "ablation" `
+                $ocEnabled $ocProjection
             if ($LASTEXITCODE -ne 0) {
                 throw "Ablation $($config.Tag) / $scenario failed with exit code $LASTEXITCODE"
             }

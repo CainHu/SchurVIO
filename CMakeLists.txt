@@ -95,6 +95,10 @@ target_include_directories(VinsAnalysis PUBLIC "E:/eigen-3.4.0/eigen-3.4.0")
 # 报告生成器: 把 out/*.csv 嵌进自包含的 HTML(无外部依赖)
 add_executable(VinsReport tools/make_report.cpp tools/report_template.cpp)
 
+# 可观性基的独立数值检查：验证左乘姿态误差下平移/偏航零空间的符号。
+add_executable(ObservabilityBasisCheck tools/observability_basis_check.cpp)
+target_include_directories(ObservabilityBasisCheck PUBLIC "E:/eigen-3.4.0/eigen-3.4.0")
+
 #target_link_libraries(VinsEKF
 ##        ${OpenCV_LIBS}
 ##        ${CERES_LIBRARIES}
