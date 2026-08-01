@@ -42,6 +42,14 @@ namespace slam {
     }
 
     constexpr static bool CONFIG_DEBUG = false;
+
+    // Hpp 的分解方式(仅 USE_SCHUR 路径):
+    //   false = SelfAdjointEigenSolver (Hpp = V·λ·V^T)
+    //   true  = LDLT                   (Hpp = L·D·L^T)
+    // 两者都能把 Cov[e] = σ²·Hpp 对角化，从而支持序贯更新，
+    // 但用的是不同的基，结果不逐位相同(数值误差内应一致)。
+    // 对比数据见 docs/OPT_LDLT.md。
+    constexpr static bool USE_LDLT_FOR_HPP = true;
     constexpr static Tus IMU_TS = 5000;
     constexpr static Tus CAM_TS = 50000;
 
@@ -123,7 +131,9 @@ namespace slam {
         size_t t_schur_ = 0;       // Schur 补
         size_t t_eig_state_ = 0;   // Hpp 特征分解 + 序贯更新 state
         size_t t_eig_lmk_ = 0;     // Hll 特征分解 + 更新 landmark
-        size_t t_eig_decomp_ = 0;  // 仅 Hpp 的 SelfAdjointEigenSolver
+        size_t t_eig_decomp_ = 0;  // 仅 Hpp 的分解(特征分解或 LDLT)
+        size_t n_skipped_ = 0;     // 被判定为零空间而跳过的方向数
+        size_t n_negative_ = 0;    // 对角元严格为负的方向数(Hpp 不定)
     };
 }
 
