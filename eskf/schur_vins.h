@@ -58,7 +58,7 @@ namespace slam {
 
     // 联合协方差的实现方式：true 显式构造 A；false 按 A 的分块结构传播，
     // CONFIG_DEBUG 和优化 else 均不会显式构造 A。
-    constexpr static bool USE_STABLE_COVARIANCE_PREDICTION = true;
+    constexpr static bool USE_STABLE_COVARIANCE_PREDICTION = false;
     constexpr static Tus IMU_TS = 5000;
     constexpr static Tus CAM_TS = 50000;
 
