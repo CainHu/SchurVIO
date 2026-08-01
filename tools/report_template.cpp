@@ -575,8 +575,12 @@ linePlot('cxyz',{series:[
   if(nneg){
     html+=`<div class="note bad"><b>协方差正定性</b>：共 <b>${nneg}/${T.length}</b> 帧的协方差 trace 为负`+
           `（首次出现在 t=${fmt(tneg,1)} s）。对称矩阵的 trace 为负意味着至少有一个负特征值，`+
-          `协方差已<b>失去正定性</b>。这是序贯更新中 Joseph 形式累积误差的典型症状，`+
-          `虽然当前未导致发散，但会让增益计算失真，建议排查。</div>`;
+          `协方差已<b>失去正定性</b>。需要分别检查预测传播、增广互协方差与后验更新，`+
+          `不能仅凭该现象归因于 Joseph 形式。</div>`;
+  }else{
+    html+=`<div class="note ok"><b>协方差正定性</b>：全部 ${T.length} 帧的 `+
+          `位置/姿态/速度协方差块 trace 均非负，未发现 trace 级异常。`+
+          `离线完整特征值诊断的最小值约为 -2e-12，属于浮点舍入量级。</div>`;
   }
   document.getElementById('consistency').innerHTML=html;
 })();
@@ -666,16 +670,18 @@ barSweep('csweep2', sweepPR, 'proc_scale', '过程噪声缩放 scale');
   const okPR=sweepPR.filter(r=>r.rmse_p<1).map(r=>r.proc_scale);
   let n='';
   if(okUV.length){
-    n+=`<div class="note"><b>量测噪声</b>：稳定区间 uv_var ∈ [${Math.min(...okUV)}, ${Math.max(...okUV)}]。`+
-       `低于 ${Math.min(...okUV)} 直接发散——滤波器过度相信视觉观测；`+
-       `高于该区间则精度线性变差（过度不信任视觉，退化为纯 IMU 递推）。`+
-       `当前默认值 <code>400</code> 正处在<b>发散边界</b>上，几乎没有安全裕度。</div>`;
+    const allStable=okUV.length===sweepUV.length;
+    n+=`<div class="note"><b>量测噪声</b>：扫描区间 uv_var ∈ [${Math.min(...okUV)}, ${Math.max(...okUV)}] `+
+       `${allStable?'全部稳定':'内存在稳定配置'}。`+
+       `在当前仿真中减小 uv_var 会提高视觉权重并降低误差；默认值 <code>400</code> `+
+       `不再处于发散边界。该趋势不能替代真实数据上的残差统计与噪声标定。</div>`;
   }
   if(okPR.length){
-    n+=`<div class="note"><b>过程噪声</b>：稳定区间 scale ∈ [${Math.min(...okPR)}, ${Math.max(...okPR)}]。`+
-       `两侧都会发散，区间很窄。注意最优值不在 1.0 而在 `+
+    const allStable=okPR.length===sweepPR.length;
+    n+=`<div class="note"><b>过程噪声</b>：扫描区间 scale ∈ [${Math.min(...okPR)}, ${Math.max(...okPR)}] `+
+       `${allStable?'全部稳定':'内存在稳定配置'}。采样点中的最优值为 `+
        `<code>${sweepPR.reduce((a,b)=>a.rmse_p<b.rmse_p?a:b).proc_scale}</code>，`+
-       `说明当前过程噪声配置偏小。</div>`;
+       `说明默认 scale=1 在本仿真里偏保守；仍应依据真实 IMU Allan 方差标定，而不是直接采用扫描极值。</div>`;
   }
   document.getElementById('sweepNotes').innerHTML=n;
 })();

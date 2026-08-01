@@ -156,7 +156,34 @@ void SchurVINS::predict(const slam::IMUData &imu_data, const double dt) {
     const Mat3_3 nRdt = Rnb_ * (-dt);
     const Vec3 nRdv = accel_corr_world_ * (-dt);
     const Mat3_3 nRdv_X = hat(nRdv);
-    if constexpr (CONFIG_DEBUG) {
+    if constexpr (USE_STABLE_COVARIANCE_PREDICTION) {
+        using MatINS = Eigen::Matrix<TYPE, I::SIZE, I::SIZE>;
+        MatINS A = MatINS::Identity();
+        A.template block<3, 3>(I::Q, I::BG) = nRdt;
+        A.template block<3, 3>(I::P, I::V) = Mat3_3::Identity() * dt;
+        A.template block<3, 3>(I::V, I::Q) = nRdv_X;
+        A.template block<3, 3>(I::V, I::BA) = nRdt;
+        if constexpr (INSState::ESTIMATE_GRAVITY) {
+            A.template block<3, 3>(I::V, I::G) = Mat3_3::Identity() * dt;
+        }
+
+        // 合同变换保持半正定性：若 P >= 0，则 A*P*A^T >= 0。
+        // 联合状态的完整传播是
+        //   P_ii' = A P_ii A^T + Q
+        //   P_ic' = A P_ic
+        //   P_cc' = P_cc
+        // 旧实现只更新 P_ii，却冻结 P_ic，破坏了联合协方差的相容性。
+        // 使用副本避免 Eigen 表达式在赋值时与 cov_ alias。
+        const MatINS P_prev = cov.selfadjointView<Eigen::Upper>();
+        const MatXX P_cross_prev =
+            cov_.topRightCorner(I::SIZE, COV_SIZE - I::SIZE);
+        cov.noalias() = A * P_prev * A.transpose();
+        cov = TYPE(0.5) * (cov + cov.transpose());
+        cov_.topRightCorner(I::SIZE, COV_SIZE - I::SIZE).noalias() =
+            A * P_cross_prev;
+        cov_.bottomLeftCorner(COV_SIZE - I::SIZE, I::SIZE) =
+            cov_.topRightCorner(I::SIZE, COV_SIZE - I::SIZE).transpose();
+    } else if constexpr (CONFIG_DEBUG) {
         Eigen::Matrix<TYPE, INSState::SIZE, INSState::SIZE> AP;
 
         AP.middleRows<3>(I::Q).noalias() = cov.middleRows<3>(I::Q)
