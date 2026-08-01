@@ -124,8 +124,6 @@ namespace slam {
         size_t t_eig_state_ = 0;   // Hpp 特征分解 + 序贯更新 state
         size_t t_eig_lmk_ = 0;     // Hll 特征分解 + 更新 landmark
         size_t t_eig_decomp_ = 0;  // 仅 Hpp 的 SelfAdjointEigenSolver
-        size_t n_K_total_ = 0;     // 每个 landmark 的观测帧数之和
-        size_t n_K_count_ = 0;
     };
 }
 

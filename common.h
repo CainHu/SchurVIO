@@ -157,6 +157,19 @@ namespace slam {
 
     // 外参
     struct ExtState {
+        // 是否把外参也加入状态一起估计。
+        // 目前为 false: 外参雅可比 J_ext 仍然保留在代码里(被 if constexpr 屏蔽,
+        // 不参与运行但始终参与编译，不会腐烂)，但不进入量测方程。
+        // 改为 true 时还需要:
+        //   1) 把外参的 6 维加进 COV_SIZE 和协方差布局
+        //   2) 在 updateState 里更新 q_ic / t_ic
+        //   3) 把 J_EXT / J_ext 填进对应的 Jacobian 列
+        constexpr static bool ESTIMATE_EXTRINSIC = false;
+
+        constexpr static int Q = 0;
+        constexpr static int P = Q + 3;
+        constexpr static int SIZE = P + 3;
+
         Quat q_ic = Quat::Identity();
         Vec3 t_ic = Vec3::Zero();
     };

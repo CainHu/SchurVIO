@@ -363,7 +363,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 
     constexpr static size_t UV_SIZE = 2;
     MatXX J_POSE = MatXX::Zero(UV_SIZE * WIN_SIZE, AugState::SIZE * WIN_SIZE);
-    MatXX J_EXT = MatXX::Zero(UV_SIZE * WIN_SIZE, AugState::SIZE);
+    // 外参雅可比: 仅在估计外参时才分配(见 ExtState::ESTIMATE_EXTRINSIC)
+    MatXX J_EXT = MatXX::Zero(ExtState::ESTIMATE_EXTRINSIC ? UV_SIZE * WIN_SIZE : 0,
+                              ExtState::ESTIMATE_EXTRINSIC ? ExtState::SIZE : 0);
     MatXX J_LMK = MatXX::Zero(UV_SIZE * WIN_SIZE, LMK_SIZE);
     VecX ERR = VecX::Zero(UV_SIZE * WIN_SIZE);
     std::vector<FrameOrder> pose_order;
@@ -411,16 +413,20 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             J_pose.leftCols<3>().noalias() = J_lmk * hat(d_ij_w);;
             J_pose.rightCols<3>().noalias() = -J_lmk;
 
-            Mat2_6 J_ext;
-            J_ext.rightCols<3>().noalias() = -J * Ric.transpose();
-            J_ext.leftCols<3>().noalias() = -J_ext.rightCols<3>() * hat(d_cj_i);
-
             const size_t row_start = UV_SIZE * pose_order.size();
             const size_t col_start = AugState::SIZE * pose_order.size();
             ERR.segment<2>(row_start) = err;
             J_LMK.middleRows<2>(row_start) = J_lmk;
-            J_EXT.middleRows<2>(row_start) = J_ext;
             J_POSE.block<2, AugState::SIZE>(row_start, col_start) = J_pose;
+
+            // 外参雅可比: 保留代码但默认不运行(外参目前不在状态里，J_EXT 无人读取)。
+            // 用 if constexpr 而非 #ifdef，这样它始终参与语法/类型检查，不会腐烂。
+            if constexpr (ExtState::ESTIMATE_EXTRINSIC) {
+                Mat2_6 J_ext;
+                J_ext.rightCols<3>().noalias() = -J * Ric.transpose();
+                J_ext.leftCols<3>().noalias() = -J_ext.rightCols<3>() * hat(d_cj_i);
+                J_EXT.middleRows<2>(row_start) = J_ext;
+            }
 
             // 记录 J_POSE 中的 J_pose 在 state 中对应的 ordering
             pose_order.emplace_back(frm->ordering);
@@ -723,8 +729,14 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             J_pose.leftCols<3>().noalias() = J_lmk * hat(d_ij_w);
             J_pose.rightCols<3>().noalias() = -J_lmk;
 
-            // 注: 原本这里还算了 J_ext (外参雅可比)，但它写完从未被读取
-            //     (外参目前不在状态里)，是纯浪费，已删除。
+            // 外参雅可比: 保留代码但默认不运行(外参目前不在状态里，算了也没人读)。
+            // 用 if constexpr 而非 #ifdef，这样它始终参与语法/类型检查，不会腐烂。
+            // 开启 ESTIMATE_EXTRINSIC 时还需把 J_ext 累加进 Hpp/Hpl/gp 的外参块。
+            if constexpr (ExtState::ESTIMATE_EXTRINSIC) {
+                Mat2_6 J_ext;
+                J_ext.rightCols<3>().noalias() = -J * Ric.transpose();
+                J_ext.leftCols<3>().noalias() = -J_ext.rightCols<3>() * hat(d_cj_i);
+            }
 
             const size_t frm_index = INSState::SIZE + AugState::SIZE * frm->ordering;
 
