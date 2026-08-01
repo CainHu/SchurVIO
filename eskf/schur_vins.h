@@ -87,6 +87,10 @@ namespace slam {
             Fixed = 0,
             // Historical path: independent landmark EKF without P_xl.
             IndependentEkf,
+            // Independent EKF plus a fixed isotropic covariance diffusion.
+            IndependentEkfInflated,
+            // Independent EKF with innovation-adaptive covariance diffusion.
+            IndependentEkfAdaptive,
             // Re-solve the point from all raw keyframe observations after a
             // keyframe pose update; failed re-triangulation keeps the old point.
             Retriangulate,
@@ -107,10 +111,16 @@ namespace slam {
             TYPE elapsed_us{};
             Vec3 initial_position{Vec3::Zero()};
             Vec3 latest_position{Vec3::Zero()};
+            Mat3_3 initial_covariance{Mat3_3::Identity()};
+            Mat3_3 latest_covariance{Mat3_3::Identity()};
+            Vec3 shadow_position{Vec3::Zero()};
+            Mat3_3 shadow_covariance{Mat3_3::Identity()};
             Vec3 ground_truth{Vec3::Zero()};
             TYPE initial_cov_trace{};
             TYPE initial_nees{};
             size_t refinement_count{};
+            size_t shadow_refinement_count{};
+            bool shadow_initialized{};
             bool has_ground_truth{};
         };
 
@@ -155,7 +165,7 @@ namespace slam {
                                      const TriangulationResult &result,
                                      Tus timestamp,
                                      const std::unordered_map<size_t, Vec3> &ground_truth);
-        void recordLandmarkRefinement(const Landmark &landmark);
+        void recordLandmarkRefinement(const Landmark &landmark, bool shadow = false);
 
 //    private:
     public:
@@ -204,11 +214,27 @@ namespace slam {
         // and global yaw about gravity (1). Enabled by default; analysis can
         // disable it for a controlled A/B comparison.
         bool enforce_observability_constraint_ = true;
-        // Optional hard projection of the Schur-reduced normal equation. FEJ
-        // is the primary constraint; keep this experimental projection off
-        // unless explicitly evaluating it, because projecting the gradient can
-        // amplify residual inconsistency near the numerical nullspace.
+        // Optional prior-whitened hard projection of the Schur-reduced normal
+        // equation.  Hll inverse, projected Hpp and gp share their retained
+        // eigenspaces. FEJ remains the production default; this path is an
+        // explicitly enabled experiment.
         bool project_observability_constraint_ = false;
+        TYPE hll_rank_relative_threshold_ = TYPE(1e-8);
+        TYPE hpp_rank_relative_threshold_ = TYPE(1e-6);
+
+        // Experimental independent-map covariance models. The fixed term has
+        // units m^2/s and is integrated once per visual update. Adaptive mode
+        // scales it with a per-landmark normalized-innovation EMA.
+        TYPE landmark_process_noise_density_ = TYPE(1e-3);
+        TYPE landmark_adaptive_inflation_gain_ = TYPE(1);
+        TYPE landmark_adaptive_inflation_max_scale_ = TYPE(25);
+        TYPE landmark_nis_ema_alpha_ = TYPE(0.05);
+
+        // A practical detached map estimate: it consumes only the newest
+        // keyframe observation and never changes Landmark::position used by
+        // the ESKF. Disabled by default to keep the production cost unchanged.
+        bool enable_shadow_landmark_postprocessor_ = false;
+        bool shadow_landmark_adaptive_inflation_ = true;
         constexpr static TYPE lmk_var = TYPE(0.01);
 
         // 三角化使用归一化像平面噪声；仿真中约为 1 pixel / fx = 0.0054。
@@ -276,6 +302,14 @@ namespace slam {
         size_t n_oc_projections_ = 0;
         TYPE oc_max_leak_before_ = TYPE(0);
         TYPE oc_max_leak_after_ = TYPE(0);
+        size_t n_hll_rank_tests_ = 0;
+        size_t n_hll_discarded_directions_ = 0;
+        TYPE hll_discarded_gradient_ratio_sum_ = TYPE(0);
+        TYPE hll_discarded_gradient_ratio_max_ = TYPE(0);
+        size_t n_hpp_rank_tests_ = 0;
+        size_t n_hpp_discarded_directions_ = 0;
+        TYPE hpp_discarded_gradient_ratio_sum_ = TYPE(0);
+        TYPE hpp_discarded_gradient_ratio_max_ = TYPE(0);
         size_t n_lmk_update_attempts_ = 0;
         size_t n_lmk_update_accepted_ = 0;
         size_t n_lmk_retriangulation_success_ = 0;

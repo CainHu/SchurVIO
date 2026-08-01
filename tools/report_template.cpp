@@ -227,7 +227,21 @@ code{background:#0b0d12;padding:1px 5px;border-radius:3px;font-size:12px}
 </section>
 
 <section>
-  <h2>10. 观测数量、鲁棒门控与滑窗状态</h2>
+  <h2>10. 一致子空间与 Landmark 协方差</h2>
+  <h3>硬投影是否保持 H/g 同域，以及低地图误差是否同时具有可信协方差</h3>
+  <div class="panel">
+    <h3>FEJ / 一致硬投影严格对比</h3>
+    <div id="observabilityConsistencyTable"></div>
+  </div>
+  <div class="panel" style="margin-top:16px">
+    <h3>Landmark 更新、NEES 与 95% 覆盖率</h3>
+    <div id="landmarkConsistencyTable"></div>
+  </div>
+  <div id="subspaceConsistencyNotes"></div>
+</section>
+
+<section>
+  <h2>11. 观测数量、鲁棒门控与滑窗状态</h2>
   <div class="grid g4" id="obsStats"></div>
   <div class="grid g2" style="margin-top:16px">
     <div class="panel"><h3>每帧参与更新的 landmark 数</h3><canvas id="cnlmk" height="280"></canvas></div>
@@ -254,6 +268,8 @@ const RAW_LMK_STOP_GO = `%%DATA_LMK_STOP_GO%%`;
 const RAW_TRI  = `%%DATA_TRIANGULATION%%`;
 const RAW_SUM  = `%%DATA_SUMMARY%%`;
 const RAW_ABLATION = `%%DATA_ABLATION%%`;
+const RAW_OBSERVABILITY = `%%DATA_OBSERVABILITY%%`;
+const RAW_LANDMARK_CONSISTENCY = `%%DATA_LANDMARK_CONSISTENCY%%`;
 
 function parseCSV(txt){
   const lines = txt.trim().split('\n');
@@ -292,6 +308,8 @@ const LMK = SCENARIOS[0].landmarks;
 const TRI = parseCSV(RAW_TRI).rows;
 const SUM = parseCSV(RAW_SUM).rows;
 const ABL = parseCSV(RAW_ABLATION).rows;
+const OBSERVABILITY = parseCSV(RAW_OBSERVABILITY).rows;
+const LANDMARK_CONSISTENCY = parseCSV(RAW_LANDMARK_CONSISTENCY).rows;
 
 const fmt=(v,n=4)=>{
   if(!isFinite(v)) return '—';
@@ -1276,7 +1294,68 @@ drawAblation('ablStopGo','stop_go');
     `本实验固定一个随机种子，是严格确定性回归，不等同于多随机种子的统计置信区间。</div>`;
 })();
 
-// ================= 8. 观测数 / 滑窗 =================
+// ================= 10. 子空间 / Landmark 一致性 =================
+(function(){
+  if(OBSERVABILITY.length){
+    const wanted=OBSERVABILITY.filter(r=>String(r.tag)!=='oc_off');
+    let html='<table><tr><th>场景</th><th>配置</th><th>位置 RMSE (m)</th>'+
+      '<th>平均零空间泄漏</th><th>Hpp 删除方向/次</th><th>删除梯度最大比例</th><th>耗时 (s)</th></tr>';
+    wanted.forEach(r=>{
+      const projected=String(r.tag)==='oc_projected';
+      const discarded=r.hpp_rank_tests>0?r.hpp_discarded_directions/r.hpp_rank_tests:NaN;
+      html+=`<tr class="${projected?'best':''}"><td>${r.scenario}</td>`+
+        `<td>${projected?'白化一致投影':'仅 FEJ'}</td><td>${fmt(r.rmse_p,4)}</td>`+
+        `<td>${fmt(r.mean_oc_leak_after,3)}</td><td>${fmt(discarded,2)}</td>`+
+        `<td>${fmt(r.hpp_discarded_gradient_ratio_max,3)}</td><td>${fmt(r.t_cost,2)}</td></tr>`;
+    });
+    html+='</table>';
+    document.getElementById('observabilityConsistencyTable').innerHTML=html;
+  }else{
+    document.getElementById('observabilityConsistencyTable').innerHTML=
+      '<div class="sub">尚未运行 tools/run_observability_analysis.ps1。</div>';
+  }
+
+  if(LANDMARK_CONSISTENCY.length){
+    let html='<table><tr><th>场景</th><th>策略</th><th>轨迹 RMSE (m)</th>'+
+      '<th>主地图点误差 (m)</th><th>主地图 NEES</th><th>主地图 95%覆盖</th>'+
+      '<th>影子点误差 (m)</th><th>影子 NEES</th><th>影子 95%覆盖</th></tr>';
+    LANDMARK_CONSISTENCY.forEach(r=>{
+      const name=String(r.tag)==='lmk_independent'?'旧 Independent EKF':
+        String(r.tag)==='lmk_fixed_infl'?'固定协方差扩散':
+        String(r.tag)==='lmk_adapt_infl'?'NIS 自适应扩散':
+        String(r.tag)==='lmk_retri_shadow'?'Retriangulate + 影子地图':'Retriangulate';
+      html+=`<tr class="${String(r.tag)==='lmk_retri_shadow'?'best':''}"><td>${r.scenario}</td>`+
+        `<td>${name}</td><td>${fmt(r.rmse_p,4)}</td>`+
+        `<td>${fmt(r.tri_final_gauge_aligned_error_mean,4)}</td>`+
+        `<td>${fmt(r.lmk_nees_mean,2)}</td><td>${fmt(100*r.lmk_coverage95,1)}%</td>`+
+        `<td>${fmt(r.shadow_gauge_aligned_error_mean,4)}</td>`+
+        `<td>${fmt(r.shadow_nees_mean,2)}</td><td>${fmt(100*r.shadow_coverage95,1)}%</td></tr>`;
+    });
+    html+='</table>';
+    document.getElementById('landmarkConsistencyTable').innerHTML=html;
+  }else{
+    document.getElementById('landmarkConsistencyTable').innerHTML=
+      '<div class="sub">尚未运行 tools/run_landmark_consistency_analysis.ps1。</div>';
+  }
+
+  const projected=OBSERVABILITY.filter(r=>String(r.tag)==='oc_projected');
+  const fej=OBSERVABILITY.filter(r=>String(r.tag)==='oc_on');
+  const costRatios=projected.map(r=>{
+    const b=fej.find(x=>String(x.scenario)===String(r.scenario));
+    return b&&b.t_cost>0?r.t_cost/b.t_cost:NaN;
+  });
+  const legacy=LANDMARK_CONSISTENCY.filter(r=>String(r.tag)==='lmk_independent');
+  const worstLegacy=legacy.reduce((a,b)=>!a||b.lmk_nees_mean>a.lmk_nees_mean?b:a,null);
+  document.getElementById('subspaceConsistencyNotes').innerHTML=
+    `<div class="note"><b>判读</b>：三维 landmark 的 NEES 理论均值为 3，95% 覆盖率应接近 95%。`+
+    `${worstLegacy?`旧 Independent EKF 最坏为 ${worstLegacy.scenario}：NEES ${fmt(worstLegacy.lmk_nees_mean,1)}、`+
+      `覆盖率 ${fmt(100*worstLegacy.lmk_coverage95,1)}%。`:''}`+
+    `低点误差若伴随高 NEES/低覆盖率，不能解释为概率估计更好。</div>`+
+    `<div class="note"><b>硬投影边界</b>：一致实现把泄漏压到机器精度且轨迹基本持平，`+
+    `但四场景平均耗时约为仅 FEJ 的 ${fmt(mean(costRatios),1)} 倍，所以默认仍只启用 FEJ。</div>`;
+})();
+
+// ================= 11. 观测数 / 滑窗 =================
 (function(){
   const lmk=U.map(r=>r.n_lmk), meas=T.map(r=>r.n_meas), win=U.map(r=>r.win);
   const keyframes=U.filter(r=>r.is_kf).length;

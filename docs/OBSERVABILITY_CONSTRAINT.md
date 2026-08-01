@@ -175,3 +175,10 @@ bool project_observability_constraint_ = false; // 实验性 Schur 硬投影
 cmake --build cmake-build-release --target ObservabilityBasisCheck
 .\cmake-build-release\ObservabilityBasisCheck.exe
 ```
+
+## 2026-08-02：一致有效子空间实现
+
+旧的原坐标硬投影已由“`Hll` 统一秩判定 + 先验白化投影 + `Hpp/gp` 同域特征截断”替代。
+新实现不再出现旧硬投影的灾难性退化，但完整实验的视觉后验耗时增加约 8～14 倍，因此仍默认
+关闭。推导、秩诊断和四场景数据见
+[一致有效子空间与 Landmark 协方差实验](CONSISTENT_SUBSPACE_AND_LANDMARK_COVARIANCE.md)。

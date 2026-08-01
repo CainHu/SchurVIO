@@ -52,6 +52,9 @@ int main() {
     const std::string tri = readFile("out/triangulation_circle_out_base.csv");
     const std::string sum  = readFile("out/summary.csv");
     const std::string ablation = readFile("out/ablation_summary.csv");
+    const std::string observability = readFile("out/observability_summary.csv");
+    const std::string landmark_consistency =
+        readFile("out/landmark_consistency_summary.csv");
 
     if (trajectories.front().empty()) {
         std::fprintf(stderr,
@@ -78,6 +81,8 @@ int main() {
     sub("%%DATA_TRIANGULATION%%", esc(tri));
     sub("%%DATA_SUMMARY%%", esc(sum));
     sub("%%DATA_ABLATION%%", esc(ablation));
+    sub("%%DATA_OBSERVABILITY%%", esc(observability));
+    sub("%%DATA_LANDMARK_CONSISTENCY%%", esc(landmark_consistency));
 
     std::fwrite(html.data(), 1, html.size(), f);
     std::fclose(f);

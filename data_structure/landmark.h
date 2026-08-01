@@ -40,6 +40,12 @@ namespace slam {
 
             var_ins_depth = TYPE(1);
             cov_position = Mat3_3::Identity() * TYPE(1e-4);
+            independent_nis_ema = TYPE(1);
+
+            shadow_initialized = false;
+            shadow_position.setZero();
+            shadow_cov_position = Mat3_3::Identity() * TYPE(1e-4);
+            shadow_nis_ema = TYPE(1);
 
             last_triangulation_obs_count = 0;
             triangulation_log_index = std::numeric_limits<size_t>::max();
@@ -60,6 +66,19 @@ namespace slam {
 
         TYPE var_ins_depth{TYPE(1)};
         Mat3_3 cov_position{Mat3_3 ::Identity() * 1e-4};
+
+        // The historical independent landmark EKF intentionally omits P_xl.
+        // Keep its consistency state with the landmark so covariance inflation
+        // can react to the innovation history without changing the ESKF state.
+        TYPE independent_nis_ema{TYPE(1)};
+
+        // Detached map post-processor.  This estimate is never used to build
+        // the ESKF visual residual, so an optimistic map covariance cannot feed
+        // back into the navigation posterior.
+        bool shadow_initialized{false};
+        Vec3 shadow_position{Vec3::Zero()};
+        Mat3_3 shadow_cov_position{Mat3_3::Identity() * TYPE(1e-4)};
+        TYPE shadow_nis_ema{TYPE(1)};
 
         // 三角化失败后，仅在关键帧观测数增加时重试，避免非关键帧更新反复做无效计算。
         size_t last_triangulation_obs_count{};

@@ -356,6 +356,8 @@ void SchurVINS::logTriangulationAttempt(
     if (result.status == TriangulationStatus::Success) {
         log.initial_position = result.position;
         log.latest_position = result.position;
+        log.initial_covariance = result.covariance;
+        log.latest_covariance = result.covariance;
         log.initial_cov_trace = result.covariance.trace();
     }
     if (const auto gt = ground_truth.find(landmark.id); gt != ground_truth.end()) {
@@ -375,13 +377,21 @@ void SchurVINS::logTriangulationAttempt(
     }
 }
 
-void SchurVINS::recordLandmarkRefinement(const Landmark &landmark) {
+void SchurVINS::recordLandmarkRefinement(const Landmark &landmark, bool shadow) {
     if (!enable_logging_ || landmark.triangulation_log_index >= triangulation_logs_.size()) {
         return;
     }
     auto &log = triangulation_logs_[landmark.triangulation_log_index];
-    log.latest_position = landmark.position;
-    ++log.refinement_count;
+    if (shadow) {
+        log.shadow_initialized = landmark.shadow_initialized;
+        log.shadow_position = landmark.shadow_position;
+        log.shadow_covariance = landmark.shadow_cov_position;
+        ++log.shadow_refinement_count;
+    } else {
+        log.latest_position = landmark.position;
+        log.latest_covariance = landmark.cov_position;
+        ++log.refinement_count;
+    }
 }
 
 void SchurVINS::processIMU(const slam::IMUData &imu_data) {
@@ -724,6 +734,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
                     if (truth != lmk_map.end()) {
                         lmk->position = truth->second;
                         lmk->cov_position = Mat3_3::Identity() * TYPE(1e-4);
+                        lmk->shadow_position = lmk->position;
+                        lmk->shadow_cov_position = lmk->cov_position;
+                        lmk->shadow_initialized = true;
                         lmk->is_triangulated = true;
                     }
                 } else {
@@ -741,6 +754,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
                                 lmk->position = truth->second;
                             }
                         }
+                        lmk->shadow_position = lmk->position;
+                        lmk->shadow_cov_position = lmk->cov_position;
+                        lmk->shadow_initialized = true;
                         lmk->is_triangulated = true;
                     }
                 }
@@ -1294,7 +1310,42 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 
         // STEP1: 对 Hll 求逆
         const Mat3_3 hll = Hll_diag.middleRows<LMK_SIZE>(index);
-        const Mat3_3 hll_inv = hll.completeOrthogonalDecomposition().pseudoInverse();
+        // Hll inverse, Schur matrix and Schur gradient must share one retained
+        // eigenspace. Mixing COD here with an unrelated threshold downstream
+        // can leave gradient energy in a direction already removed from H.
+        Eigen::SelfAdjointEigenSolver<Mat3_3> hll_es(hll);
+        if (hll_es.info() != Eigen::Success ||
+            !hll_es.eigenvalues().allFinite()) {
+            continue;
+        }
+        const TYPE hll_max = hll_es.eigenvalues().maxCoeff();
+        if (!(hll_max > TYPE(0))) {
+            continue;
+        }
+        const TYPE hll_threshold = hll_rank_relative_threshold_ * hll_max;
+        Vec3 hll_inverse = Vec3::Zero();
+        const Vec3 hll_gradient_coeff =
+            hll_es.eigenvectors().transpose() * gl.segment<LMK_SIZE>(index);
+        TYPE discarded_gradient_sq = TYPE(0);
+        size_t discarded_directions = 0;
+        for (size_t direction = 0; direction < LMK_SIZE; ++direction) {
+            if (hll_es.eigenvalues()(direction) > hll_threshold) {
+                hll_inverse(direction) = TYPE(1) / hll_es.eigenvalues()(direction);
+            } else {
+                discarded_gradient_sq += hll_gradient_coeff(direction) *
+                                         hll_gradient_coeff(direction);
+                ++discarded_directions;
+            }
+        }
+        const TYPE discarded_gradient_ratio = std::sqrt(discarded_gradient_sq) /
+            std::max(hll_gradient_coeff.norm(), TYPE(1e-15));
+        ++n_hll_rank_tests_;
+        n_hll_discarded_directions_ += discarded_directions;
+        hll_discarded_gradient_ratio_sum_ += discarded_gradient_ratio;
+        hll_discarded_gradient_ratio_max_ =
+            std::max(hll_discarded_gradient_ratio_max_, discarded_gradient_ratio);
+        const Mat3_3 hll_inv = hll_es.eigenvectors() * hll_inverse.asDiagonal()
+                             * hll_es.eigenvectors().transpose();
 
         // STEP2: 计算 Hpl * Hll^-1
         tmp.noalias() = Hpl.middleCols<LMK_SIZE>(index) * hll_inv;
@@ -1307,6 +1358,13 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     }
     Hpp.triangularView<Eigen::StrictlyLower>() = Hpp.triangularView<Eigen::StrictlyUpper>().transpose();
 
+    // If hard projection succeeds, these are the only information directions
+    // consumed by the state update. No second rank decision is allowed later.
+    MatXX projected_state_basis;
+    VecX projected_state_diagonal;
+    VecX projected_state_rhs;
+    bool has_consistent_projection = false;
+
     // Diagnose FEJ-nullspace leakage on the Schur-reduced pose system. The
     // optional minimum projection Π = I - N(N^T N)^-1N^T enforces Hpp*N_fej=0,
     // but remains disabled by default because projecting gp was experimentally
@@ -1317,31 +1375,107 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         oc_leak_before = (Hpp * oc_basis).norm() / (hpp_norm * basis_norm);
 
         if (enforce_observability_constraint_ && project_observability_constraint_) {
-            const Eigen::Matrix<TYPE, OC_DIM, OC_DIM> gram =
-                oc_basis.transpose() * oc_basis;
-            Eigen::LDLT<Eigen::Matrix<TYPE, OC_DIM, OC_DIM>> gram_ldlt(gram);
-            if (gram_ldlt.info() == Eigen::Success &&
-                gram_ldlt.vectorD().minCoeff() > TYPE(1e-12)) {
-                // N^+ = (N^T N)^-1 N^T. Apply Π*Hpp*Π and Π*gp in low-rank
-                // form; no COV_SIZE x COV_SIZE projector is materialized.
-                const Eigen::Matrix<TYPE, OC_DIM, Eigen::Dynamic> basis_pinv =
-                    gram_ldlt.solve(oc_basis.transpose());
-                const Eigen::Matrix<TYPE, OC_DIM, Eigen::Dynamic> reduced_hpp =
-                    basis_pinv * Hpp;
-                MatXX hpp_left = Hpp - oc_basis * reduced_hpp;
-                const Eigen::Matrix<TYPE, Eigen::Dynamic, OC_DIM> hpp_left_basis =
-                    hpp_left * oc_basis;
-                Hpp.noalias() = hpp_left - hpp_left_basis * basis_pinv;
-                Hpp = TYPE(0.5) * (Hpp + Hpp.transpose());
+            // Prior whitening makes the projection dimensionless before mixing
+            // attitude (rad) and position (m) components.
+            MatXX prior_covariance = TYPE(0.5) * (cov_ + cov_.transpose());
+            Eigen::LLT<MatXX> prior_llt(prior_covariance);
+            if (prior_llt.info() != Eigen::Success) {
+                const TYPE jitter = TYPE(1e-12) * std::max(
+                    prior_covariance.diagonal().cwiseAbs().maxCoeff(), TYPE(1));
+                prior_covariance.diagonal().array() += jitter;
+                prior_llt.compute(prior_covariance);
+            }
+            if (prior_llt.info() == Eigen::Success) {
+                const MatXX prior_sqrt = prior_llt.matrixL();
+                const MatXX nullspace_whitened =
+                    prior_sqrt.triangularView<Eigen::Lower>().solve(oc_basis);
+                Eigen::ColPivHouseholderQR<MatXX> nullspace_qr(nullspace_whitened);
+                nullspace_qr.setThreshold(TYPE(1e-10));
+                if (nullspace_qr.rank() == OC_DIM) {
+                    const MatXX q_null = nullspace_qr.householderQ() *
+                        MatXX::Identity(COV_SIZE, OC_DIM);
+                    MatXX hpp_whitened =
+                        prior_sqrt.transpose() * Hpp * prior_sqrt;
+                    VecX gp_whitened = prior_sqrt.transpose() * gp;
 
-                const Eigen::Matrix<TYPE, OC_DIM, 1> reduced_gp = basis_pinv * gp;
-                gp.noalias() -= oc_basis * reduced_gp;
-                ++n_oc_projections_;
+                    // Pi*H*Pi and Pi*g, Pi=I-Qn*Qn^T. No dense projector.
+                    hpp_whitened.noalias() -=
+                        q_null * (q_null.transpose() * hpp_whitened);
+                    hpp_whitened.noalias() -=
+                        (hpp_whitened * q_null) * q_null.transpose();
+                    hpp_whitened = TYPE(0.5) *
+                        (hpp_whitened + hpp_whitened.transpose());
+                    gp_whitened.noalias() -=
+                        q_null * (q_null.transpose() * gp_whitened);
+
+                    Eigen::SelfAdjointEigenSolver<MatXX> hpp_es(hpp_whitened);
+                    if (hpp_es.info() == Eigen::Success &&
+                        hpp_es.eigenvalues().allFinite()) {
+                        const TYPE hpp_max = hpp_es.eigenvalues().maxCoeff();
+                        const TYPE hpp_threshold =
+                            hpp_rank_relative_threshold_ * hpp_max;
+                        const VecX gradient_coeff =
+                            hpp_es.eigenvectors().transpose() * gp_whitened;
+                        std::vector<Eigen::Index> retained;
+                        retained.reserve(COV_SIZE);
+                        TYPE discarded_gradient_sq = TYPE(0);
+                        for (Eigen::Index direction = 0;
+                             direction < static_cast<Eigen::Index>(COV_SIZE);
+                             ++direction) {
+                            if (hpp_es.eigenvalues()(direction) > hpp_threshold) {
+                                retained.push_back(direction);
+                            } else {
+                                discarded_gradient_sq += gradient_coeff(direction) *
+                                                         gradient_coeff(direction);
+                            }
+                        }
+
+                        const TYPE discarded_gradient_ratio =
+                            std::sqrt(discarded_gradient_sq) /
+                            std::max(gradient_coeff.norm(), TYPE(1e-15));
+                        ++n_hpp_rank_tests_;
+                        n_hpp_discarded_directions_ += COV_SIZE - retained.size();
+                        hpp_discarded_gradient_ratio_sum_ += discarded_gradient_ratio;
+                        hpp_discarded_gradient_ratio_max_ = std::max(
+                            hpp_discarded_gradient_ratio_max_, discarded_gradient_ratio);
+
+                        if (hpp_max > TYPE(0) && !retained.empty()) {
+                            MatXX retained_vectors(COV_SIZE, retained.size());
+                            projected_state_diagonal.resize(retained.size());
+                            projected_state_rhs.resize(retained.size());
+                            for (size_t column = 0; column < retained.size(); ++column) {
+                                const Eigen::Index direction = retained[column];
+                                retained_vectors.col(column) =
+                                    hpp_es.eigenvectors().col(direction);
+                                projected_state_diagonal(column) =
+                                    hpp_es.eigenvalues()(direction);
+                                projected_state_rhs(column) = gradient_coeff(direction);
+                            }
+                            // v_i^T*z = (L^-T*v_i)^T*dx.
+                            projected_state_basis = prior_sqrt.transpose()
+                                .triangularView<Eigen::Upper>()
+                                .solve(retained_vectors);
+                            has_consistent_projection = true;
+                            ++n_oc_projections_;
+
+                            const TYPE whitened_hpp_norm =
+                                std::max(hpp_whitened.norm(), TYPE(1e-15));
+                            const TYPE whitened_basis_norm =
+                                std::max(nullspace_whitened.norm(), TYPE(1e-15));
+                            oc_leak_after =
+                                (hpp_whitened * nullspace_whitened).norm() /
+                                (whitened_hpp_norm * whitened_basis_norm);
+                        }
+                    }
+                }
             }
         }
 
-        const TYPE projected_hpp_norm = std::max(Hpp.norm(), TYPE(1e-15));
-        oc_leak_after = (Hpp * oc_basis).norm() / (projected_hpp_norm * basis_norm);
+        if (!has_consistent_projection) {
+            const TYPE projected_hpp_norm = std::max(Hpp.norm(), TYPE(1e-15));
+            oc_leak_after = (Hpp * oc_basis).norm() /
+                            (projected_hpp_norm * basis_norm);
+        }
         oc_max_leak_before_ = std::max(oc_max_leak_before_, oc_leak_before);
         oc_max_leak_after_ = std::max(oc_max_leak_after_, oc_leak_after);
     }
@@ -1389,7 +1523,15 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         VecX rhs(COV_SIZE);            // V^T·gp 或 M^-1·gp
 
         auto t_e0 = clock();
-        if constexpr (USE_LDLT_FOR_HPP) {
+        if (has_consistent_projection) {
+            H_BASIS.setZero();
+            H_BASIS_diag.setZero();
+            rhs.setZero();
+            const Eigen::Index retained_count = projected_state_diagonal.size();
+            H_BASIS.leftCols(retained_count) = projected_state_basis;
+            H_BASIS_diag.head(retained_count) = projected_state_diagonal;
+            rhs.head(retained_count) = projected_state_rhs;
+        } else if constexpr (USE_LDLT_FOR_HPP) {
             Eigen::LDLT<MatXX> ldlt(Hpp);
 
             // M = P^T · L，使得 Hpp = M · D · M^T
@@ -1413,7 +1555,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         //   特征分解: eigenvalues 已升序排列，找到第一个足够大的即可
         //   LDLT:     D 无序，必须逐个判断，所以下面用 skip 而不是起始下标
         const TYPE d_max = H_BASIS_diag.maxCoeff();
-        const TYPE d_thresh = TYPE(1e-6) * d_max;
+        const TYPE d_thresh = has_consistent_projection
+            ? TYPE(0)
+            : hpp_rank_relative_threshold_ * d_max;
         if (d_max <= TYPE(0)) {
             std::cerr << "Hpp is not positive: max diag = " << d_max << std::endl;
         }
@@ -1428,7 +1572,10 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         // 数学上完全等价: 中间过程只有 selfadjointView 在读 cov_p，它只看上三角。
         VecX PhT(COV_SIZE);
         VecX K(COV_SIZE);
-        for (size_t i = 0; i < COV_SIZE; ++i) {
+        const Eigen::Index basis_direction_count = has_consistent_projection
+            ? projected_state_diagonal.size()
+            : static_cast<Eigen::Index>(COV_SIZE);
+        for (Eigen::Index i = 0; i < basis_direction_count; ++i) {
             const auto d = H_BASIS_diag(i);
             if (d <= d_thresh) {
                 ++n_skipped_;           // 诊断: 被判定为零空间的方向数
@@ -1501,7 +1648,11 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     const LandmarkUpdateMode landmark_mode = refine_landmarks_
         ? landmark_update_mode_
         : LandmarkUpdateMode::Fixed;
-    if (landmark_mode == LandmarkUpdateMode::IndependentEkf ||
+    const bool independent_landmark_mode =
+        landmark_mode == LandmarkUpdateMode::IndependentEkf ||
+        landmark_mode == LandmarkUpdateMode::IndependentEkfInflated ||
+        landmark_mode == LandmarkUpdateMode::IndependentEkfAdaptive;
+    if (independent_landmark_mode ||
         (landmark_mode == LandmarkUpdateMode::SchurBackSubstitution && is_keyframe)) {
         gl.noalias() -= Hpl.transpose() * dx_p;
     }
@@ -1629,7 +1780,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             }
             (void)accepted;
         }
-    } else if (landmark_mode == LandmarkUpdateMode::IndependentEkf) {
+    } else if (independent_landmark_mode) {
         for (size_t i = 0; i < ids.size(); ++i) {
             if (valid_observations_per_landmark[i] < 2) {
                 continue;
@@ -1642,6 +1793,20 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             const Mat3_3 hll = Hll_diag.middleRows<LMK_SIZE>(index);
             const Vec3 el = gl.segment<LMK_SIZE>(index);
             ++n_lmk_update_attempts_;
+
+            if (landmark_mode != LandmarkUpdateMode::IndependentEkf) {
+                TYPE inflation_scale = TYPE(1);
+                if (landmark_mode == LandmarkUpdateMode::IndependentEkfAdaptive) {
+                    const TYPE excess_nis = std::max(
+                        TYPE(0), lmk->independent_nis_ema - TYPE(1));
+                    inflation_scale = std::clamp(
+                        landmark_adaptive_inflation_gain_ * excess_nis,
+                        TYPE(0), landmark_adaptive_inflation_max_scale_);
+                }
+                cov_p.diagonal().array() +=
+                    landmark_process_noise_density_ * std::max(TYPE(dt), TYPE(0)) *
+                    inflation_scale;
+            }
 
             Vec3 hll_diag;
             Mat3_3 hll_basis;
@@ -1660,12 +1825,14 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             }
 
             const TYPE hll_max = hll_diag.maxCoeff();
-            const TYPE hll_thresh = TYPE(1e-6) * hll_max;
+            const TYPE hll_thresh = hll_rank_relative_threshold_ * hll_max;
             if (hll_max <= TYPE(0)) {
                 std::cerr << "Hll not positive: id = " << id
                           << ", diag = " << hll_diag.transpose() << std::endl;
                 continue;
             }
+            TYPE landmark_nis_sum = TYPE(0);
+            size_t landmark_nis_count = 0;
             for (size_t j = 0; j < LMK_SIZE; ++j) {
                 const TYPE d = hll_diag(j);
                 if (d <= hll_thresh) {
@@ -1675,6 +1842,11 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
                 const Vec3 hT = hll_basis.col(j);
                 Vec3 PhT = cov_p * hT;
                 const TYPE var = hT.dot(PhT) + R;
+                const TYPE e = hll_rhs(j) / d - hT.dot(dx_l);
+                if (var > TYPE(0) && std::isfinite(var) && std::isfinite(e)) {
+                    landmark_nis_sum += e * e / var;
+                    ++landmark_nis_count;
+                }
                 const Vec3 K = PhT / var;
                 cov_p -= K * PhT.transpose();
                 PhT = cov_p * hT;
@@ -1682,12 +1854,165 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
                     (K * R - PhT) * K.transpose();
                 cov_p.triangularView<Eigen::StrictlyLower>() =
                     cov_p.triangularView<Eigen::StrictlyUpper>().transpose();
-                const TYPE e = hll_rhs(j) / d - hT.dot(dx_l);
                 dx_l += K * e;
+            }
+            if (landmark_nis_count > 0) {
+                const TYPE batch_nis = landmark_nis_sum /
+                    static_cast<TYPE>(landmark_nis_count);
+                const TYPE alpha = std::clamp(
+                    landmark_nis_ema_alpha_, TYPE(0), TYPE(1));
+                lmk->independent_nis_ema =
+                    (TYPE(1) - alpha) * lmk->independent_nis_ema +
+                    alpha * batch_nis;
             }
             lmk->position += dx_l;
             ++n_lmk_update_accepted_;
             recordLandmarkRefinement(*lmk);
+        }
+    }
+
+    // Detached map post-processor. It consumes only the newest keyframe
+    // measurement and never writes Landmark::position/cov_position, so its
+    // deliberately approximate independent covariance cannot alter ESKF state.
+    if (enable_shadow_landmark_postprocessor_ && is_keyframe) {
+        const TYPE image_variance = triangulation_uv_std * triangulation_uv_std;
+        const TYPE huber_delta = std::max(
+            visual_huber_delta_sigma * triangulation_uv_std, TYPE(1e-8));
+        for (const auto &[id, lmk] : ids) {
+            (void)id;
+            Feature *newest_feature = nullptr;
+            for (const auto &[frame_id, feature] : lmk->frm2fet) {
+                (void)frame_id;
+                if (feature && feature->frame && feature->obs[0] &&
+                    feature->frame->timestamp == cam_data.timestamp) {
+                    newest_feature = feature;
+                    break;
+                }
+            }
+            if (!newest_feature) {
+                continue;
+            }
+            if (!lmk->shadow_initialized) {
+                lmk->shadow_position = lmk->position;
+                lmk->shadow_cov_position = lmk->cov_position;
+                lmk->shadow_nis_ema = TYPE(1);
+                lmk->shadow_initialized = true;
+            }
+
+            TYPE inflation_scale = shadow_landmark_adaptive_inflation_
+                ? TYPE(0)
+                : TYPE(1);
+            if (shadow_landmark_adaptive_inflation_) {
+                const TYPE excess_nis =
+                    std::max(TYPE(0), lmk->shadow_nis_ema - TYPE(1));
+                inflation_scale = std::clamp(
+                    landmark_adaptive_inflation_gain_ * excess_nis,
+                    TYPE(0), landmark_adaptive_inflation_max_scale_);
+            }
+            lmk->shadow_cov_position.diagonal().array() +=
+                landmark_process_noise_density_ * std::max(TYPE(dt), TYPE(0)) *
+                inflation_scale;
+
+            const auto *frame = newest_feature->frame;
+            const Mat3_3 Rwi = frame->q().toRotationMatrix();
+            const Mat3_3 Rwc = Rwi * Ric_landmark;
+            const Vec3 camera_center = frame->p() + Rwi * ext_.t_ic;
+            const Vec3 d_camera =
+                Rwc.transpose() * (lmk->shadow_position - camera_center);
+            if (!d_camera.allFinite() || d_camera.z() <= TYPE(0.05)) {
+                continue;
+            }
+            const TYPE inv_depth = TYPE(1) / d_camera.z();
+            const TYPE inv_depth2 = inv_depth * inv_depth;
+            const Vec2 estimate = d_camera.head<2>() * inv_depth;
+            const Vec2 residual =
+                newest_feature->obs[0]->un_pt.head<2>() - estimate;
+            if (!residual.allFinite() ||
+                residual.norm() > visual_hard_reprojection_limit) {
+                continue;
+            }
+
+            Mat2_3 projection_jacobian;
+            projection_jacobian <<
+                inv_depth, TYPE(0), -d_camera.x() * inv_depth2,
+                TYPE(0), inv_depth, -d_camera.y() * inv_depth2;
+            const Mat2_3 landmark_jacobian =
+                projection_jacobian * Rwc.transpose();
+            const TYPE robust_weight = residual.norm() > huber_delta
+                ? huber_delta / residual.norm()
+                : TYPE(1);
+            Mat2_2 measurement_covariance = Mat2_2::Identity() *
+                (image_variance / std::max(robust_weight, TYPE(1e-6)));
+            // Pose uncertainty is part of a detached landmark measurement.
+            // Omitting it made the shadow map appear precise while its error
+            // was actually dominated by clone-pose uncertainty.
+            Mat2_6 pose_jacobian;
+            pose_jacobian.leftCols<3>().noalias() =
+                landmark_jacobian * hat(lmk->shadow_position - frame->p());
+            pose_jacobian.rightCols<3>().noalias() = -landmark_jacobian;
+            const size_t frame_offset =
+                INSState::SIZE + AugState::SIZE * frame->ordering;
+            const Eigen::Matrix<TYPE, 6, 6> frame_covariance =
+                cov_.block<6, 6>(frame_offset, frame_offset);
+            measurement_covariance.noalias() +=
+                pose_jacobian * frame_covariance * pose_jacobian.transpose();
+            measurement_covariance = TYPE(0.5) *
+                (measurement_covariance + measurement_covariance.transpose());
+            Mat2_2 innovation_covariance =
+                landmark_jacobian * lmk->shadow_cov_position *
+                landmark_jacobian.transpose() + measurement_covariance;
+            innovation_covariance = TYPE(0.5) *
+                (innovation_covariance + innovation_covariance.transpose());
+            Eigen::LDLT<Mat2_2> innovation_ldlt(innovation_covariance);
+            if (innovation_ldlt.info() != Eigen::Success ||
+                innovation_ldlt.vectorD().minCoeff() <= TYPE(0)) {
+                continue;
+            }
+
+            TYPE normalized_innovation = std::max(
+                TYPE(0), residual.dot(innovation_ldlt.solve(residual)) / TYPE(2));
+            if (shadow_landmark_adaptive_inflation_ &&
+                normalized_innovation > TYPE(1)) {
+                // Innovation-adaptive fading acts immediately on the current
+                // inconsistent observation, unlike an EMA-only scheme that
+                // can react only at the next keyframe.
+                const TYPE fading_factor = std::clamp(
+                    TYPE(1) + landmark_adaptive_inflation_gain_ *
+                        (normalized_innovation - TYPE(1)),
+                    TYPE(1), landmark_adaptive_inflation_max_scale_);
+                lmk->shadow_cov_position *= fading_factor;
+                innovation_covariance =
+                    landmark_jacobian * lmk->shadow_cov_position *
+                    landmark_jacobian.transpose() + measurement_covariance;
+                innovation_covariance = TYPE(0.5) *
+                    (innovation_covariance + innovation_covariance.transpose());
+                innovation_ldlt.compute(innovation_covariance);
+                if (innovation_ldlt.info() != Eigen::Success ||
+                    innovation_ldlt.vectorD().minCoeff() <= TYPE(0)) {
+                    continue;
+                }
+                normalized_innovation = std::max(
+                    TYPE(0), residual.dot(innovation_ldlt.solve(residual)) / TYPE(2));
+            }
+            const TYPE alpha = std::clamp(
+                landmark_nis_ema_alpha_, TYPE(0), TYPE(1));
+            lmk->shadow_nis_ema =
+                (TYPE(1) - alpha) * lmk->shadow_nis_ema +
+                alpha * normalized_innovation;
+
+            const Mat3_2 gain = lmk->shadow_cov_position *
+                landmark_jacobian.transpose() *
+                innovation_ldlt.solve(Mat2_2::Identity());
+            lmk->shadow_position.noalias() += gain * residual;
+            const Mat3_3 identity_minus_kh =
+                Mat3_3::Identity() - gain * landmark_jacobian;
+            lmk->shadow_cov_position =
+                identity_minus_kh * lmk->shadow_cov_position *
+                    identity_minus_kh.transpose() +
+                gain * measurement_covariance * gain.transpose();
+            lmk->shadow_cov_position = TYPE(0.5) *
+                (lmk->shadow_cov_position + lmk->shadow_cov_position.transpose());
+            recordLandmarkRefinement(*lmk, true);
         }
     }
 //    std::cout << "Update Landmark Finished" << std::endl;

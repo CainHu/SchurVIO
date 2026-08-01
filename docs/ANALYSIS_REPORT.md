@@ -18,6 +18,8 @@ tools/run_multi_scenario_analysis.ps1 -Duration 30 -Features 600
 - NEES/NIS、协方差包络和负协方差计数；
 - Huber 降权率、硬残差拒绝率；
 - 三角化成功率、误差、视差、条件数与耗时；
+- landmark 最终 NEES、95% 置信椭球覆盖率和解耦影子地图误差；
+- 一致硬投影的零空间泄漏、秩、删除梯度能量和耗时；
 - `uv_var` 和过程噪声倍率扫描。
 
 场景定义和传感器噪声见 [SIMULATION_SCENARIOS.md](SIMULATION_SCENARIOS.md)。
@@ -182,3 +184,5 @@ clone 协方差的鲁棒重投影优化、质量门限和初始 landmark 协方�
 - [OPT_LDLT.md](OPT_LDLT.md)：Hpp/Hll LDLT 开关与验证
 - [HPP_NULLSPACE.md](HPP_NULLSPACE.md)：Hpp 结构性零空间
 - [HLL_STRUCTURE.md](HLL_STRUCTURE.md)：landmark 深度弱方向
+- [CONSISTENT_SUBSPACE_AND_LANDMARK_COVARIANCE.md](CONSISTENT_SUBSPACE_AND_LANDMARK_COVARIANCE.md)：
+  `Hll/Hpp/gp` 同域投影、landmark NEES/覆盖率、协方差膨胀与影子地图严格实验

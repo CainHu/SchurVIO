@@ -4,6 +4,7 @@
 //   VinsAnalysis [uv_var] [tag] [proc_scale] [scenario] [duration] [features]
 //                [landmark_init] [refine] [imu_noise] [bias_rw] [summary_group]
 //                [oc_fej] [oc_projection] [landmark_update] [tri_min_parallax_deg]
+//                [shadow_map] [landmark_q_m2_s] [adaptive_inflation_gain]
 //     uv_var  Schur 序贯伪量测的噪声密度
 //     tag     输出文件名后缀，用于噪声扫描时区分多组结果
 //     scenario circle_out / circle_in / helix_3d / stop_go
@@ -83,6 +84,8 @@ const char *landmarkUpdateModeName(const slam::SchurVINS::LandmarkUpdateMode mod
     switch (mode) {
         case Mode::Fixed: return "fixed";
         case Mode::IndependentEkf: return "independent";
+        case Mode::IndependentEkfInflated: return "independent_fixed_inflation";
+        case Mode::IndependentEkfAdaptive: return "independent_adaptive_inflation";
         case Mode::Retriangulate: return "retriangulate";
         case Mode::SchurBackSubstitution: return "schur_backsub";
     }
@@ -174,6 +177,11 @@ int main(int argc, char **argv) {
     const std::string landmark_update = (argc > 14) ? argv[14] : "retriangulate";
     const double triangulation_min_parallax_deg =
         (argc > 15) ? std::atof(argv[15]) : 8.0;
+    const bool enable_shadow_map = (argc > 16) ? std::atoi(argv[16]) != 0 : false;
+    const double landmark_process_noise_density =
+        (argc > 17) ? std::atof(argv[17]) : 1e-3;
+    const double landmark_adaptive_inflation_gain =
+        (argc > 18) ? std::atof(argv[18]) : 1.0;
     const bool legacy_white_noise = imu_noise_model == "legacy";
     using LandmarkInit = slam::SchurVINS::LandmarkInitializationMode;
     const LandmarkInit landmark_initialization_mode = landmark_init == "gt"
@@ -182,15 +190,21 @@ int main(int argc, char **argv) {
            ? LandmarkInit::TriangulationWithOraclePosition
            : LandmarkInit::Triangulation);
     using LandmarkUpdate = slam::SchurVINS::LandmarkUpdateMode;
-    const LandmarkUpdate landmark_update_mode = !refine_landmarks
-        ? LandmarkUpdate::Fixed
-        : (landmark_update == "fixed"
-           ? LandmarkUpdate::Fixed
-           : (landmark_update == "retriangulate"
-              ? LandmarkUpdate::Retriangulate
-              : (landmark_update == "schur" || landmark_update == "schur_backsub"
-                 ? LandmarkUpdate::SchurBackSubstitution
-                 : LandmarkUpdate::IndependentEkf)));
+    LandmarkUpdate landmark_update_mode = LandmarkUpdate::IndependentEkf;
+    if (!refine_landmarks || landmark_update == "fixed") {
+        landmark_update_mode = LandmarkUpdate::Fixed;
+    } else if (landmark_update == "independent_fixed" ||
+               landmark_update == "independent_fixed_inflation") {
+        landmark_update_mode = LandmarkUpdate::IndependentEkfInflated;
+    } else if (landmark_update == "independent_adaptive" ||
+               landmark_update == "independent_adaptive_inflation") {
+        landmark_update_mode = LandmarkUpdate::IndependentEkfAdaptive;
+    } else if (landmark_update == "retriangulate") {
+        landmark_update_mode = LandmarkUpdate::Retriangulate;
+    } else if (landmark_update == "schur" ||
+               landmark_update == "schur_backsub") {
+        landmark_update_mode = LandmarkUpdate::SchurBackSubstitution;
+    }
     const std::string out_dir = "out";
     const std::string run_name = scenario + "_" + tag;
 
@@ -221,6 +235,9 @@ int main(int argc, char **argv) {
     ekf.landmark_update_mode_ = landmark_update_mode;
     ekf.enforce_observability_constraint_ = observability_constraint;
     ekf.project_observability_constraint_ = observability_projection;
+    ekf.enable_shadow_landmark_postprocessor_ = enable_shadow_map;
+    ekf.landmark_process_noise_density_ = landmark_process_noise_density;
+    ekf.landmark_adaptive_inflation_gain_ = landmark_adaptive_inflation_gain;
     ekf.triangulation_uv_std = simulation.camera_noise_std / simulation.focal_length;
     ekf.triangulation_min_parallax_deg = triangulation_min_parallax_deg;
     ekf.setQPV(ground_truth[0].q, ground_truth[0].p, ground_truth[0].v);
@@ -410,7 +427,10 @@ int main(int argc, char **argv) {
         std::fprintf(f,
             "t,id,status,success,n_obs,parallax_deg,condition,reproj_rmse,time_us,"
             "x_init,y_init,z_init,x_final,y_final,z_final,x_gt,y_gt,z_gt,"
-            "sigma_init,nees_init,err_init,err_final,correction,refinements,improved\n");
+            "sigma_init,sigma_final,nees_init,nees_final,covered95_final,"
+            "err_init,err_final,correction,refinements,improved,"
+            "shadow_initialized,x_shadow,y_shadow,z_shadow,sigma_shadow,"
+            "nees_shadow,covered95_shadow,err_shadow,shadow_refinements\n");
 
         size_t success_count = 0;
         for (const auto &log : ekf.triangulation_logs_) {
@@ -418,6 +438,8 @@ int main(int argc, char **argv) {
             const double nan = std::numeric_limits<double>::quiet_NaN();
             const double sigma_init = success && log.initial_cov_trace >= 0
                                       ? std::sqrt(log.initial_cov_trace) : nan;
+            const double sigma_final = success && log.latest_covariance.trace() >= 0
+                                       ? std::sqrt(log.latest_covariance.trace()) : nan;
             const double err_init = success && log.has_ground_truth
                                     ? (log.initial_position - log.ground_truth).norm() : nan;
             const double err_final = success && log.has_ground_truth
@@ -425,12 +447,30 @@ int main(int argc, char **argv) {
             const double correction = success
                                       ? (log.latest_position - log.initial_position).norm() : nan;
             const int improved = success && log.has_ground_truth && err_final < err_init ? 1 : 0;
+            const double nees_final = success && log.has_ground_truth
+                ? computeNEES<3>(log.latest_position - log.ground_truth,
+                                 log.latest_covariance)
+                : nan;
+            const int covered95_final = std::isfinite(nees_final) &&
+                nees_final <= 7.814727903251179 ? 1 : 0;
+            const double sigma_shadow = log.shadow_initialized &&
+                                        log.shadow_covariance.trace() >= 0
+                ? std::sqrt(log.shadow_covariance.trace()) : nan;
+            const double nees_shadow = log.shadow_initialized && log.has_ground_truth
+                ? computeNEES<3>(log.shadow_position - log.ground_truth,
+                                 log.shadow_covariance)
+                : nan;
+            const int covered95_shadow = std::isfinite(nees_shadow) &&
+                nees_shadow <= 7.814727903251179 ? 1 : 0;
+            const double err_shadow = log.shadow_initialized && log.has_ground_truth
+                ? (log.shadow_position - log.ground_truth).norm() : nan;
             success_count += success ? 1 : 0;
 
             std::fprintf(f,
                 "%.6f,%zu,%s,%d,%zu,%.6e,%.6e,%.6e,%.3f,"
                 "%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,"
-                "%.6e,%.6e,%.6e,%.6e,%.6e,%zu,%d\n",
+                "%.6e,%.6e,%.6e,%.6e,%d,%.6e,%.6e,%.6e,%zu,%d,"
+                "%d,%.6e,%.6e,%.6e,%.6e,%.6e,%d,%.6e,%zu\n",
                 static_cast<double>(log.timestamp - t0) * 1e-6,
                 static_cast<size_t>(log.id), triangulationStatusName(log.status), success ? 1 : 0,
                 log.observation_count, log.max_parallax_deg, log.condition_number,
@@ -438,8 +478,12 @@ int main(int argc, char **argv) {
                 log.initial_position.x(), log.initial_position.y(), log.initial_position.z(),
                 log.latest_position.x(), log.latest_position.y(), log.latest_position.z(),
                 log.ground_truth.x(), log.ground_truth.y(), log.ground_truth.z(),
-                sigma_init, log.initial_nees, err_init, err_final, correction,
-                log.refinement_count, improved);
+                sigma_init, sigma_final, log.initial_nees, nees_final,
+                covered95_final, err_init, err_final, correction,
+                log.refinement_count, improved, log.shadow_initialized ? 1 : 0,
+                log.shadow_position.x(), log.shadow_position.y(), log.shadow_position.z(),
+                sigma_shadow, nees_shadow, covered95_shadow, err_shadow,
+                log.shadow_refinement_count);
         }
         std::fclose(f);
         std::printf("wrote %s (%zu attempts, %zu successes)\n",
@@ -624,6 +668,15 @@ int main(int argc, char **argv) {
         double triangulation_final_error_sum = 0.0;
         double triangulation_initial_aligned_error_sum = 0.0;
         double triangulation_final_aligned_error_sum = 0.0;
+        double landmark_nees_sum = 0.0;
+        size_t landmark_nees_count = 0;
+        size_t landmark_covered95 = 0;
+        double shadow_error_sum = 0.0;
+        double shadow_aligned_error_sum = 0.0;
+        size_t shadow_gt_count = 0;
+        double shadow_nees_sum = 0.0;
+        size_t shadow_nees_count = 0;
+        size_t shadow_covered95 = 0;
         for (const auto &log : ekf.triangulation_logs_) {
             const bool success =
                 log.status == slam::SchurVINS::TriangulationStatus::Success;
@@ -648,6 +701,34 @@ int main(int argc, char **argv) {
                         (final_aligned - log.ground_truth).norm();
                 }
                 triangulation_improved += final_error < initial_error ? 1 : 0;
+                const double landmark_nees = computeNEES<3>(
+                    log.latest_position - log.ground_truth,
+                    log.latest_covariance);
+                if (std::isfinite(landmark_nees)) {
+                    landmark_nees_sum += landmark_nees;
+                    ++landmark_nees_count;
+                    landmark_covered95 += landmark_nees <= 7.814727903251179 ? 1 : 0;
+                }
+                if (log.shadow_initialized) {
+                    shadow_error_sum +=
+                        (log.shadow_position - log.ground_truth).norm();
+                    if (has_landmark_gauge_alignment) {
+                        const Eigen::Vector3d shadow_aligned =
+                            landmark_gauge_rotation * log.shadow_position +
+                            landmark_gauge_translation;
+                        shadow_aligned_error_sum +=
+                            (shadow_aligned - log.ground_truth).norm();
+                    }
+                    const double shadow_nees = computeNEES<3>(
+                        log.shadow_position - log.ground_truth,
+                        log.shadow_covariance);
+                    if (std::isfinite(shadow_nees)) {
+                        shadow_nees_sum += shadow_nees;
+                        ++shadow_nees_count;
+                        shadow_covered95 += shadow_nees <= 7.814727903251179 ? 1 : 0;
+                    }
+                    ++shadow_gt_count;
+                }
                 ++triangulation_gt_count;
             }
         }
@@ -670,6 +751,27 @@ int main(int argc, char **argv) {
         const double triangulation_improve_rate = triangulation_gt_count
             ? static_cast<double>(triangulation_improved)
               / static_cast<double>(triangulation_gt_count)
+            : std::numeric_limits<double>::quiet_NaN();
+        const double landmark_nees_mean = landmark_nees_count
+            ? landmark_nees_sum / static_cast<double>(landmark_nees_count)
+            : std::numeric_limits<double>::quiet_NaN();
+        const double landmark_coverage95 = landmark_nees_count
+            ? static_cast<double>(landmark_covered95) /
+              static_cast<double>(landmark_nees_count)
+            : std::numeric_limits<double>::quiet_NaN();
+        const double shadow_error_mean = shadow_gt_count
+            ? shadow_error_sum / static_cast<double>(shadow_gt_count)
+            : std::numeric_limits<double>::quiet_NaN();
+        const double shadow_aligned_error_mean =
+            shadow_gt_count && has_landmark_gauge_alignment
+            ? shadow_aligned_error_sum / static_cast<double>(shadow_gt_count)
+            : std::numeric_limits<double>::quiet_NaN();
+        const double shadow_nees_mean = shadow_nees_count
+            ? shadow_nees_sum / static_cast<double>(shadow_nees_count)
+            : std::numeric_limits<double>::quiet_NaN();
+        const double shadow_coverage95 = shadow_nees_count
+            ? static_cast<double>(shadow_covered95) /
+              static_cast<double>(shadow_nees_count)
             : std::numeric_limits<double>::quiet_NaN();
         const double landmark_update_accept_rate = ekf.n_lmk_update_attempts_
             ? static_cast<double>(ekf.n_lmk_update_accepted_)
@@ -714,21 +816,26 @@ int main(int argc, char **argv) {
         const bool is_ablation = summary_group == "ablation";
         const bool is_observability = summary_group == "observability";
         const bool is_landmark_strategy = summary_group == "landmark";
+        const bool is_landmark_consistency = summary_group == "landmark_consistency";
         const bool is_triangulation_scan = summary_group == "triangulation";
-        const bool is_landmark = is_landmark_strategy || is_triangulation_scan;
+        const bool is_landmark = is_landmark_strategy || is_landmark_consistency ||
+                                 is_triangulation_scan;
         const auto path = joinPath(out_dir,
                                    is_ablation ? "ablation_summary.csv"
                                    : (is_observability ? "observability_summary.csv"
                                       : (is_triangulation_scan
                                          ? "triangulation_threshold_summary.csv"
-                                         : (is_landmark_strategy
+                                         : (is_landmark_consistency
+                                            ? "landmark_consistency_summary.csv"
+                                            : (is_landmark_strategy
                                             ? "landmark_strategy_summary.csv"
-                                            : "summary.csv"))));
+                                            : "summary.csv")))));
         const bool reset_summary = scenario == "circle_out"
             && ((!is_ablation && !is_observability && !is_landmark && tag == "base")
                 || (is_ablation && tag == "abl_full")
                 || (is_observability && tag == "oc_on")
                 || (is_landmark_strategy && tag == "lmk_fixed")
+                || (is_landmark_consistency && tag == "lmk_independent")
                 || (is_triangulation_scan && tag == "tri_p3"));
         const bool exists = !reset_summary && [&] {
             FILE *t = std::fopen(path.c_str(), "r");
@@ -754,17 +861,25 @@ int main(int argc, char **argv) {
                         "t_cost,updates,posterior_improve_rate,obs_downweight_rate,obs_reject_rate,"
                         "mean_oc_leak_before,mean_oc_leak_after,max_oc_leak_before,max_oc_leak_after,"
                         "oc_projections,skipped_directions_total,mean_skipped_directions,"
-                        "negative_directions_total,mean_negative_directions,tri_success,tri_attempts\n");
+                        "negative_directions_total,mean_negative_directions,"
+                        "hll_rank_tests,hll_discarded_directions,hll_discarded_gradient_ratio_mean,"
+                        "hll_discarded_gradient_ratio_max,hpp_rank_tests,hpp_discarded_directions,"
+                        "hpp_discarded_gradient_ratio_mean,hpp_discarded_gradient_ratio_max,"
+                        "tri_success,tri_attempts\n");
                 } else if (is_landmark) {
                     std::fprintf(f,
-                        "scenario,tag,landmark_update,tri_min_parallax_deg,uv_var,proc_scale,duration,features,"
+                        "scenario,tag,landmark_update,shadow_map,landmark_q_m2_s,adaptive_gain,"
+                        "tri_min_parallax_deg,uv_var,proc_scale,duration,features,"
                         "rmse_p,rmse_p_aligned,rpe_1s_p,rpe_1s_att,rmse_v,rmse_att,"
                         "rmse_bg,rmse_ba,max_err_p,mean_nees,mean_nis,gravity_error,neg_cov,"
                         "t_cost,updates,posterior_improve_rate,obs_downweight_rate,obs_reject_rate,"
                         "tri_success,tri_attempts,tri_initial_error_mean,tri_final_error_mean,"
                         "tri_initial_gauge_aligned_error_mean,tri_final_gauge_aligned_error_mean,"
                         "tri_improve_rate,lmk_update_attempts,lmk_update_accepted,lmk_update_accept_rate,"
-                        "lmk_retriangulation_success,reproj_cost_reduction\n");
+                        "lmk_retriangulation_success,reproj_cost_reduction,"
+                        "lmk_nees_mean,lmk_nees_valid,lmk_coverage95,"
+                        "shadow_error_mean,shadow_gauge_aligned_error_mean,"
+                        "shadow_nees_mean,shadow_nees_valid,shadow_coverage95\n");
                 } else {
                     std::fprintf(f,
                         "scenario,tag,uv_var,proc_scale,estimate_gravity,duration,features,"
@@ -792,7 +907,8 @@ int main(int argc, char **argv) {
                     "%s,%s,%d,%d,%.9g,%.4f,%.1f,%zu,"
                     "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
                     "%.6e,%.6e,%.6e,%zu,%.3f,%zu,%.6f,%.6f,%.6f,"
-                    "%.6e,%.6e,%.6e,%.6e,%zu,%zu,%.6f,%zu,%.6f,%zu,%zu\n",
+                    "%.6e,%.6e,%.6e,%.6e,%zu,%zu,%.6f,%zu,%.6f,"
+                    "%zu,%zu,%.6e,%.6e,%zu,%zu,%.6e,%.6e,%zu,%zu\n",
                     scenario.c_str(), tag.c_str(), observability_constraint ? 1 : 0,
                     observability_projection ? 1 : 0,
                     uv_var, proc_scale, duration, feature_count,
@@ -812,16 +928,32 @@ int main(int argc, char **argv) {
                     ekf.posterior_times_ > 0
                         ? static_cast<double>(ekf.n_negative_) / ekf.posterior_times_
                         : 0.0,
+                    ekf.n_hll_rank_tests_, ekf.n_hll_discarded_directions_,
+                    ekf.n_hll_rank_tests_ > 0
+                        ? ekf.hll_discarded_gradient_ratio_sum_ /
+                          static_cast<double>(ekf.n_hll_rank_tests_)
+                        : 0.0,
+                    ekf.hll_discarded_gradient_ratio_max_,
+                    ekf.n_hpp_rank_tests_, ekf.n_hpp_discarded_directions_,
+                    ekf.n_hpp_rank_tests_ > 0
+                        ? ekf.hpp_discarded_gradient_ratio_sum_ /
+                          static_cast<double>(ekf.n_hpp_rank_tests_)
+                        : 0.0,
+                    ekf.hpp_discarded_gradient_ratio_max_,
                     triangulation_success,
                     ekf.triangulation_logs_.size());
             } else if (is_landmark) {
                 std::fprintf(f,
-                    "%s,%s,%s,%.6f,%.9g,%.4f,%.1f,%zu,"
+                    "%s,%s,%s,%d,%.9g,%.6f,%.6f,%.9g,%.4f,%.1f,%zu,"
                     "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
                     "%.6e,%.6e,%.6e,%zu,%.3f,%zu,%.6f,%.6f,%.6f,"
-                    "%zu,%zu,%.6f,%.6f,%.6f,%.6f,%.6f,%zu,%zu,%.6f,%zu,%.6e\n",
+                    "%zu,%zu,%.6f,%.6f,%.6f,%.6f,%.6f,%zu,%zu,%.6f,%zu,%.6e,"
+                    "%.6e,%zu,%.6f,%.6e,%.6e,%.6e,%zu,%.6f\n",
                     scenario.c_str(), tag.c_str(),
                     landmarkUpdateModeName(landmark_update_mode),
+                    enable_shadow_map ? 1 : 0,
+                    landmark_process_noise_density,
+                    landmark_adaptive_inflation_gain,
                     triangulation_min_parallax_deg, uv_var, proc_scale,
                     duration, feature_count, rmse_p, rmse_p_aligned,
                     rpe_1s_p, rpe_1s_att, rmse_v, rmse_a, rmse_bg, rmse_ba,
@@ -836,7 +968,10 @@ int main(int argc, char **argv) {
                     triangulation_improve_rate,
                     ekf.n_lmk_update_attempts_, ekf.n_lmk_update_accepted_,
                     landmark_update_accept_rate, ekf.n_lmk_retriangulation_success_,
-                    ekf.lmk_reprojection_cost_reduction_);
+                    ekf.lmk_reprojection_cost_reduction_, landmark_nees_mean,
+                    landmark_nees_count, landmark_coverage95,
+                    shadow_error_mean, shadow_aligned_error_mean,
+                    shadow_nees_mean, shadow_nees_count, shadow_coverage95);
             } else {
                 std::fprintf(f,
                     "%s,%s,%.9g,%.4f,%d,%.1f,%zu,"
