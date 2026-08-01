@@ -156,33 +156,28 @@ void SchurVINS::predict(const slam::IMUData &imu_data, const double dt) {
     const Mat3_3 nRdt = Rnb_ * (-dt);
     const Vec3 nRdv = accel_corr_world_ * (-dt);
     const Mat3_3 nRdv_X = hat(nRdv);
-    if constexpr (USE_STABLE_COVARIANCE_PREDICTION) {
-        using MatINS = Eigen::Matrix<TYPE, I::SIZE, I::SIZE>;
-        MatINS A = MatINS::Identity();
-        A.template block<3, 3>(I::Q, I::BG) = nRdt;
-        A.template block<3, 3>(I::P, I::V) = Mat3_3::Identity() * dt;
-        A.template block<3, 3>(I::V, I::Q) = nRdv_X;
-        A.template block<3, 3>(I::V, I::BA) = nRdt;
-        if constexpr (INSState::ESTIMATE_GRAVITY) {
-            A.template block<3, 3>(I::V, I::G) = Mat3_3::Identity() * dt;
-        }
 
+    using MatINS = Eigen::Matrix<TYPE, I::SIZE, I::SIZE>;
+    MatINS A = MatINS::Identity();
+    A.template block<3, 3>(I::Q, I::BG) = nRdt;
+    A.template block<3, 3>(I::P, I::V) = Mat3_3::Identity() * dt;
+    A.template block<3, 3>(I::V, I::Q) = nRdv_X;
+    A.template block<3, 3>(I::V, I::BA) = nRdt;
+    if constexpr (INSState::ESTIMATE_GRAVITY) {
+        A.template block<3, 3>(I::V, I::G) = Mat3_3::Identity() * dt;
+    }
+
+    // 三条 P_ii 传播路径都必须共享同一份旧 P_ic。
+    using MatCross = Eigen::Matrix<TYPE, I::SIZE, COV_SIZE - I::SIZE>;
+    const MatCross P_cross_prev =
+        cov_.topRightCorner(I::SIZE, COV_SIZE - I::SIZE);
+
+    if constexpr (USE_STABLE_COVARIANCE_PREDICTION) {
         // 合同变换保持半正定性：若 P >= 0，则 A*P*A^T >= 0。
-        // 联合状态的完整传播是
-        //   P_ii' = A P_ii A^T + Q
-        //   P_ic' = A P_ic
-        //   P_cc' = P_cc
-        // 旧实现只更新 P_ii，却冻结 P_ic，破坏了联合协方差的相容性。
-        // 使用副本避免 Eigen 表达式在赋值时与 cov_ alias。
+        // 使用副本避免 Eigen 表达式在赋值时与 cov alias。
         const MatINS P_prev = cov.selfadjointView<Eigen::Upper>();
-        const MatXX P_cross_prev =
-            cov_.topRightCorner(I::SIZE, COV_SIZE - I::SIZE);
         cov.noalias() = A * P_prev * A.transpose();
         cov = TYPE(0.5) * (cov + cov.transpose());
-        cov_.topRightCorner(I::SIZE, COV_SIZE - I::SIZE).noalias() =
-            A * P_cross_prev;
-        cov_.bottomLeftCorner(COV_SIZE - I::SIZE, I::SIZE) =
-            cov_.topRightCorner(I::SIZE, COV_SIZE - I::SIZE).transpose();
     } else if constexpr (CONFIG_DEBUG) {
         Eigen::Matrix<TYPE, INSState::SIZE, INSState::SIZE> AP;
 
@@ -236,6 +231,14 @@ void SchurVINS::predict(const slam::IMUData &imu_data, const double dt) {
 
         cov.topRightCorner<9, I::SIZE - 9>().noalias() = cov.bottomLeftCorner<I::SIZE - 9, 9>().transpose();
     }
+
+    // 联合状态完整传播：F = diag(A, I)。上面的三个分支只负责
+    // P_ii' = A P_ii A^T；这里统一补齐 P_ic' = A P_ic。
+    // P_cc 对应静态增广位姿，在 IMU 预测中保持不变。
+    cov_.topRightCorner(I::SIZE, COV_SIZE - I::SIZE).noalias() =
+        A * P_cross_prev;
+    cov_.bottomLeftCorner(COV_SIZE - I::SIZE, I::SIZE) =
+        cov_.topRightCorner(I::SIZE, COV_SIZE - I::SIZE).transpose();
 
     // 叠加过程噪声
     cov += (state_.var_proc * (dt * proc_noise_scale_)).asDiagonal();

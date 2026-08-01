@@ -56,8 +56,8 @@ namespace slam {
     // 无论用哪种分解都必须做零空间过滤。详见 docs/HLL_STRUCTURE.md。
     constexpr static bool USE_LDLT_FOR_HLL = true;
 
-    // 用显式合同变换传播 INS 协方差及其与增广位姿的互协方差。
-    // false 仅用于回归对比；旧的原地传播会破坏联合协方差正定性。
+    // INS 左上角协方差的实现方式：true 用显式 A*P*A^T，false 用原有
+    // 分块展开。两者都在 predict() 末尾统一传播与增广位姿的互协方差。
     constexpr static bool USE_STABLE_COVARIANCE_PREDICTION = true;
     constexpr static Tus IMU_TS = 5000;
     constexpr static Tus CAM_TS = 50000;
