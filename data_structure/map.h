@@ -95,6 +95,8 @@ namespace slam {
                 Landmark *lmk;
                 if (auto it = lmk_map.find(lmk_id); it == lmk_map.end()) {
                     lmk = pool_lmk.allocate();
+                    lmk->id = lmk_id;
+                    lmk->map = this;
                     lmk_map.emplace(lmk_id, lmk);
 
                     // Select Anchor Frame

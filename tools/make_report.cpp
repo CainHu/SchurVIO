@@ -39,6 +39,7 @@ int main() {
     const std::string traj = readFile("out/traj_base.csv");
     const std::string upd  = readFile("out/update_base.csv");
     const std::string lmk  = readFile("out/lmk.csv");
+    const std::string tri  = readFile("out/triangulation_base.csv");
     const std::string sum  = readFile("out/summary.csv");
 
     if (traj.empty()) {
@@ -58,6 +59,7 @@ int main() {
     sub("%%DATA_TRAJ%%", esc(traj));
     sub("%%DATA_UPDATE%%", esc(upd));
     sub("%%DATA_LMK%%", esc(lmk));
+    sub("%%DATA_TRIANGULATION%%", esc(tri));
     sub("%%DATA_SUMMARY%%", esc(sum));
 
     std::fwrite(html.data(), 1, html.size(), f);

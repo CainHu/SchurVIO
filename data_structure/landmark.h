@@ -8,6 +8,7 @@
 #include "../type.h"
 #include "feature.h"
 #include "frame.h"
+#include <limits>
 
 namespace slam {
     using Frame2FeatureMsg = std::map<FrameID, Feature *>;
@@ -38,7 +39,10 @@ namespace slam {
             position.setZero();
 
             var_ins_depth = TYPE(1);
-            cov_position.setIdentity();
+            cov_position = Mat3_3::Identity() * TYPE(1e-4);
+
+            last_triangulation_obs_count = 0;
+            triangulation_log_index = std::numeric_limits<size_t>::max();
 
             anchor_obs = nullptr;
             frm2fet.clear();
@@ -56,6 +60,11 @@ namespace slam {
 
         TYPE var_ins_depth{TYPE(1)};
         Mat3_3 cov_position{Mat3_3 ::Identity() * 1e-4};
+
+        // 三角化失败后，仅在关键帧观测数增加时重试，避免非关键帧更新反复做无效计算。
+        size_t last_triangulation_obs_count{};
+        // 指向 SchurVINS 中成功初始化记录；landmark 被移出滑窗后记录仍可用于离线评估。
+        size_t triangulation_log_index{std::numeric_limits<size_t>::max()};
 
         Observation *anchor_obs{};
         Frame2FeatureMsg frm2fet;

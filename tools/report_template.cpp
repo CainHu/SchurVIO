@@ -119,7 +119,35 @@ code{background:#0b0d12;padding:1px 5px;border-radius:3px;font-size:12px}
 </section>
 
 <section>
-  <h2>4. 误差与协方差一致性</h2>
+  <h2>4. 特征点三角化与后续修正</h2>
+  <h3>不参与算法计算的真值，仅用于离线检查初始化质量和 landmark 后验修正</h3>
+  <div class="grid g4" id="triKpis"></div>
+  <div class="grid g2" style="margin-top:16px">
+    <div class="panel">
+      <h3>初始化误差 vs 最终误差</h3>
+      <canvas id="ctriImprove" height="360"></canvas>
+      <div class="sub">双对数坐标；对角线以下表示后续视觉更新把 landmark 拉近真值。</div>
+    </div>
+    <div class="panel">
+      <h3>最大视差 vs 三角化初始化误差</h3>
+      <canvas id="ctriParallax" height="360"></canvas>
+      <div class="sub">纵轴为对数坐标，用于检查小视差是否对应更大的深度误差。</div>
+    </div>
+  </div>
+  <div class="panel" style="margin-top:16px">
+    <h3>特征点俯视分布：真值 / 三角化初值 / 最终修正</h3>
+    <canvas id="ctriXY" height="460"></canvas>
+    <div class="sub">每个 ID 取最后一次成功 track；细线连接三角化初值与最终位置。</div>
+  </div>
+  <div class="panel" style="margin-top:16px">
+    <h3>三角化状态与质量诊断</h3>
+    <div id="triStatus"></div>
+  </div>
+  <div id="triNotes"></div>
+</section>
+
+<section>
+  <h2>5. 误差与协方差一致性</h2>
   <h3>滤波器对自身精度的估计是否可信</h3>
   <div class="grid g4" id="kpiConsistency"></div>
   <div class="grid g2" style="margin-top:16px">
@@ -136,7 +164,7 @@ code{background:#0b0d12;padding:1px 5px;border-radius:3px;font-size:12px}
 </section>
 
 <section>
-  <h2>5. 零偏与重力估计收敛</h2>
+  <h2>6. 零偏与重力估计收敛</h2>
   <h3>这些量只能通过视觉更新间接可观，是判断融合是否生效的独立证据</h3>
   <div class="grid g3">
     <div class="panel"><h3>陀螺零偏 bg</h3><canvas id="cbg" height="280"></canvas></div>
@@ -146,7 +174,7 @@ code{background:#0b0d12;padding:1px 5px;border-radius:3px;font-size:12px}
 </section>
 
 <section>
-  <h2>6. 噪声参数敏感度</h2>
+  <h2>7. 噪声参数敏感度</h2>
   <h3>量测噪声 uv_var 与过程噪声缩放对最终精度的影响</h3>
   <div class="grid g2" style="margin-top:16px">
     <div class="panel"><h3>量测噪声 uv_var 扫描</h3><canvas id="csweep1" height="320"></canvas></div>
@@ -160,7 +188,7 @@ code{background:#0b0d12;padding:1px 5px;border-radius:3px;font-size:12px}
 </section>
 
 <section>
-  <h2>7. 观测数量与滑窗状态</h2>
+  <h2>8. 观测数量与滑窗状态</h2>
   <div class="grid g4" id="obsStats"></div>
   <div class="grid g2" style="margin-top:16px">
     <div class="panel"><h3>每帧参与更新的 landmark 数</h3><canvas id="cnlmk" height="280"></canvas></div>
@@ -175,6 +203,7 @@ code{background:#0b0d12;padding:1px 5px;border-radius:3px;font-size:12px}
 const RAW_TRAJ = `%%DATA_TRAJ%%`;
 const RAW_UPD  = `%%DATA_UPDATE%%`;
 const RAW_LMK  = `%%DATA_LMK%%`;
+const RAW_TRI  = `%%DATA_TRIANGULATION%%`;
 const RAW_SUM  = `%%DATA_SUMMARY%%`;
 
 function parseCSV(txt){
@@ -197,6 +226,7 @@ function parseCSV(txt){
 const T   = parseCSV(RAW_TRAJ).rows;
 const U   = parseCSV(RAW_UPD).rows;
 const LMK = parseCSV(RAW_LMK).rows;
+const TRI = parseCSV(RAW_TRI).rows;
 const SUM = parseCSV(RAW_SUM).rows;
 
 const fmt=(v,n=4)=>{
@@ -598,7 +628,156 @@ linePlot('cdx',{logY:true, series:[
   {name:'位置误差', color:C('--err'), data:U.map(r=>[r.t,Math.max(r.errp_post,1e-12)]), lw:1.4},
 ]});
 
-// ================= 4. NEES / NIS / 误差 vs 协方差 =================
+// ================= 4. 特征点三角化 =================
+function triangulationScatter(id, rows, xKey, yKey, xLabel, yLabel, options={}){
+  const cv=document.getElementById(id); if(!cv) return;
+  const {g,w,h}=setupHiDPI(cv);
+  const M={l:70,r:18,t:16,b:44}, pw=w-M.l-M.r, ph=h-M.t-M.b;
+  const points=rows.map(r=>[r[xKey],r[yKey],r.improved])
+    .filter(p=>Number.isFinite(p[0])&&Number.isFinite(p[1])&&p[0]>0&&p[1]>0);
+  if(!points.length){
+    g.fillStyle=C('--dim');g.font='13px system-ui';g.textAlign='center';
+    g.fillText('没有可绘制的成功三角化记录',w/2,h/2);return;
+  }
+
+  const tx=v=>options.logX?Math.log10(Math.max(v,1e-12)):v;
+  const ty=v=>options.logY?Math.log10(Math.max(v,1e-12)):v;
+  let x0=Math.min(...points.map(p=>tx(p[0]))), x1=Math.max(...points.map(p=>tx(p[0])));
+  let y0=Math.min(...points.map(p=>ty(p[1]))), y1=Math.max(...points.map(p=>ty(p[1])));
+  if(options.diagonal){
+    const lo=Math.min(x0,y0), hi=Math.max(x1,y1); x0=y0=lo; x1=y1=hi;
+  }
+  const padx=Math.max((x1-x0)*0.06,options.logX?0.08:1e-6);
+  const pady=Math.max((y1-y0)*0.06,options.logY?0.08:1e-6);
+  x0-=padx;x1+=padx;y0-=pady;y1+=pady;
+  const X=v=>M.l+(tx(v)-x0)/Math.max(x1-x0,1e-12)*pw;
+  const Y=v=>M.t+ph-(ty(v)-y0)/Math.max(y1-y0,1e-12)*ph;
+  const xRaw=v=>options.logX?Math.pow(10,v):v;
+  const yRaw=v=>options.logY?Math.pow(10,v):v;
+
+  g.strokeStyle=C('--grid');g.lineWidth=1;g.font='11px system-ui';
+  for(let i=0;i<=5;i++){
+    const xv=x0+(x1-x0)*i/5, yv=y0+(y1-y0)*i/5;
+    const xp=M.l+pw*i/5, yp=M.t+ph-ph*i/5;
+    g.beginPath();g.moveTo(xp,M.t);g.lineTo(xp,M.t+ph);g.stroke();
+    g.beginPath();g.moveTo(M.l,yp);g.lineTo(M.l+pw,yp);g.stroke();
+    g.fillStyle=C('--dim');g.textAlign='center';g.textBaseline='top';
+    g.fillText(fmt(xRaw(xv),options.logX?2:2),xp,M.t+ph+7);
+    g.textAlign='right';g.textBaseline='middle';
+    g.fillText(fmt(yRaw(yv),options.logY?2:3),M.l-7,yp);
+  }
+  if(options.diagonal){
+    const lo=Math.max(Math.pow(10,x0),1e-12), hi=Math.pow(10,x1);
+    g.strokeStyle='#8b93a7';g.lineWidth=1.3;g.setLineDash([5,4]);
+    g.beginPath();g.moveTo(X(lo),Y(lo));g.lineTo(X(hi),Y(hi));g.stroke();g.setLineDash([]);
+  }
+  for(const p of points){
+    g.fillStyle=p[2]?'rgba(61,220,151,0.48)':'rgba(255,92,122,0.48)';
+    g.beginPath();g.arc(X(p[0]),Y(p[1]),2,0,6.283);g.fill();
+  }
+  g.fillStyle=C('--dim');g.font='11px system-ui';g.textAlign='center';
+  g.fillText(xLabel,M.l+pw/2,h-11);
+  g.save();g.translate(15,M.t+ph/2);g.rotate(-Math.PI/2);g.fillText(yLabel,0,0);g.restore();
+}
+
+(function(){
+  const success=TRI.filter(r=>r.success===1&&Number.isFinite(r.err_init)&&Number.isFinite(r.err_final));
+  const attempts=TRI.length;
+  const successRate=100*success.length/Math.max(attempts,1);
+  const improveRate=100*success.filter(r=>r.improved===1).length/Math.max(success.length,1);
+  const medianInit=quantile(success.map(r=>r.err_init),0.5);
+  const medianFinal=quantile(success.map(r=>r.err_final),0.5);
+  const medianTime=quantile(TRI.map(r=>r.time_us),0.5);
+  const p95Time=quantile(TRI.map(r=>r.time_us),0.95);
+  const cards=[
+    ['尝试成功率',fmt(successRate,1)+'%',`${success.length}/${attempts} 次尝试`,successRate>70?'good':'warn'],
+    ['初始化误差中位数',fmt(medianInit,4)+' m',`P90 ${fmt(quantile(success.map(r=>r.err_init),0.9),4)} m`,medianInit<0.2?'good':'warn'],
+    ['最终误差中位数',fmt(medianFinal,4)+' m',`改善率 ${fmt(improveRate,1)}%`,medianFinal<=medianInit?'good':'bad'],
+    ['单次三角化耗时',fmt(medianTime,1)+' μs',`P95 ${fmt(p95Time,1)} μs`,''],
+  ];
+  document.getElementById('triKpis').innerHTML=cards.map(c=>
+    `<div class="kpi"><div class="k">${c[0]}</div><div class="v ${c[3]}">${c[1]}</div>`+
+    `<div class="n">${c[2]}</div></div>`).join('');
+
+  triangulationScatter('ctriImprove',success,'err_init','err_final',
+    '初始化误差 (m)','最终误差 (m)',{logX:true,logY:true,diagonal:true});
+  triangulationScatter('ctriParallax',success,'parallax_deg','err_init',
+    '最大视差 (deg)','初始化误差 (m)',{logY:true});
+
+  // 同一仿真特征可能离开滑窗后重新成为新 track；俯视图每个 ID 只保留最后一次。
+  const latestById=new Map(); for(const r of success) latestById.set(r.id,r);
+  const cloud=[...latestById.values()];
+  const cv=document.getElementById('ctriXY'); const {g,w,h}=setupHiDPI(cv);
+  if(cloud.length){
+    const M={l:58,r:18,t:18,b:40};
+    const xs=cloud.flatMap(r=>[r.x_gt,r.x_init,r.x_final]);
+    const ys=cloud.flatMap(r=>[r.y_gt,r.y_init,r.y_final]);
+    let x0=Math.min(...xs),x1=Math.max(...xs),y0=Math.min(...ys),y1=Math.max(...ys);
+    const span=Math.max(x1-x0,y1-y0,1),pad=span*0.06;
+    x0-=pad;x1+=pad;y0-=pad;y1+=pad;
+    const scale=Math.min((w-M.l-M.r)/(x1-x0),(h-M.t-M.b)/(y1-y0));
+    const ox=M.l+(w-M.l-M.r-(x1-x0)*scale)/2;
+    const oy=M.t+(h-M.t-M.b-(y1-y0)*scale)/2;
+    const X=x=>ox+(x-x0)*scale, Y=y=>oy+(y1-y)*scale;
+    g.strokeStyle=C('--grid');g.fillStyle=C('--dim');g.font='11px system-ui';
+    for(let i=0;i<=5;i++){
+      const x=x0+(x1-x0)*i/5,y=y0+(y1-y0)*i/5;
+      g.beginPath();g.moveTo(X(x),Y(y0));g.lineTo(X(x),Y(y1));g.stroke();
+      g.beginPath();g.moveTo(X(x0),Y(y));g.lineTo(X(x1),Y(y));g.stroke();
+      g.textAlign='center';g.textBaseline='top';g.fillText(fmt(x,1),X(x),Y(y0)+7);
+      g.textAlign='right';g.textBaseline='middle';g.fillText(fmt(y,1),X(x0)-7,Y(y));
+    }
+    g.strokeStyle='rgba(255,180,84,0.16)';g.lineWidth=.7;
+    for(const r of cloud){g.beginPath();g.moveTo(X(r.x_init),Y(r.y_init));g.lineTo(X(r.x_final),Y(r.y_final));g.stroke();}
+    const points=(xk,yk,color,radius)=>{g.fillStyle=color;for(const r of cloud){g.beginPath();g.arc(X(r[xk]),Y(r[yk]),radius,0,6.283);g.fill();}};
+    points('x_gt','y_gt','rgba(139,147,167,0.65)',1.8);
+    points('x_init','y_init','rgba(255,180,84,0.48)',1.6);
+    points('x_final','y_final','rgba(61,220,151,0.55)',1.6);
+    g.fillStyle=C('--dim');g.textAlign='center';g.fillText('X (m)',w/2,h-10);
+    g.save();g.translate(14,h/2);g.rotate(-Math.PI/2);g.fillText('Y (m)',0,0);g.restore();
+    const legend=[['真值','#8b93a7'],['三角化初值','#ffb454'],['最终修正','#3ddc97']];
+    let lx=w-255;g.font='11px system-ui';g.textAlign='left';g.textBaseline='middle';
+    for(const [name,color] of legend){g.fillStyle=color;g.fillRect(lx,9,12,3);g.fillStyle=C('--dim');g.fillText(name,lx+17,11);lx+=78;}
+  }
+
+  const statusNames={
+    success:'成功',insufficient_views:'有效观测不足',low_parallax:'视差不足',
+    ill_conditioned:'几何/数值病态',negative_depth:'负深度',
+    high_reprojection_error:'重投影误差过大',excessive_uncertainty:'位置不确定度过大'
+  };
+  const counts={}; for(const r of TRI) counts[r.status]=(counts[r.status]||0)+1;
+  const ordered=Object.entries(counts).sort((a,b)=>b[1]-a[1]);
+  let table='<table><tr><th>状态</th><th>次数</th><th>占全部尝试</th></tr>';
+  for(const [status,count] of ordered){
+    table+=`<tr><td>${statusNames[status]||status}</td><td>${count}</td>`+
+      `<td>${fmt(100*count/Math.max(attempts,1),1)}%</td></tr>`;
+  }
+  document.getElementById('triStatus').innerHTML=table+'</table>';
+
+  if(!success.length){
+    document.getElementById('triNotes').innerHTML=
+      '<div class="note bad">没有成功三角化的特征点，请先检查视差门限、相机位姿和坐标系约定。</div>';
+    return;
+  }
+  const coverage=100*success.filter(r=>r.err_init<=3*r.sigma_init).length/success.length;
+  const neesMean=mean(success.map(r=>r.nees_init/3));
+  const totalMs=TRI.reduce((s,r)=>s+(Number.isFinite(r.time_us)?r.time_us:0),0)/1000;
+  const medianCorrection=quantile(success.map(r=>r.correction),0.5);
+  const medianParallax=quantile(success.map(r=>r.parallax_deg),0.5);
+  const medianReprojection=quantile(success.map(r=>r.reproj_rmse),0.5);
+  const neesConclusion=neesMean>2?'偏大，初始协方差在部分方向过度自信':
+                       (neesMean<0.5?'偏小，初始协方差明显保守':'与理论期望量级一致');
+  document.getElementById('triNotes').innerHTML=
+    `<div class="note ${neesMean>2?'bad':(neesMean>=0.5?'ok':'')}"><b>初始协方差一致性：</b>`+
+    `平均 NEES/3=${fmt(neesMean,3)}（理论期望约 1），${neesConclusion}；${fmt(coverage,1)}% 的初始化误差位于 `+
+    `3√trace(P_l) 内。该协方差考虑归一化像平面噪声、clone 相对位姿协方差和锚点绝对位姿传播；`+
+    `为了性能没有构造全部重投影残差及 landmark-state 交叉块，因此仍是工程近似。</div>`+
+    `<div class="note"><b>几何与修正：</b>成功点最大视差中位数 ${fmt(medianParallax,2)}°，`+
+    `重投影 RMSE 中位数 ${fmt(medianReprojection,5)}，后续位置修正量中位数 ${fmt(medianCorrection,4)} m；`+
+    `全部 ${attempts} 次尝试累计耗时 ${fmt(totalMs,2)} ms。</div>`;
+})();
+
+// ================= 5. NEES / NIS / 误差 vs 协方差 =================
 (function(){
   const t0=T[0].t, t1=T[T.length-1].t;
   const expected=[[t0,1],[t1,1]];

@@ -9,6 +9,8 @@ namespace slam {
         Landmark *pt {nullptr};
         if (auto it = lmk_map.find(id); it == lmk_map.end()) {
             pt = pool_lmk.allocate();
+            pt->id = id;
+            pt->map = this;
             lmk_map.emplace(id, pt);
         }
         return pt;

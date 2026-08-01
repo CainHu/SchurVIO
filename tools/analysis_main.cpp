@@ -57,6 +57,20 @@ std::string joinPath(const std::string &dir, const std::string &name) {
     return dir + "/" + name;
 }
 
+const char *triangulationStatusName(const slam::SchurVINS::TriangulationStatus status) {
+    using Status = slam::SchurVINS::TriangulationStatus;
+    switch (status) {
+        case Status::Success: return "success";
+        case Status::InsufficientViews: return "insufficient_views";
+        case Status::LowParallax: return "low_parallax";
+        case Status::IllConditioned: return "ill_conditioned";
+        case Status::NegativeDepth: return "negative_depth";
+        case Status::HighReprojectionError: return "high_reprojection_error";
+        case Status::ExcessiveUncertainty: return "excessive_uncertainty";
+    }
+    return "unknown";
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -249,6 +263,50 @@ int main(int argc, char **argv) {
                     n_total ? 100.0 * (double)n_improve / (double)n_total : 0.0);
     }
 
+    // ---- 写 triangulation CSV：初始化质量、失败原因、后续修正与真值对比 ----
+    {
+        const auto path = joinPath(out_dir, "triangulation_" + tag + ".csv");
+        FILE *f = std::fopen(path.c_str(), "w");
+        if (!f) { std::fprintf(stderr, "cannot open %s\n", path.c_str()); return 1; }
+        std::fprintf(f,
+            "t,id,status,success,n_obs,parallax_deg,condition,reproj_rmse,time_us,"
+            "x_init,y_init,z_init,x_final,y_final,z_final,x_gt,y_gt,z_gt,"
+            "sigma_init,nees_init,err_init,err_final,correction,refinements,improved\n");
+
+        size_t success_count = 0;
+        for (const auto &log : ekf.triangulation_logs_) {
+            const bool success = log.status == slam::SchurVINS::TriangulationStatus::Success;
+            const double nan = std::numeric_limits<double>::quiet_NaN();
+            const double sigma_init = success && log.initial_cov_trace >= 0
+                                      ? std::sqrt(log.initial_cov_trace) : nan;
+            const double err_init = success && log.has_ground_truth
+                                    ? (log.initial_position - log.ground_truth).norm() : nan;
+            const double err_final = success && log.has_ground_truth
+                                     ? (log.latest_position - log.ground_truth).norm() : nan;
+            const double correction = success
+                                      ? (log.latest_position - log.initial_position).norm() : nan;
+            const int improved = success && log.has_ground_truth && err_final < err_init ? 1 : 0;
+            success_count += success ? 1 : 0;
+
+            std::fprintf(f,
+                "%.6f,%zu,%s,%d,%zu,%.6e,%.6e,%.6e,%.3f,"
+                "%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,"
+                "%.6e,%.6e,%.6e,%.6e,%.6e,%zu,%d\n",
+                static_cast<double>(log.timestamp - t0) * 1e-6,
+                static_cast<size_t>(log.id), triangulationStatusName(log.status), success ? 1 : 0,
+                log.observation_count, log.max_parallax_deg, log.condition_number,
+                log.reprojection_rmse, log.elapsed_us,
+                log.initial_position.x(), log.initial_position.y(), log.initial_position.z(),
+                log.latest_position.x(), log.latest_position.y(), log.latest_position.z(),
+                log.ground_truth.x(), log.ground_truth.y(), log.ground_truth.z(),
+                sigma_init, log.initial_nees, err_init, err_final, correction,
+                log.refinement_count, improved);
+        }
+        std::fclose(f);
+        std::printf("wrote %s (%zu attempts, %zu successes)\n",
+                    path.c_str(), ekf.triangulation_logs_.size(), success_count);
+    }
+
     // ---- 写 landmark 真值(只写一次) ----
     if (tag == "base") {
         const auto path = joinPath(out_dir, "lmk.csv");
@@ -295,12 +353,14 @@ int main(int argc, char **argv) {
         const double rmse_a = std::sqrt(sa / n);
 
         const auto path = joinPath(out_dir, "summary.csv");
-        const bool exists = [&] {
+        const bool reset_summary = tag == "base";
+        const bool exists = !reset_summary && [&] {
             FILE *t = std::fopen(path.c_str(), "r");
             if (t) { std::fclose(t); return true; }
             return false;
         }();
-        FILE *f = std::fopen(path.c_str(), "a");
+        // base 是一组新实验的起点：先清掉旧算法留下的扫描结果，避免报告混用数据。
+        FILE *f = std::fopen(path.c_str(), reset_summary ? "w" : "a");
         if (f) {
             if (!exists) std::fprintf(f, "tag,uv_var,proc_scale,rmse_p,rmse_v,rmse_att,max_err_p,t_cost,updates\n");
             std::fprintf(f, "%s,%.1f,%.4f,%.6f,%.6f,%.6f,%.6f,%.3f,%zu\n",

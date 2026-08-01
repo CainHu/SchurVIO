@@ -20,7 +20,12 @@ bool Landmark::delete_frame(FrameID frame_id) {
         return true;
     }
 
-    // TODO: update anchor_obs
+    // 原锚点帧被移出滑窗后，不能继续保留指向对象池中已释放 Observation 的悬空指针。
+    if (anchor_obs && anchor_obs->fet && anchor_obs->fet->frame &&
+        anchor_obs->fet->frame->id == frame_id) {
+        const auto first_feature = frm2fet.begin()->second;
+        anchor_obs = first_feature ? first_feature->obs[0] : nullptr;
+    }
 
     return true;
 }

@@ -65,6 +65,35 @@ namespace slam {
     class SchurVINS {
     public:
         EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
+
+        enum class TriangulationStatus : uint8_t {
+            Success = 0,
+            InsufficientViews,
+            LowParallax,
+            IllConditioned,
+            NegativeDepth,
+            HighReprojectionError,
+            ExcessiveUncertainty
+        };
+
+        struct TriangulationLog {
+            Tus timestamp{};
+            LandmarkID id{};
+            TriangulationStatus status{TriangulationStatus::InsufficientViews};
+            size_t observation_count{};
+            TYPE max_parallax_deg{};
+            TYPE condition_number{};
+            TYPE reprojection_rmse{};
+            TYPE elapsed_us{};
+            Vec3 initial_position{Vec3::Zero()};
+            Vec3 latest_position{Vec3::Zero()};
+            Vec3 ground_truth{Vec3::Zero()};
+            TYPE initial_cov_trace{};
+            TYPE initial_nees{};
+            size_t refinement_count{};
+            bool has_ground_truth{};
+        };
+
         explicit SchurVINS(slam::Map &map);
 
         // 处理IMU数据(预测步骤)
@@ -89,6 +118,24 @@ namespace slam {
         void updateVisual(const CameraData &cam_data, const std::unordered_map<size_t, Vec3> &lmk_map, double dt);
 
         void updateState(auto &&dx);
+
+        struct TriangulationResult {
+            TriangulationStatus status{TriangulationStatus::InsufficientViews};
+            Vec3 position{Vec3::Zero()};
+            Mat3_3 covariance{Mat3_3::Identity()};
+            size_t observation_count{};
+            TYPE max_parallax_deg{};
+            TYPE condition_number{};
+            TYPE reprojection_rmse{};
+            TYPE elapsed_us{};
+        };
+
+        [[nodiscard]] TriangulationResult triangulateLandmark(const Landmark &landmark) const;
+        void logTriangulationAttempt(Landmark &landmark,
+                                     const TriangulationResult &result,
+                                     Tus timestamp,
+                                     const std::unordered_map<size_t, Vec3> &ground_truth);
+        void recordLandmarkRefinement(const Landmark &landmark);
 
 //    private:
     public:
@@ -125,6 +172,13 @@ namespace slam {
         TYPE proc_noise_scale_ = TYPE(1);
         constexpr static TYPE lmk_var = TYPE(0.01);
 
+        // 三角化使用归一化像平面噪声；仿真中约为 1 pixel / fx = 0.0054。
+        // 它与历史视觉后验中的 uv_var（聚合伪量测噪声）含义不同，不能直接复用 400。
+        TYPE triangulation_uv_std = TYPE(0.0054);
+        TYPE triangulation_min_parallax_deg = TYPE(5.0);
+        TYPE triangulation_max_reprojection_rmse = TYPE(0.03);
+        TYPE triangulation_max_position_std = TYPE(50);
+
         // ---- 数据采集(用于可视化/分析，见 tools/) ----
         struct UpdateLog {
             Tus timestamp;
@@ -145,6 +199,7 @@ namespace slam {
             bool is_keyframe;
         };
         std::vector<UpdateLog> logs_;
+        std::vector<TriangulationLog> triangulation_logs_;
         bool enable_logging_ = false;
 
         Eigen::VectorXd Rll_;

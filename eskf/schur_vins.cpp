@@ -7,7 +7,9 @@
 #include <Eigen/SparseCore>
 #include <Eigen/SparseQR>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <limits>
 
 using namespace slam;
 
@@ -25,6 +27,322 @@ SchurVINS::SchurVINS(slam::Map &map) : map_(map) {
     Rll_.resize(COV_SIZE);
     Rll_.setOnes();
     Rll_ *= uv_var;
+}
+
+SchurVINS::TriangulationResult
+SchurVINS::triangulateLandmark(const Landmark &landmark) const {
+    const auto started = std::chrono::steady_clock::now();
+    TriangulationResult result;
+
+    auto finish = [&](const TriangulationStatus status) {
+        result.status = status;
+        result.elapsed_us = static_cast<TYPE>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - started).count()) * TYPE(1e-3);
+        return result;
+    };
+
+    struct View {
+        EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
+        const Frame *frame{};
+        Vec2 measurement{Vec2::Zero()};
+        Vec3 camera_center{Vec3::Zero()};
+        Vec3 bearing_world{Vec3::Zero()};
+        Mat3_3 Rwc{Mat3_3::Identity()};
+        Mat6_6 relative_pose_covariance{Mat6_6::Zero()};
+    };
+
+    std::vector<View, Eigen::aligned_allocator<View>> views;
+    views.reserve(landmark.frm2fet.size());
+    const Mat3_3 Ric = ext_.q_ic.toRotationMatrix();
+
+    for (const auto &[frame_id, feature] : landmark.frm2fet) {
+        (void)frame_id;
+        if (!feature || !feature->frame || !feature->obs[0]) {
+            continue;
+        }
+        const auto *frame = feature->frame;
+        const Vec3 bearing_camera = feature->obs[0]->un_pt.normalized();
+        if (!bearing_camera.allFinite() || bearing_camera.z() <= TYPE(0)) {
+            continue;
+        }
+
+        View view;
+        view.frame = frame;
+        view.measurement = feature->obs[0]->un_pt.head<2>();
+        const Mat3_3 Rwi = frame->q().toRotationMatrix();
+        view.Rwc.noalias() = Rwi * Ric;
+        view.camera_center.noalias() = frame->p() + Rwi * ext_.t_ic;
+        view.bearing_world.noalias() = view.Rwc * bearing_camera;
+        view.bearing_world.normalize();
+        views.emplace_back(view);
+    }
+
+    result.observation_count = views.size();
+    if (views.size() < 2) {
+        return finish(TriangulationStatus::InsufficientViews);
+    }
+
+    // 三角化由相机之间的相对运动提供约束。直接使用每帧绝对边缘协方差会把全局
+    // 平移/旋转等共同不确定度重复计入；利用 clone 间交叉块构造相对协方差，
+    // P(δx_i-δx_a)=P_ii+P_aa-P_ia-P_ai，可抵消共同模态。
+    const size_t anchor_index = INSState::SIZE +
+                                AugState::SIZE * views.front().frame->ordering;
+    const Mat6_6 anchor_covariance = cov_.block<6, 6>(anchor_index, anchor_index);
+    for (auto &view : views) {
+        const size_t pose_index = INSState::SIZE +
+                                  AugState::SIZE * view.frame->ordering;
+        view.relative_pose_covariance =
+            cov_.block<6, 6>(pose_index, pose_index) + anchor_covariance
+            - cov_.block<6, 6>(pose_index, anchor_index)
+            - cov_.block<6, 6>(anchor_index, pose_index);
+        view.relative_pose_covariance = TYPE(0.5) *
+            (view.relative_pose_covariance + view.relative_pose_covariance.transpose());
+    }
+
+    TYPE max_parallax = TYPE(0);
+    for (size_t i = 0; i + 1 < views.size(); ++i) {
+        for (size_t j = i + 1; j < views.size(); ++j) {
+            const TYPE cosine = std::clamp(
+                views[i].bearing_world.dot(views[j].bearing_world), TYPE(-1), TYPE(1));
+            max_parallax = std::max(max_parallax, std::acos(cosine));
+        }
+    }
+    result.max_parallax_deg = max_parallax * TYPE(180) / std::numbers::pi_v<TYPE>;
+    if (result.max_parallax_deg < triangulation_min_parallax_deg) {
+        return finish(TriangulationStatus::LowParallax);
+    }
+
+    // 射线最小二乘初始化：sum(I-dd^T) * Pw = sum((I-dd^T) * Cw)。
+    Mat3_3 ray_hessian = Mat3_3::Zero();
+    Vec3 ray_gradient = Vec3::Zero();
+    for (const auto &view : views) {
+        const Mat3_3 normal_projector =
+            Mat3_3::Identity() - view.bearing_world * view.bearing_world.transpose();
+        ray_hessian.noalias() += normal_projector;
+        ray_gradient.noalias() += normal_projector * view.camera_center;
+    }
+    ray_hessian = TYPE(0.5) * (ray_hessian + ray_hessian.transpose());
+
+    Eigen::SelfAdjointEigenSolver<Mat3_3> ray_es(ray_hessian);
+    if (ray_es.info() != Eigen::Success || !ray_es.eigenvalues().allFinite()) {
+        return finish(TriangulationStatus::IllConditioned);
+    }
+    const TYPE ray_min = ray_es.eigenvalues().minCoeff();
+    const TYPE ray_max = ray_es.eigenvalues().maxCoeff();
+    if (!(ray_max > TYPE(0)) || ray_min <= ray_max * TYPE(1e-8)) {
+        return finish(TriangulationStatus::IllConditioned);
+    }
+    result.condition_number = ray_max / ray_min;
+    Vec3 position = ray_es.eigenvectors()
+                  * ray_es.eigenvalues().cwiseInverse().asDiagonal()
+                  * ray_es.eigenvectors().transpose() * ray_gradient;
+    if (!position.allFinite()) {
+        return finish(TriangulationStatus::IllConditioned);
+    }
+
+    const TYPE image_variance = std::max(
+        triangulation_uv_std * triangulation_uv_std, TYPE(1e-12));
+
+    // 构造带相对位姿不确定度的重投影信息。不构造所有 clone 的稠密联合残差
+    // 协方差，以控制每个 landmark 的初始化开销；所得是相对锚点条件下的工程近似。
+    auto accumulateReprojection = [&](const Vec3 &point,
+                                      Mat3_3 &information,
+                                      Vec3 &gradient,
+                                      TYPE &squared_error,
+                                      TYPE &normalized_error) {
+        information.setZero();
+        gradient.setZero();
+        squared_error = TYPE(0);
+        normalized_error = TYPE(0);
+
+        for (const auto &view : views) {
+            const Vec3 d_camera = view.Rwc.transpose() * (point - view.camera_center);
+            if (!d_camera.allFinite() || d_camera.z() <= TYPE(0.05)) {
+                return false;
+            }
+
+            const TYPE inv_depth = TYPE(1) / d_camera.z();
+            const TYPE inv_depth2 = inv_depth * inv_depth;
+            const Vec2 estimate = d_camera.head<2>() * inv_depth;
+            const Vec2 residual = view.measurement - estimate;
+            if (!residual.allFinite()) {
+                return false;
+            }
+
+            Mat2_3 J_projection;
+            J_projection << inv_depth, TYPE(0), -d_camera.x() * inv_depth2,
+                            TYPE(0), inv_depth, -d_camera.y() * inv_depth2;
+            const Mat2_3 J_landmark = J_projection * view.Rwc.transpose();
+
+            const Vec3 d_world = point - view.frame->p();
+            Mat2_6 J_pose;
+            J_pose.leftCols<3>().noalias() = J_landmark * hat(d_world);
+            J_pose.rightCols<3>().noalias() = -J_landmark;
+
+            Mat2_2 residual_covariance =
+                J_pose * view.relative_pose_covariance * J_pose.transpose();
+            residual_covariance = TYPE(0.5) *
+                                  (residual_covariance + residual_covariance.transpose());
+            residual_covariance.diagonal().array() += image_variance;
+            if (!residual_covariance.allFinite()) {
+                return false;
+            }
+
+            // 防止协方差仅因浮点舍入出现极小负特征值；真实的大负值会在后续条件检查失败。
+            const TYPE trace = residual_covariance.trace();
+            const TYPE discriminant = std::sqrt(std::max(
+                TYPE(0),
+                (residual_covariance(0, 0) - residual_covariance(1, 1)) *
+                (residual_covariance(0, 0) - residual_covariance(1, 1)) +
+                TYPE(4) * residual_covariance(0, 1) * residual_covariance(0, 1)));
+            const TYPE min_eigenvalue = TYPE(0.5) * (trace - discriminant);
+            if (min_eigenvalue < image_variance * TYPE(0.1)) {
+                residual_covariance.diagonal().array() +=
+                    image_variance * TYPE(0.1) - min_eigenvalue;
+            }
+
+            const TYPE determinant = residual_covariance.determinant();
+            if (!(determinant > image_variance * image_variance * TYPE(1e-6)) ||
+                !std::isfinite(determinant)) {
+                return false;
+            }
+            const Mat2_2 weight_matrix = residual_covariance.inverse();
+            const TYPE mahalanobis2 = std::max(TYPE(0), residual.dot(weight_matrix * residual));
+            const TYPE mahalanobis = std::sqrt(mahalanobis2);
+            const TYPE huber_weight = mahalanobis > TYPE(3) ? TYPE(3) / mahalanobis : TYPE(1);
+
+            information.noalias() +=
+                J_landmark.transpose() * (huber_weight * weight_matrix) * J_landmark;
+            gradient.noalias() +=
+                J_landmark.transpose() * (huber_weight * weight_matrix) * residual;
+            squared_error += residual.squaredNorm();
+            normalized_error += mahalanobis2;
+        }
+        information = TYPE(0.5) * (information + information.transpose());
+        return information.allFinite() && gradient.allFinite();
+    };
+
+    Mat3_3 information;
+    Vec3 gradient;
+    TYPE squared_error = TYPE(0);
+    TYPE normalized_error = TYPE(0);
+    for (size_t iteration = 0; iteration < 5; ++iteration) {
+        if (!accumulateReprojection(position, information, gradient,
+                                    squared_error, normalized_error)) {
+            return finish(TriangulationStatus::NegativeDepth);
+        }
+        Eigen::LDLT<Mat3_3> ldlt(information);
+        if (ldlt.info() != Eigen::Success ||
+            ldlt.vectorD().minCoeff() <= ldlt.vectorD().maxCoeff() * TYPE(1e-10)) {
+            return finish(TriangulationStatus::IllConditioned);
+        }
+        const Vec3 increment = ldlt.solve(gradient);
+        if (!increment.allFinite() || increment.norm() > TYPE(100)) {
+            return finish(TriangulationStatus::IllConditioned);
+        }
+        position += increment;
+        if (increment.norm() < TYPE(1e-6)) {
+            break;
+        }
+    }
+
+    if (!accumulateReprojection(position, information, gradient,
+                                squared_error, normalized_error)) {
+        return finish(TriangulationStatus::NegativeDepth);
+    }
+    result.reprojection_rmse = std::sqrt(
+        squared_error / static_cast<TYPE>(TYPE(2) * views.size()));
+    if (result.reprojection_rmse > triangulation_max_reprojection_rmse) {
+        return finish(TriangulationStatus::HighReprojectionError);
+    }
+
+    Eigen::SelfAdjointEigenSolver<Mat3_3> information_es(information);
+    if (information_es.info() != Eigen::Success ||
+        !information_es.eigenvalues().allFinite()) {
+        return finish(TriangulationStatus::IllConditioned);
+    }
+    const TYPE information_min = information_es.eigenvalues().minCoeff();
+    const TYPE information_max = information_es.eigenvalues().maxCoeff();
+    if (!(information_min > TYPE(0)) || information_min <= information_max * TYPE(1e-12)) {
+        return finish(TriangulationStatus::IllConditioned);
+    }
+    result.condition_number = information_max / information_min;
+
+    const TYPE degrees_of_freedom = std::max<TYPE>(
+        TYPE(1), TYPE(2) * static_cast<TYPE>(views.size()) - TYPE(3));
+    const TYPE covariance_scale = std::max(TYPE(1), normalized_error / degrees_of_freedom);
+    Vec3 covariance_eigenvalues =
+        covariance_scale * information_es.eigenvalues().cwiseInverse();
+    covariance_eigenvalues = covariance_eigenvalues.cwiseMax(TYPE(1e-10));
+    if (std::sqrt(covariance_eigenvalues.maxCoeff()) > triangulation_max_position_std) {
+        return finish(TriangulationStatus::ExcessiveUncertainty);
+    }
+
+    result.position = position;
+    const Mat3_3 conditional_covariance = information_es.eigenvectors()
+                                          * covariance_eigenvalues.asDiagonal()
+                                          * information_es.eigenvectors().transpose();
+
+    // position 存在世界坐标系中，因此在相对锚点条件协方差之外，还要传播锚点本身的
+    // 绝对位姿不确定度。质量门限在上面只检查 conditional_covariance，避免全局 gauge
+    // 不确定度把几何上可靠的点拒绝掉。
+    Mat3_6 J_anchor_world;
+    J_anchor_world.leftCols<3>() = -hat(position - views.front().frame->p());
+    J_anchor_world.rightCols<3>().setIdentity();
+    result.covariance = conditional_covariance
+                      + J_anchor_world * anchor_covariance * J_anchor_world.transpose();
+    result.covariance = TYPE(0.5) * (result.covariance + result.covariance.transpose());
+    return finish(TriangulationStatus::Success);
+}
+
+void SchurVINS::logTriangulationAttempt(
+        Landmark &landmark,
+        const TriangulationResult &result,
+        const Tus timestamp,
+        const std::unordered_map<size_t, Vec3> &ground_truth) {
+    if (!enable_logging_) {
+        return;
+    }
+
+    TriangulationLog log;
+    log.timestamp = timestamp;
+    log.id = landmark.id;
+    log.status = result.status;
+    log.observation_count = result.observation_count;
+    log.max_parallax_deg = result.max_parallax_deg;
+    log.condition_number = result.condition_number;
+    log.reprojection_rmse = result.reprojection_rmse;
+    log.elapsed_us = result.elapsed_us;
+    if (result.status == TriangulationStatus::Success) {
+        log.initial_position = result.position;
+        log.latest_position = result.position;
+        log.initial_cov_trace = result.covariance.trace();
+    }
+    if (const auto gt = ground_truth.find(landmark.id); gt != ground_truth.end()) {
+        log.ground_truth = gt->second;
+        log.has_ground_truth = true;
+        if (result.status == TriangulationStatus::Success) {
+            const Vec3 error = result.position - gt->second;
+            Eigen::LDLT<Mat3_3> ldlt(result.covariance);
+            if (ldlt.info() == Eigen::Success && ldlt.vectorD().minCoeff() > TYPE(0)) {
+                log.initial_nees = std::max(TYPE(0), error.dot(ldlt.solve(error)));
+            }
+        }
+    }
+    triangulation_logs_.emplace_back(log);
+    if (result.status == TriangulationStatus::Success) {
+        landmark.triangulation_log_index = triangulation_logs_.size() - 1;
+    }
+}
+
+void SchurVINS::recordLandmarkRefinement(const Landmark &landmark) {
+    if (!enable_logging_ || landmark.triangulation_log_index >= triangulation_logs_.size()) {
+        return;
+    }
+    auto &log = triangulation_logs_[landmark.triangulation_log_index];
+    log.latest_position = landmark.position;
+    ++log.refinement_count;
 }
 
 void SchurVINS::processIMU(const slam::IMUData &imu_data) {
@@ -334,23 +652,6 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 //    }
 //    std::cout << std::endl;
 
-    // 处理 landmark
-//    std::vector<size_t> ids;
-//    ids.reserve(cam_data.measurements.size());
-//    for (const auto &it : cam_data.measurements) {
-//        const auto id = it.first;
-//        if (lmk_.find(id) == lmk_.end()) {
-//            // TODO: 通过三角化初始化出 landmark 的初始位置
-//            if (const auto &j = lmk_map.find(id); j != lmk_map.end()) {
-//                LmkState lmk_state;
-//                lmk_state.position = j->second;
-//                lmk_.emplace(id, lmk_state);
-//            }
-//        } else {
-//            ids.emplace_back(id);
-//        }
-//    }
-
 //#define ONE_SHOT
 
     size_t num_obs = 0;
@@ -366,14 +667,25 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         // 关键帧的观测数量
         size_t keyframe_obs = lmk->frm2fet.size();
 
-        // 至少需要2个关键帧观测才能进行滑窗优化
+        // 至少需要2个关键帧观测才能进行三角化和滑窗优化。
+        // 失败时等到关键帧观测数增加后再试，避免每个非关键帧都重复做相同计算。
         if (keyframe_obs > 1) {
-            ids.emplace_back(id, lmk);
-            num_obs += keyframe_obs;
-            // TODO: 三角化
-            if (!lmk->is_triangulated) {
-                lmk->position = lmk_map.at(id);
-                lmk->is_triangulated = true;
+            if (!lmk->is_triangulated &&
+                lmk->last_triangulation_obs_count < keyframe_obs) {
+                lmk->last_triangulation_obs_count = keyframe_obs;
+                const auto triangulation = triangulateLandmark(*lmk);
+                logTriangulationAttempt(*lmk, triangulation, cam_data.timestamp, lmk_map);
+                if (triangulation.status == TriangulationStatus::Success) {
+                    lmk->position = triangulation.position;
+                    lmk->cov_position = triangulation.covariance;
+                    lmk->is_triangulated = true;
+                }
+            }
+
+            // 三角化失败的点不进入 Schur/QR，防止无效深度污染后验。
+            if (lmk->is_triangulated) {
+                ids.emplace_back(id, lmk);
+                num_obs += keyframe_obs;
             }
         }
     }
@@ -611,6 +923,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             dx_l += K * e;
         }
         lmk->position += dx_l;
+        recordLandmarkRefinement(*lmk);
     }
 
     // 方案4（Zero-copy）：非关键帧的观测直接从 cam_data 读取来 refine landmark，
@@ -641,14 +954,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
                 continue;
             }
 
-            // TODO: 三角化
             if (!lmk->is_triangulated) {
-                if (auto gt_it = lmk_map.find(lmk_id); gt_it != lmk_map.end()) {
-                    lmk->position = gt_it->second;
-                    lmk->is_triangulated = true;
-                } else {
-                    continue;
-                }
+                continue;
             }
 
             // 计算残差和雅可比（观测 meas.second 直接取用，无中间结构）
@@ -686,6 +993,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
                 dx_l += K * e;
             }
             lmk->position += dx_l;
+            recordLandmarkRefinement(*lmk);
         }
     }
     auto t_refine_2 = clock();
@@ -1038,6 +1346,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         }
 
         lmk->position += dx_l;
+        recordLandmarkRefinement(*lmk);
     }
 //    std::cout << "Update Landmark Finished" << std::endl;
 
@@ -1127,6 +1436,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         VecX dx_l = KT.transpose() * el;
 
         lmk->position += dx_l;
+        recordLandmarkRefinement(*lmk);
 //        std::cout << "id = " << id << ", dx_l = " << dx_l.transpose() << std::endl;
     }
 #endif
