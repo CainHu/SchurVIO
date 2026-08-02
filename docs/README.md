@@ -27,6 +27,9 @@
 | [OPT_SCHUR_PATH.md](OPT_SCHUR_PATH.md) | Schur 路径 18.3 s → 11.9 s |
 | [OPT_LDLT.md](OPT_LDLT.md) | `Hpp` 分解改用 LDLT，11.9 s → 9.7 s |
 | [QR_VS_SCHUR.md](QR_VS_SCHUR.md) | 理论：为什么 QR 比 Schur 慢 5 倍；两条失败的优化尝试 |
+| [VISUAL_UPDATE_SCHEDULING.md](VISUAL_UPDATE_SCHEDULING.md) | Legacy / SchurVINS / MSCKF / VINS-Mono 调度、一次性观测生命周期与宏切换 |
+| [RDVIO_SCHEDULING.md](RDVIO_SCHEDULING.md) | RD-VIO 的 RR/NN/RN/NR、延迟三角化、无深度旋转因子、R 子窗压缩与严格结果 |
+| [LANDMARK_PARAMETERIZATION.md](LANDMARK_PARAMETERIZATION.md) | World/锚定 XYZ、3-DOF 逆深度与 log-depth 的完整雅可比和数值消融 |
 | [ANALYSIS_REPORT.md](ANALYSIS_REPORT.md) | **精度分析**：视觉后验的修正作用、噪声敏感度、协方差问题（配套 `out/report.html` 交互图表） |
 | [TRIANGULATION.md](TRIANGULATION.md) | 多视图三角化、失败门限、初始 landmark 协方差和真值离线评估 |
 | [SIMULATION_SCENARIOS.md](SIMULATION_SCENARIOS.md) | Circle-out / Circle-in / Helix-3D / Stop-go 场景与统一噪声模型 |
@@ -57,6 +60,7 @@
 | `ExtState::ESTIMATE_EXTRINSIC` | `common.h` | `false` | 是否估计相机-IMU 外参 |
 | `USE_LDLT_FOR_HPP` | `eskf/schur_vins.h` | `true` | `Hpp` 分解：`true`=LDLT，`false`=特征分解 |
 | `USE_LDLT_FOR_HLL` | `eskf/schur_vins.h` | `true` | `Hll` 分解，同上（性能上两者无差别） |
+| `SCHUR_VIO_VISUAL_SCHEDULER` | `CMakeLists.txt` / `eskf/visual_update_scheduler.h` | `MSCKF` | 视觉调度：Legacy、SchurVINS、MSCKF 或 VINS-Mono 风格 |
 
 `ESTIMATE_EXTRINSIC` 关闭时，外参雅可比 `J_ext` / `J_EXT` 的代码通过 `if constexpr`
 屏蔽——不参与运行，但始终参与语法和类型检查，不会腐烂。
@@ -100,3 +104,7 @@ eig+seq state    = ...
 eig+upd lmk      = ...
   of which: Hpp eig = ...
 ```
+
+## 修改归档
+
+- [2026-08-02：视觉后验调度、Landmark 参数化与代码拆分归档](CHANGE_ARCHIVE_2026-08-02.md)

@@ -36,7 +36,17 @@ std::string esc(const std::string &s) {
 
 extern const char *kReportTemplate;   // 在 report_template.h 里
 
-int main() {
+int main(int argc, char **argv) {
+    const std::string tag = argc > 1 ? argv[1] : "base";
+    const std::string output = argc > 2 ? argv[2] : "out/report.html";
+    std::string title;
+    if (argc > 3) title = argv[3];
+    else if (tag == "base") title = "SchurVIO 视觉后验分析报告";
+    else if (tag == "scheduler_msckf_report")
+        title = "MSCKF-Schur 视觉后验仿真报告";
+    else if (tag == "scheduler_rdvio_report")
+        title = "RD-VIO-Schur 调度仿真报告";
+    else title = "SchurVIO 对比报告 · " + tag;
     const std::vector<std::string> scenarios{
         "circle_out", "circle_in", "helix_3d", "stop_go"
     };
@@ -45,16 +55,18 @@ int main() {
     updates.reserve(scenarios.size());
     landmarks.reserve(scenarios.size());
     for (const auto &scenario : scenarios) {
-        trajectories.emplace_back(readFile("out/traj_" + scenario + "_base.csv"));
-        updates.emplace_back(readFile("out/update_" + scenario + "_base.csv"));
+        trajectories.emplace_back(readFile("out/traj_" + scenario + "_" + tag + ".csv"));
+        updates.emplace_back(readFile("out/update_" + scenario + "_" + tag + ".csv"));
         landmarks.emplace_back(readFile("out/lmk_" + scenario + ".csv"));
     }
-    const std::string tri = readFile("out/triangulation_circle_out_base.csv");
+    const std::string tri = readFile("out/triangulation_circle_out_" + tag + ".csv");
     const std::string sum  = readFile("out/summary.csv");
     const std::string ablation = readFile("out/ablation_summary.csv");
     const std::string observability = readFile("out/observability_summary.csv");
     const std::string landmark_consistency =
         readFile("out/landmark_consistency_summary.csv");
+    const std::string scheduler = readFile("out/scheduler_summary.csv");
+    const std::string parameterization = readFile("out/parameterization_summary.csv");
 
     if (trajectories.front().empty()) {
         std::fprintf(stderr,
@@ -62,14 +74,17 @@ int main() {
         return 1;
     }
 
-    FILE *f = std::fopen("out/report.html", "wb");
-    if (!f) { std::fprintf(stderr, "cannot write out/report.html\n"); return 1; }
+    FILE *f = std::fopen(output.c_str(), "wb");
+    if (!f) { std::fprintf(stderr, "cannot write %s\n", output.c_str()); return 1; }
 
     // 模板里用 %%DATA_XXX%% 占位
     std::string html = kReportTemplate;
     auto sub = [&](const std::string &key, const std::string &val) {
-        const auto p = html.find(key);
-        if (p != std::string::npos) html.replace(p, key.size(), val);
+        size_t position = 0;
+        while ((position = html.find(key, position)) != std::string::npos) {
+            html.replace(position, key.size(), val);
+            position += val.size();
+        }
     };
     for (size_t i = 0; i < scenarios.size(); ++i) {
         std::string key = scenarios[i];
@@ -83,9 +98,13 @@ int main() {
     sub("%%DATA_ABLATION%%", esc(ablation));
     sub("%%DATA_OBSERVABILITY%%", esc(observability));
     sub("%%DATA_LANDMARK_CONSISTENCY%%", esc(landmark_consistency));
+    sub("%%DATA_SCHEDULER%%", esc(scheduler));
+    sub("%%DATA_PARAMETERIZATION%%", esc(parameterization));
+    sub("%%REPORT_TAG%%", esc(tag));
+    sub("%%REPORT_TITLE%%", esc(title));
 
     std::fwrite(html.data(), 1, html.size(), f);
     std::fclose(f);
-    std::printf("wrote out/report.html (%zu KB)\n", html.size() / 1024);
+    std::printf("wrote %s (%zu KB)\n", output.c_str(), html.size() / 1024);
     return 0;
 }

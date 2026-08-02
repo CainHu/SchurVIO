@@ -14,7 +14,10 @@ class VIORepresentativeSimulator {
 public:
     enum class Trajectory {
         Helix3D,
-        StopGo
+        StopGo,
+        // Alternating pure-rotation and translating phases for exercising the
+        // RD-VIO RR/NN/RN/NR scheduler transitions.
+        RotationTranslation
     };
 
     explicit VIORepresentativeSimulator(Trajectory trajectory);

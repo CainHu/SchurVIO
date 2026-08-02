@@ -38,13 +38,24 @@ void VIORepresentativeSimulator::generateFeatures() {
             feature_positions_.emplace(
                 id, Eigen::Vector3d(r * std::cos(a), r * std::sin(a), 1.5 + z(feature_generator)));
         }
-    } else {
+    } else if (trajectory_ == Trajectory::StopGo) {
         std::uniform_real_distribution<double> x(-8.0, 8.0);
         std::uniform_real_distribution<double> y(-1.0, 12.0);
         std::uniform_real_distribution<double> z(-1.5, 4.5);
         for (size_t id = 0; id < feature_count_; ++id) {
             feature_positions_.emplace(id, Eigen::Vector3d(
                 x(feature_generator), y(feature_generator), z(feature_generator)));
+        }
+    } else {
+        std::uniform_real_distribution<double> theta(0.0, 2.0 * M_PI);
+        std::uniform_real_distribution<double> radius(5.0, 13.0);
+        std::uniform_real_distribution<double> height(-2.5, 3.5);
+        for (size_t id = 0; id < feature_count_; ++id) {
+            const double angle = theta(feature_generator);
+            const double r = radius(feature_generator);
+            feature_positions_.emplace(id, Eigen::Vector3d(
+                r * std::cos(angle), -4.0 + r * std::sin(angle),
+                1.5 + height(feature_generator)));
         }
     }
 }
@@ -100,7 +111,7 @@ std::vector<State> VIORepresentativeSimulator::generateGroundTruth() const {
                                        0.5 * omega * std::cos(0.5 * angle));
             const Eigen::Vector3d target(0.0, 0.0, 1.5 + 0.2 * std::sin(0.25 * angle));
             state.q = lookAt(state.p, target, 0.15 * std::sin(0.7 * angle));
-        } else {
+        } else if (trajectory_ == Trajectory::StopGo) {
             constexpr double period = 20.0;
             constexpr double move_time = 6.0;
             const double phase = std::fmod(t, period);
@@ -121,6 +132,37 @@ std::vector<State> VIORepresentativeSimulator::generateGroundTruth() const {
             state.v = Eigen::Vector3d(vx, 0.0, 0.0);
             state.q = lookAt(state.p, Eigen::Vector3d(0.0, 3.0, 1.5),
                              0.08 * std::sin(2.0 * M_PI * t / period));
+        } else {
+            constexpr double period = 20.0;
+            constexpr double rotation_time = 4.0;
+            constexpr double translation_time = 6.0;
+            const double phase = std::fmod(t, period);
+            double x = -4.0;
+            double vx = 0.0;
+            if (phase >= rotation_time &&
+                phase < rotation_time + translation_time) {
+                const double u = (phase - rotation_time) / translation_time;
+                x = -4.0 + 4.0 * (1.0 - std::cos(M_PI * u));
+                vx = 4.0 * M_PI / translation_time * std::sin(M_PI * u);
+            } else if (phase < 2.0 * rotation_time + translation_time) {
+                x = 4.0;
+            } else {
+                const double u = (phase - 2.0 * rotation_time - translation_time) /
+                                 translation_time;
+                x = 4.0 - 4.0 * (1.0 - std::cos(M_PI * u));
+                vx = -4.0 * M_PI / translation_time * std::sin(M_PI * u);
+            }
+            state.p = Eigen::Vector3d(x, -4.0, 1.5);
+            state.v = Eigen::Vector3d(vx, 0.0, 0.0);
+
+            // Orientation remains smooth across phase boundaries. During the
+            // stationary phases this creates genuine pure rotation; during the
+            // moving phases it creates coupled translation and rotation.
+            const double yaw = 0.28 * t;
+            const Eigen::Vector3d direction(
+                std::sin(yaw), std::cos(yaw), 0.10 * std::sin(0.37 * t));
+            state.q = lookAt(state.p, state.p + 8.0 * direction,
+                             0.06 * std::sin(0.21 * t));
         }
 
         state.ba += Eigen::Vector3d(ba_walk(bias_generator),

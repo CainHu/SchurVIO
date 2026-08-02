@@ -29,15 +29,28 @@ namespace slam {
             latest_idx = idx;
             frm_win[idx] = frame;
             free_idx.pop_back();
+            active_idx.push_back(idx);
 
             return true;
         }
 
-        KeyFrame *popFrame() {
-            // TODO: 加入选择策略
-            const auto idx = (latest_idx + 1) % win_size;
+        // Remove a frame by chronological index (0 = oldest).  The previous
+        // ring-only implementation could remove correctly only when all slots
+        // were occupied; scheduling policies with compact windows need removal
+        // to remain correct while most physical covariance slots are unused.
+        KeyFrame *popFrame(size_t chronological_index = 0) {
+            if (chronological_index >= active_idx.size()) {
+                throw std::out_of_range("sliding-window frame index out of range");
+            }
+            const auto active_it = active_idx.begin() +
+                                   static_cast<std::ptrdiff_t>(chronological_index);
+            const auto idx = *active_it;
+            active_idx.erase(active_it);
+            KeyFrame *frame = frm_win[idx];
+            frm_win[idx] = nullptr;
             free_idx.emplace_back(idx);
-            return frm_win[idx];
+            latest_idx = active_idx.empty() ? 0 : active_idx.back();
+            return frame;
         }
 
         [[nodiscard]] bool isFull() const { return free_idx.empty(); }
@@ -47,11 +60,17 @@ namespace slam {
         [[nodiscard]] size_t size() const { return frm_win.size() - free_idx.size(); }
         [[nodiscard]] bool empty() const { return free_idx.size() == frm_win.size(); }
 
-        KeyFrame * operator[](size_t i) { return frm_win.at(i); }
+        [[nodiscard]] size_t physicalIndex(size_t chronological_index) const {
+            return active_idx.at(chronological_index);
+        }
+
+        KeyFrame * operator[](size_t i) { return frm_win.at(active_idx.at(i)); }
+        const KeyFrame * operator[](size_t i) const { return frm_win.at(active_idx.at(i)); }
 
         size_t latest_idx{};
         size_t win_size;
         std::vector<KeyFrame *> frm_win;
         std::vector<size_t> free_idx;
+        std::deque<size_t> active_idx;
     };
 }

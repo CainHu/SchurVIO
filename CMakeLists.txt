@@ -3,6 +3,49 @@ project(VinsEKF)
 
 set(CMAKE_CXX_STANDARD 20)
 
+# Visual posterior scheduling policy. The corresponding public numeric macros
+# live in eskf/visual_update_scheduler.h; this cache string keeps command-line
+# builds readable while still producing a compile-time switch.
+set(SCHUR_VIO_VISUAL_SCHEDULER "MSCKF" CACHE STRING
+    "Visual scheduler: LEGACY, SCHURVINS, MSCKF, VINS_MONO, or RDVIO")
+set_property(CACHE SCHUR_VIO_VISUAL_SCHEDULER PROPERTY STRINGS
+             LEGACY SCHURVINS MSCKF VINS_MONO RDVIO)
+string(TOUPPER "${SCHUR_VIO_VISUAL_SCHEDULER}" SCHUR_VIO_VISUAL_SCHEDULER_UPPER)
+if(SCHUR_VIO_VISUAL_SCHEDULER_UPPER STREQUAL "LEGACY")
+    set(SCHUR_VIO_VISUAL_SCHEDULER_VALUE 0)
+elseif(SCHUR_VIO_VISUAL_SCHEDULER_UPPER STREQUAL "SCHURVINS")
+    set(SCHUR_VIO_VISUAL_SCHEDULER_VALUE 1)
+elseif(SCHUR_VIO_VISUAL_SCHEDULER_UPPER STREQUAL "MSCKF")
+    set(SCHUR_VIO_VISUAL_SCHEDULER_VALUE 2)
+elseif(SCHUR_VIO_VISUAL_SCHEDULER_UPPER STREQUAL "VINS_MONO")
+    set(SCHUR_VIO_VISUAL_SCHEDULER_VALUE 3)
+elseif(SCHUR_VIO_VISUAL_SCHEDULER_UPPER STREQUAL "RDVIO")
+    set(SCHUR_VIO_VISUAL_SCHEDULER_VALUE 4)
+else()
+    message(FATAL_ERROR "Unknown SCHUR_VIO_VISUAL_SCHEDULER=${SCHUR_VIO_VISUAL_SCHEDULER}")
+endif()
+
+# The map continues to store world XYZ. This option changes only the local
+# three-DOF landmark coordinates used while constructing the Schur system.
+set(SCHUR_VIO_LANDMARK_PARAMETERIZATION "WORLD_XYZ" CACHE STRING
+    "Landmark coordinates: WORLD_XYZ, ANCHORED_XYZ, ANCHORED_INV_DEPTH, or ANCHORED_LOG_DEPTH")
+set_property(CACHE SCHUR_VIO_LANDMARK_PARAMETERIZATION PROPERTY STRINGS
+             WORLD_XYZ ANCHORED_XYZ ANCHORED_INV_DEPTH ANCHORED_LOG_DEPTH)
+string(TOUPPER "${SCHUR_VIO_LANDMARK_PARAMETERIZATION}"
+       SCHUR_VIO_LANDMARK_PARAMETERIZATION_UPPER)
+if(SCHUR_VIO_LANDMARK_PARAMETERIZATION_UPPER STREQUAL "WORLD_XYZ")
+    set(SCHUR_VIO_LANDMARK_PARAMETERIZATION_VALUE 0)
+elseif(SCHUR_VIO_LANDMARK_PARAMETERIZATION_UPPER STREQUAL "ANCHORED_XYZ")
+    set(SCHUR_VIO_LANDMARK_PARAMETERIZATION_VALUE 1)
+elseif(SCHUR_VIO_LANDMARK_PARAMETERIZATION_UPPER STREQUAL "ANCHORED_INV_DEPTH")
+    set(SCHUR_VIO_LANDMARK_PARAMETERIZATION_VALUE 2)
+elseif(SCHUR_VIO_LANDMARK_PARAMETERIZATION_UPPER STREQUAL "ANCHORED_LOG_DEPTH")
+    set(SCHUR_VIO_LANDMARK_PARAMETERIZATION_VALUE 3)
+else()
+    message(FATAL_ERROR
+        "Unknown SCHUR_VIO_LANDMARK_PARAMETERIZATION=${SCHUR_VIO_LANDMARK_PARAMETERIZATION}")
+endif()
+
 if(MINGW)
     # 1. 允许汇编器生成大型目标文件（核心选项）
     # -Wa,传递选项给汇编器；-mbig-obj：突破默认.obj大小限制（默认约2GB）
@@ -59,8 +102,15 @@ add_executable(VinsEKF main.cpp
         data_structure/pool.h
         vio_frontend_simulator.cpp
         vio_frontend_simulator.h
+        eskf/landmark_parameterization.cpp
+        eskf/landmark_parameterization.h
+        eskf/rdvio_constraints.cpp
+        eskf/rdvio_constraints.h
+        eskf/rdvio_scheduler.cpp
+        eskf/rdvio_scheduler.h
         eskf/schur_vins.cpp
         eskf/schur_vins.h
+        eskf/visual_update_scheduler.h
         common.h
         vio_frontend_simulator1.cpp
         vio_frontend_simulator1.h
@@ -75,6 +125,9 @@ add_executable(VinsEKF main.cpp
 )
 
 target_include_directories(VinsEKF PUBLIC "E:/eigen-3.4.0/eigen-3.4.0")
+target_compile_definitions(VinsEKF PRIVATE
+        SCHUR_VIO_VISUAL_SCHEDULER=${SCHUR_VIO_VISUAL_SCHEDULER_VALUE}
+        SCHUR_VIO_LANDMARK_PARAMETERIZATION=${SCHUR_VIO_LANDMARK_PARAMETERIZATION_VALUE})
 
 # 分析工具: 导出 CSV 供 tools/report.html 可视化
 add_executable(VinsAnalysis tools/analysis_main.cpp
@@ -86,11 +139,17 @@ add_executable(VinsAnalysis tools/analysis_main.cpp
         vio_frontend_simulator.cpp
         vio_frontend_simulator1.cpp
         vio_representative_simulator.cpp
+        eskf/landmark_parameterization.cpp
+        eskf/rdvio_constraints.cpp
+        eskf/rdvio_scheduler.cpp
         eskf/schur_vins.cpp
         data_structure/sliding_window.cpp
         data_structure/observation.cpp
 )
 target_include_directories(VinsAnalysis PUBLIC "E:/eigen-3.4.0/eigen-3.4.0")
+target_compile_definitions(VinsAnalysis PRIVATE
+        SCHUR_VIO_VISUAL_SCHEDULER=${SCHUR_VIO_VISUAL_SCHEDULER_VALUE}
+        SCHUR_VIO_LANDMARK_PARAMETERIZATION=${SCHUR_VIO_LANDMARK_PARAMETERIZATION_VALUE})
 
 # 报告生成器: 把 out/*.csv 嵌进自包含的 HTML(无外部依赖)
 add_executable(VinsReport tools/make_report.cpp tools/report_template.cpp)

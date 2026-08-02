@@ -3,6 +3,8 @@
 //
 
 #include "schur_vins.h"
+#include "rdvio_constraints.h"
+#include "rdvio_scheduler.h"
 #include <Eigen/Eigenvalues>
 #include <Eigen/SparseCore>
 #include <Eigen/SparseQR>
@@ -85,9 +87,10 @@ SchurVINS::triangulateLandmark(const Landmark &landmark) const {
         return finish(TriangulationStatus::InsufficientViews);
     }
 
-    // frm2fet 是 unordered_map。排序可避免锚点和浮点累加顺序依赖哈希桶布局。
+    // Sort chronologically. Physical covariance slots are reused by compact
+    // schedulers and therefore are not a valid temporal ordering.
     std::sort(views.begin(), views.end(), [](const View &lhs, const View &rhs) {
-        return lhs.frame->ordering < rhs.frame->ordering;
+        return lhs.frame->timestamp < rhs.frame->timestamp;
     });
 
     // 两条世界系单位视线的夹角 theta_ij=acos(d_i^T d_j) 决定深度条件数。
@@ -623,14 +626,14 @@ void SchurVINS::predict(const slam::IMUData &imu_data, const double dt) {
 void SchurVINS::pushFrame(const CameraData &cam_data, bool is_keyframe) {
     using A = AugState;
 
-    if (!is_keyframe) {
-        // 非关键帧，不增广状态
+    if (!is_keyframe && !schedulerAugmentsEveryImage()) {
+        // Legacy mode keeps the original keyframe-only clone policy.
         return;
     }
 
-    // 关键帧：创建并加入滑窗
-//    std::cout << "Find Key Frame" << std::endl;
-    auto frm = map_.pushKeyFrame(cam_data.timestamp);
+    // Create either a persistent keyframe clone or a temporal clone according
+    // to the compile-time visual scheduler.
+    auto frm = map_.pushFrame(cam_data.timestamp, is_keyframe);
     frm->timestamp = state_.timestamp;
     frm->q() = state_.orientation;
     frm->p() = state_.position;
@@ -659,12 +662,12 @@ void SchurVINS::pushFrame(const CameraData &cam_data, bool is_keyframe) {
 //    std::cout << "Output" << std::endl;
 }
 
-void SchurVINS::popFrame() {
+void SchurVINS::popFrame(const size_t chronological_index) {
 //    // TODO: 加入选择策略
 //    const auto idx = (latest_free_sfw_idx_ + 1) % WIN_SIZE;
 //    free_sfw_idx_.emplace_back(idx);
 //    return sfw_[idx];
-    map_.popFrame();
+    map_.popFrame(chronological_index);
 }
 
 void SchurVINS::updateMap(const slam::CameraData &cam_data) {
@@ -672,114 +675,266 @@ void SchurVINS::updateMap(const slam::CameraData &cam_data) {
 }
 
 void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_map<size_t, Vec3> &lmk_map, const double dt) {
-    using I = INSState;
-    using A = AugState;
-
-    // 判断是否为关键帧
     bool is_keyframe = map_.isKeyFrame(cam_data);
+    bool is_rotation_frame = false;
+    TYPE rdvio_misalignment_deg = TYPE(180);
+    uint8_t rdvio_case = 0;
 
-//    if (is_keyframe) {
-//        std::cout << "Find Key Frame" << std::endl;
-//    } else {
-//        std::cout << "Not Key Frame" << std::endl;
-//    }
-
-    // 关键帧：加入滑窗并增广状态
-    // 非关键帧：Zero-copy，什么都不做，观测在后面直接从 cam_data 读取
-    if (is_keyframe) {
-        pushFrame(cam_data, true);
-        auto current_frame = map_.getWinLatestFrame();
-        // 添加关键帧的观测到map
+    if constexpr (visual_update_scheduler == VisualUpdateScheduler::RDVIO) {
+        const RDVIOParameters parameters{
+            rdvio_rotation_threshold_deg,
+            rdvio_min_common_tracks,
+            rdvio_subframe_size,
+            rdvio_rotation_compression_trigger,
+            schedulerRetainedCloneCount()};
+        const RDVIOFrameDecision decision = decideRDVIOFrame(
+            map_, cam_data, state_.orientation, ext_.q_ic,
+            is_keyframe, parameters);
+        is_keyframe = decision.is_keyframe;
+        is_rotation_frame = decision.is_rotation_frame;
+        rdvio_misalignment_deg = decision.misalignment_deg;
+        rdvio_case = static_cast<uint8_t>(decision.transition);
+        if (decision.promote_previous_to_keyframe && !map_.sfw.empty()) {
+            map_.sfw[map_.sfw.size() - 1]->is_key_frame = true;
+        }
+        if (decision.transition != RDVIOCase::None) {
+            ++n_rdvio_cases_[rdvio_case];
+        }
+        if (is_rotation_frame) {
+            ++n_rdvio_rotation_frames_;
+        } else {
+            ++n_rdvio_normal_frames_;
+        }
+    }
+    const bool store_current_frame = is_keyframe || schedulerAugmentsEveryImage();
+    Frame *current_frame = nullptr;
+    if (store_current_frame) {
+        pushFrame(cam_data, is_keyframe);
+        current_frame = map_.getWinLatestFrame();
+        current_frame->is_rotation_frame = is_rotation_frame;
+        current_frame->rdvio_case = rdvio_case;
+        current_frame->rdvio_misalignment_deg = rdvio_misalignment_deg;
         map_.addObservations(current_frame, cam_data);
     }
 
-    // 需要至少2帧才能进行视觉更新（用于三角化）
-    size_t current_win_size = map_.sfw.size();
+    const size_t current_win_size = map_.sfw.size();
+    std::vector<size_t> frames_to_remove;
+    size_t rdvio_compressed_frames = 0;
+    if constexpr (visual_update_scheduler == VisualUpdateScheduler::Legacy) {
+        if (is_keyframe && map_.isWinFull()) {
+            frames_to_remove.push_back(0);
+        }
+    } else if constexpr (visual_update_scheduler == VisualUpdateScheduler::SchurVINS) {
+        if (current_win_size > schedulerRetainedCloneCount()) {
+            // Retain the newest image and then prefer the two newest keyframes.
+            // Any remaining slot is filled by the newest temporal frame. This
+            // yields the paper's compact 2-keyframe + recent-frame update set.
+            std::vector<bool> keep(current_win_size, false);
+            keep.back() = true;
+            size_t kept = 1;
+            for (size_t i = current_win_size; i > 0 && kept <
+                 schedulerRetainedCloneCount(); --i) {
+                const size_t index = i - 1;
+                if (!keep[index] && map_.sfw[index]->is_key_frame) {
+                    keep[index] = true;
+                    ++kept;
+                }
+            }
+            for (size_t i = current_win_size; i > 0 && kept <
+                 schedulerRetainedCloneCount(); --i) {
+                const size_t index = i - 1;
+                if (!keep[index]) {
+                    keep[index] = true;
+                    ++kept;
+                }
+            }
+            for (size_t i = 0; i < current_win_size; ++i) {
+                if (!keep[i]) {
+                    frames_to_remove.push_back(i);
+                    break;
+                }
+            }
+        }
+    } else if constexpr (visual_update_scheduler == VisualUpdateScheduler::MSCKF) {
+        if (current_win_size > schedulerRetainedCloneCount()) {
+            frames_to_remove.push_back(0);
+        }
+    } else if constexpr (visual_update_scheduler == VisualUpdateScheduler::VINSMono) {
+        if (current_win_size > schedulerRetainedCloneCount()) {
+            const size_t second_newest = current_win_size - 2;
+            frames_to_remove.push_back(map_.sfw[second_newest]->is_key_frame
+                ? size_t(0) : second_newest);
+        }
+    } else if constexpr (visual_update_scheduler == VisualUpdateScheduler::RDVIO) {
+        // The ESKF has no between-clone preintegration factors to concatenate;
+        // consuming tracks touching removed clones preserves their lifecycle.
+        const RDVIOParameters parameters{
+            rdvio_rotation_threshold_deg,
+            rdvio_min_common_tracks,
+            rdvio_subframe_size,
+            rdvio_rotation_compression_trigger,
+            schedulerRetainedCloneCount()};
+        RDVIOFrameRemovalPlan removal_plan =
+            planRDVIOFrameRemovals(map_, parameters);
+        frames_to_remove = std::move(removal_plan.chronological_indices);
+        rdvio_compressed_frames = removal_plan.compressed_frame_count;
+    }
+
+    std::sort(frames_to_remove.begin(), frames_to_remove.end());
+    frames_to_remove.erase(
+        std::unique(frames_to_remove.begin(), frames_to_remove.end()),
+        frames_to_remove.end());
+    std::vector<FrameID> frame_ids_to_remove;
+    frame_ids_to_remove.reserve(frames_to_remove.size());
+    for (const size_t index : frames_to_remove) {
+        frame_ids_to_remove.push_back(map_.sfw[index]->id);
+    }
+
+    std::vector<LandmarkID> tracks_to_consume;
+    size_t one_shot_tracks_used = 0;
+    ExitHandler schedule_finalizer([&] {
+        if constexpr (schedulerConsumesTracksOnce(visual_update_scheduler)) {
+            n_tracks_consumed_ += tracks_to_consume.size();
+            n_tracks_dropped_ += tracks_to_consume.size() - one_shot_tracks_used;
+            for (const LandmarkID id : tracks_to_consume) {
+                map_.removeLandmark(id);
+            }
+        }
+        if constexpr (visual_update_scheduler == VisualUpdateScheduler::RDVIO) {
+            n_rdvio_compressed_frames_ += rdvio_compressed_frames;
+        }
+        for (auto index = frames_to_remove.rbegin();
+             index != frames_to_remove.rend(); ++index) {
+            popFrame(*index);
+        }
+    });
+
     if (current_win_size < 2) {
-//        std::cout << "Sliding Window has " << current_win_size << " frame(s), skip visual update" << std::endl;
+        ++n_visual_updates_skipped_;
         return;
     }
 
-//    std::cout << "Do vision update with " << current_win_size << " keyframes";
-//    if (!is_keyframe) {
-//        std::cout << " + 1 non-keyframe";
-//    }
-//    std::cout << std::endl;
-
-//#define ONE_SHOT
+    auto observedInFrame = [](const Landmark &landmark, const Frame *frame) {
+        return frame && landmark.frm2fet.find(frame->id) != landmark.frm2fet.end();
+    };
+    auto isSchurVinsActiveTrack = [&](const Landmark &landmark) {
+        const size_t recent_count = std::min<size_t>(2, map_.sfw.size());
+        for (size_t offset = 0; offset < recent_count; ++offset) {
+            if (observedInFrame(landmark, map_.sfw[map_.sfw.size() - 1 - offset])) {
+                return true;
+            }
+        }
+        return false;
+    };
 
     size_t num_obs = 0;
     static std::vector<std::pair<LandmarkID, Landmark*>> ids;
     ids.resize(map_.lmk_map.size());
     ids.clear();
+    std::vector<Landmark *> rotation_only_tracks;
 
-    // 统计观测数量（只处理至少被2个关键帧观测到的landmark）
-    for (const auto &it : map_.lmk_map) {
-        const auto id = it.first;
-        auto lmk = it.second;
+    for (const auto &[id, lmk] : map_.lmk_map) {
+        const size_t observation_count = lmk->frm2fet.size();
+        bool schedule_track = true;
+        bool consume_track = false;
 
-        // 关键帧的观测数量
-        size_t keyframe_obs = lmk->frm2fet.size();
+        if constexpr (visual_update_scheduler == VisualUpdateScheduler::SchurVINS) {
+            schedule_track = isSchurVinsActiveTrack(*lmk);
+        } else if constexpr (schedulerConsumesTracksOnce(visual_update_scheduler)) {
+            const bool observed_current = observedInFrame(*lmk, current_frame);
+            const bool lost = current_frame && !observed_current;
+            const bool touches_marginalized_clone = std::any_of(
+                frame_ids_to_remove.begin(), frame_ids_to_remove.end(),
+                [&](const FrameID frame_id) {
+                    return lmk->frm2fet.find(frame_id) != lmk->frm2fet.end();
+                });
+            const bool reached_track_limit =
+                observation_count >= schedulerRetainedCloneCount();
+            consume_track = lost || touches_marginalized_clone || reached_track_limit;
+            schedule_track = consume_track;
+            if (consume_track) {
+                tracks_to_consume.push_back(id);
+            }
+        }
 
-        // 至少需要2个关键帧观测才能进行三角化和滑窗优化。
-        // 失败时等到关键帧观测数增加后再试，避免每个非关键帧都重复做相同计算。
-        if (keyframe_obs > 1) {
-            if (!lmk->is_triangulated &&
-                lmk->last_triangulation_obs_count < keyframe_obs) {
-                lmk->last_triangulation_obs_count = keyframe_obs;
-                if (landmark_initialization_mode_ == LandmarkInitializationMode::GroundTruth) {
-                    // Historical analysis-only oracle initialization: every point
-                    // with two views is accepted with the old fixed covariance.
-                    const auto truth = lmk_map.find(id);
-                    if (truth != lmk_map.end()) {
-                        lmk->position = truth->second;
-                        lmk->cov_position = Mat3_3::Identity() * TYPE(1e-4);
-                        lmk->shadow_position = lmk->position;
-                        lmk->shadow_cov_position = lmk->cov_position;
-                        lmk->shadow_initialized = true;
-                        lmk->is_triangulated = true;
-                    }
-                } else {
-                    const auto triangulation = triangulateLandmark(*lmk);
-                    logTriangulationAttempt(*lmk, triangulation, cam_data.timestamp, lmk_map);
-                    if (triangulation.status == TriangulationStatus::Success) {
-                        lmk->position = triangulation.position;
-                        lmk->cov_position = triangulation.covariance;
-                        // Strict oracle-position ablation: preserve triangulation
-                        // gating and covariance, replacing position only.
-                        if (landmark_initialization_mode_ ==
-                            LandmarkInitializationMode::TriangulationWithOraclePosition) {
-                            const auto truth = lmk_map.find(id);
-                            if (truth != lmk_map.end()) {
-                                lmk->position = truth->second;
-                            }
+        if (!schedule_track || observation_count <= 1) {
+            continue;
+        }
+
+        if (!lmk->is_triangulated &&
+            !(visual_update_scheduler == VisualUpdateScheduler::RDVIO &&
+              current_frame && current_frame->is_rotation_frame) &&
+            lmk->last_triangulation_obs_count < observation_count) {
+            lmk->last_triangulation_obs_count = observation_count;
+            if (landmark_initialization_mode_ == LandmarkInitializationMode::GroundTruth) {
+                const auto truth = lmk_map.find(id);
+                if (truth != lmk_map.end()) {
+                    lmk->position = truth->second;
+                    lmk->cov_position = Mat3_3::Identity() * TYPE(1e-4);
+                    lmk->shadow_position = lmk->position;
+                    lmk->shadow_cov_position = lmk->cov_position;
+                    lmk->shadow_initialized = true;
+                    lmk->is_triangulated = true;
+                }
+            } else {
+                const auto triangulation = triangulateLandmark(*lmk);
+                logTriangulationAttempt(*lmk, triangulation, cam_data.timestamp, lmk_map);
+                if (triangulation.status == TriangulationStatus::Success) {
+                    lmk->position = triangulation.position;
+                    lmk->cov_position = triangulation.covariance;
+                    if (landmark_initialization_mode_ ==
+                        LandmarkInitializationMode::TriangulationWithOraclePosition) {
+                        const auto truth = lmk_map.find(id);
+                        if (truth != lmk_map.end()) {
+                            lmk->position = truth->second;
                         }
-                        lmk->shadow_position = lmk->position;
-                        lmk->shadow_cov_position = lmk->cov_position;
-                        lmk->shadow_initialized = true;
-                        lmk->is_triangulated = true;
                     }
+                    lmk->shadow_position = lmk->position;
+                    lmk->shadow_cov_position = lmk->cov_position;
+                    lmk->shadow_initialized = true;
+                    lmk->is_triangulated = true;
                 }
             }
+        }
 
-            // 三角化失败的点不进入 Schur/QR，防止无效深度污染后验。
-            if (lmk->is_triangulated) {
-                ids.emplace_back(id, lmk);
-                num_obs += keyframe_obs;
+        if (lmk->is_triangulated) {
+            ids.emplace_back(id, lmk);
+            num_obs += observation_count;
+            if constexpr (schedulerConsumesTracksOnce(visual_update_scheduler)) {
+                ++one_shot_tracks_used;
+            }
+        } else if constexpr (visual_update_scheduler == VisualUpdateScheduler::RDVIO) {
+            if (consume_track && observation_count > 1) {
+                rotation_only_tracks.push_back(lmk);
             }
         }
     }
 
-    // std::cout << "There are " << ids.size() << " Triangulated Landmarks" << std::endl;
-
-    if (ids.empty()) {
-        // 关键帧且窗口满才移除一帧
-        if (is_keyframe && map_.isWinFull()) {
-            popFrame();
-        }
-
+    const bool has_rdvio_zero_translation =
+        visual_update_scheduler == VisualUpdateScheduler::RDVIO &&
+        current_frame && current_frame->is_rotation_frame &&
+        map_.sfw.size() >= 2;
+    if (ids.empty() && rotation_only_tracks.empty() &&
+        !has_rdvio_zero_translation) {
+        ++n_visual_updates_skipped_;
         return;
     }
+
+    // Repeated-window legacy modes interpret uv_var as an information-density
+    // parameter and integrate it with camera dt. A SchurVINS paper-style batch
+    // and especially an MSCKF one-shot track instead represent actual image
+    // samples, so their covariance is the normalized image variance itself.
+    const TYPE image_variance = std::max(
+        triangulation_uv_std * triangulation_uv_std, TYPE(1e-12));
+    const TYPE visual_batch_variance = [&] {
+        if constexpr (schedulerConsumesTracksOnce(visual_update_scheduler)) {
+            return image_variance * std::max(msckf_visual_noise_scale, TYPE(1));
+        } else if constexpr (visual_update_scheduler == VisualUpdateScheduler::SchurVINS) {
+            return image_variance;
+        } else {
+            return uv_var / std::max(TYPE(dt), TYPE(1e-6));
+        }
+    }();
 
 
 // 当前项目的统一验证/报告路径。QR 实现保留用于历史 A/B 对照，但默认不编译执行。
@@ -956,7 +1111,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         // 重构出量测矩阵 H（INS 部分恒为 0，只需重写 tail）
         hT.tail(AugState::SIZE * WIN_SIZE) = H_red.row(j).transpose();
 
-        TYPE r = uv_var / dt;
+        TYPE r = visual_batch_variance;
         VecX PhT = cov_p * hT;
         TYPE var = hT.dot(PhT) + r;
         VecX K = PhT / var;
@@ -993,7 +1148,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         for (size_t j = 0; j < LMK_SIZE; ++j) {
             auto &&hT = RP.row(j).transpose();
 
-            const auto r = uv_var / dt;
+            const auto r = visual_batch_variance;
             VecX PhT = cov_l * hT;
             TYPE var = hT.dot(PhT) + r;
             VecX K = PhT / var;
@@ -1022,7 +1177,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         const Mat3_3 Rwi_T = state_.orientation.toRotationMatrix().transpose();
         const Mat3_3 Rwc_T = (state_.orientation * ext_.q_ic).inverse().toRotationMatrix();
         const auto &p_wi = state_.position;
-        const auto r = uv_var / dt;
+        const auto r = visual_batch_variance;
 
         for (const auto &meas : cam_data.measurements) {
             const auto lmk_id = meas.first;
@@ -1103,6 +1258,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         log.n_lmk = ids.size();
         log.win_size = map_.sfw.size();
         log.is_keyframe = is_keyframe;
+        log.is_rotation_frame = is_rotation_frame;
+        log.rdvio_case = rdvio_case;
+        log.rdvio_misalignment_deg = rdvio_misalignment_deg;
     }
 
     // Hessian 矩阵
@@ -1125,21 +1283,53 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     gp.setZero();
     gl.setZero();
     std::vector<size_t> valid_observations_per_landmark(ids.size(), 0);
+    // Local landmark increment -> world XYZ increment. For anchored modes this
+    // is also used to back-transform Schur landmark corrections and covariance
+    // updates, while Landmark::position itself remains world XYZ.
+    std::vector<Mat3_3> landmark_parameter_to_world(
+        ids.size(), Mat3_3::Identity());
+    std::vector<Frame *> landmark_anchor_frames(ids.size(), nullptr);
 
     // 优化: 外参相关量对整帧是常量，提到所有循环外(原本每个观测都重算一次)
     const Mat3_3 Ric = ext_.q_ic.toRotationMatrix();
     size_t observations_used = 0;
     size_t observations_downweighted = 0;
     size_t observations_rejected = 0;
+    size_t observations_new = 0;
+    size_t observations_reused = 0;
+    size_t rotation_only_constraints = 0;
+
+    if constexpr (visual_update_scheduler == VisualUpdateScheduler::RDVIO) {
+        const RDVIOConstraintStatistics rdvio_statistics =
+            accumulateRDVIOConstraints(
+                map_, rotation_only_tracks, Ric,
+                has_rdvio_zero_translation,
+                enforce_observability_constraint_, visual_batch_variance,
+                rdvio_zero_translation_std, visual_hard_reprojection_limit,
+                Hpp, gp);
+        observations_used += rdvio_statistics.observations_used;
+        observations_new += rdvio_statistics.new_observations;
+        n_new_observations_ += rdvio_statistics.new_observations;
+        one_shot_tracks_used += rdvio_statistics.tracks_used;
+        rotation_only_constraints += rdvio_statistics.rotation_constraints;
+        n_rdvio_rotation_constraints_ +=
+            rdvio_statistics.rotation_constraints;
+        n_rdvio_zero_translation_constraints_ +=
+            rdvio_statistics.zero_translation_constraints;
+    }
 
     // 单个观测无法在消元 landmark 后约束位姿。先暂存每个点的第一条有效观测，
     // 只有第二条到来后才一起写入全局 Hessian；否则 Hpp 会错误地把该点当成固定地图点。
     struct LinearizedObservation {
         Mat2_6 J_pose;
+        Mat2_6 J_anchor_pose{Mat2_6::Zero()};
         Mat2_3 J_landmark;
         Vec2 residual;
         TYPE weight{TYPE(1)};
         size_t frame_index{0};
+        size_t anchor_frame_index{0};
+        bool has_anchor_pose{false};
+        Observation *observation{};
     };
     std::vector<LinearizedObservation> first_observation(ids.size());
     auto accumulate_observation = [&](const size_t landmark_index,
@@ -1147,22 +1337,70 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         Hpp.block<6, 6>(linearized.frame_index, linearized.frame_index)
             .triangularView<Eigen::Upper>() +=
                 linearized.weight * linearized.J_pose.transpose() * linearized.J_pose;
+        if (linearized.has_anchor_pose) {
+            Hpp.block<6, 6>(linearized.anchor_frame_index,
+                            linearized.anchor_frame_index)
+                .triangularView<Eigen::Upper>() +=
+                    linearized.weight * linearized.J_anchor_pose.transpose() *
+                    linearized.J_anchor_pose;
+            if (linearized.frame_index < linearized.anchor_frame_index) {
+                Hpp.block<6, 6>(linearized.frame_index,
+                                linearized.anchor_frame_index).noalias() +=
+                    linearized.weight * linearized.J_pose.transpose() *
+                    linearized.J_anchor_pose;
+            } else {
+                Hpp.block<6, 6>(linearized.anchor_frame_index,
+                                linearized.frame_index).noalias() +=
+                    linearized.weight * linearized.J_anchor_pose.transpose() *
+                    linearized.J_pose;
+            }
+        }
         Hll_diag.middleRows<3>(landmark_index).triangularView<Eigen::Upper>() +=
             linearized.weight * linearized.J_landmark.transpose() * linearized.J_landmark;
         Hpl.block<6, 3>(linearized.frame_index, landmark_index).noalias() +=
             linearized.weight * linearized.J_pose.transpose() * linearized.J_landmark;
+        if (linearized.has_anchor_pose) {
+            Hpl.block<6, 3>(linearized.anchor_frame_index, landmark_index).noalias() +=
+                linearized.weight * linearized.J_anchor_pose.transpose() *
+                linearized.J_landmark;
+        }
         gp.segment<6>(linearized.frame_index).noalias() +=
             linearized.weight * linearized.J_pose.transpose() * linearized.residual;
+        if (linearized.has_anchor_pose) {
+            gp.segment<6>(linearized.anchor_frame_index).noalias() +=
+                linearized.weight * linearized.J_anchor_pose.transpose() *
+                linearized.residual;
+        }
         gl.segment<3>(landmark_index).noalias() +=
             linearized.weight * linearized.J_landmark.transpose() * linearized.residual;
         ++observations_used;
         observations_downweighted += linearized.weight < TYPE(1) ? 1 : 0;
+        if (linearized.observation) {
+            if (linearized.observation->visual_update_count == 0) {
+                ++observations_new;
+                ++n_new_observations_;
+            } else {
+                ++observations_reused;
+                ++n_reused_observations_;
+            }
+            ++linearized.observation->visual_update_count;
+        }
     };
 
     // 遍历 landmarks
     for (size_t i = 0; i < ids.size(); ++i) {
         auto lmk = ids[i].second;
         const size_t lmk_index = LMK_SIZE * i;
+
+        const LandmarkParameterizationLinearization parameterization =
+            linearizeLandmarkParameterization(
+                *lmk, Ric, ext_.t_ic, enforce_observability_constraint_,
+                landmark_parameterization);
+        if (!parameterization.valid) {
+            continue;
+        }
+        landmark_parameter_to_world[i] = parameterization.parameter_to_world;
+        landmark_anchor_frames[i] = parameterization.anchor;
 
         // 遍历 landmark 的 所有 observations
         for (auto &it : lmk->frm2fet) {
@@ -1175,6 +1413,17 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             const auto fet = it.second;
             const auto obs = fet->obs[0];
             const auto frm = fet->frame;
+
+            // A structureless MSCKF track is a one-shot measurement batch. If
+            // a sample reaches the linearizer twice, reject it before H/g so a
+            // lifecycle bug cannot silently make the filter overconfident.
+            if constexpr (schedulerConsumesTracksOnce(visual_update_scheduler)) {
+                if (obs && obs->visual_update_count != 0) {
+                    ++n_duplicate_observations_blocked_;
+                    ++observations_rejected;
+                    continue;
+                }
+            }
 
             const Mat3_3 Rwi = frm->q().toRotationMatrix();
             const Vec3 d_ij_w = lmk->position - frm->p();
@@ -1225,12 +1474,36 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 
             // Rwc^T = (Rwi * Ric)^T = Ric^T * Rwi^T，复用已算好的 Rwi/Ric,
             // 避免再做一次四元数乘法 + 求逆 + toRotationMatrix
+            Mat2_3 J_lmk_world;
+            J_lmk_world.noalias() = J * (Ric.transpose() * Rwi_jac.transpose());
             Mat2_3 J_lmk;
-            J_lmk.noalias() = J * (Ric.transpose() * Rwi_jac.transpose());
+            J_lmk.noalias() = J_lmk_world * landmark_parameter_to_world[i];
 
             Mat2_6 J_pose;
-            J_pose.leftCols<3>().noalias() = J_lmk * hat(d_ij_w_jac);
-            J_pose.rightCols<3>().noalias() = -J_lmk;
+            J_pose.leftCols<3>().noalias() = J_lmk_world * hat(d_ij_w_jac);
+            J_pose.rightCols<3>().noalias() = -J_lmk_world;
+
+            Mat2_6 J_anchor_pose = Mat2_6::Zero();
+            size_t anchor_frame_index = 0;
+            bool has_anchor_pose = false;
+            if constexpr (isAnchoredLandmarkParameterization(
+                              landmark_parameterization)) {
+                const Frame *anchor = landmark_anchor_frames[i];
+                J_anchor_pose = landmarkAnchorPoseJacobian(
+                    J_lmk_world, *lmk, *anchor,
+                    enforce_observability_constraint_);
+                anchor_frame_index = INSState::SIZE +
+                    AugState::SIZE * anchor->ordering;
+                const size_t observing_frame_index = INSState::SIZE +
+                    AugState::SIZE * frm->ordering;
+                if (anchor_frame_index == observing_frame_index) {
+                    // A feature represented in its own camera frame is
+                    // invariant to a common motion of that camera and point.
+                    J_pose += J_anchor_pose;
+                } else {
+                    has_anchor_pose = true;
+                }
+            }
 
             // 外参雅可比: 保留代码但默认不运行(外参目前不在状态里，算了也没人读)。
             // 用 if constexpr 而非 #ifdef，这样它始终参与语法/类型检查，不会腐烂。
@@ -1243,7 +1516,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             }
 
             const size_t frm_index = INSState::SIZE + AugState::SIZE * frm->ordering;
-            LinearizedObservation current{J_pose, J_lmk, err, robust_weight, frm_index};
+            LinearizedObservation current{
+                J_pose, J_anchor_pose, J_lmk, err, robust_weight, frm_index,
+                anchor_frame_index, has_anchor_pose, obs};
             auto &valid_count = valid_observations_per_landmark[i];
             if (valid_count == 0) {
                 first_observation[i] = current;
@@ -1328,9 +1603,12 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             hll_es.eigenvectors().transpose() * gl.segment<LMK_SIZE>(index);
         TYPE discarded_gradient_sq = TYPE(0);
         size_t discarded_directions = 0;
+        TYPE hll_min_retained = std::numeric_limits<TYPE>::infinity();
         for (size_t direction = 0; direction < LMK_SIZE; ++direction) {
             if (hll_es.eigenvalues()(direction) > hll_threshold) {
                 hll_inverse(direction) = TYPE(1) / hll_es.eigenvalues()(direction);
+                hll_min_retained = std::min(
+                    hll_min_retained, hll_es.eigenvalues()(direction));
             } else {
                 discarded_gradient_sq += hll_gradient_coeff(direction) *
                                          hll_gradient_coeff(direction);
@@ -1344,6 +1622,13 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         hll_discarded_gradient_ratio_sum_ += discarded_gradient_ratio;
         hll_discarded_gradient_ratio_max_ =
             std::max(hll_discarded_gradient_ratio_max_, discarded_gradient_ratio);
+        if (std::isfinite(hll_min_retained) && hll_min_retained > TYPE(0)) {
+            const TYPE effective_condition = hll_max / hll_min_retained;
+            ++n_hll_condition_tests_;
+            hll_effective_condition_sum_ += effective_condition;
+            hll_effective_condition_max_ =
+                std::max(hll_effective_condition_max_, effective_condition);
+        }
         const Mat3_3 hll_inv = hll_es.eigenvectors() * hll_inverse.asDiagonal()
                              * hll_es.eigenvectors().transpose();
 
@@ -1585,7 +1870,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
                 continue;   // 零空间方向，不提供信息
             }
 
-            const auto R = uv_var / d / dt;
+            const auto R = visual_batch_variance / d;
             const auto hT = H_BASIS.col(i);
 
             PhT.noalias() = cov_p.selfadjointView<Eigen::Upper>() * hT;
@@ -1630,8 +1915,13 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         log.n_obs_used = observations_used;
         log.n_obs_downweighted = observations_downweighted;
         log.n_obs_rejected = observations_rejected;
+        log.n_obs_new = observations_new;
+        log.n_obs_reused = observations_reused;
+        log.n_tracks_consumed = schedulerConsumesTracksOnce()
+            ? tracks_to_consume.size() : 0;
         log.oc_leak_before = oc_leak_before;
         log.oc_leak_after = oc_leak_after;
+        log.rotation_only_constraints = rotation_only_constraints;
         logs_.emplace_back(log);
     }
 
@@ -1645,9 +1935,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     // it repeatedly treats the same window observations as new measurements of
     // an independent landmark even though P_xl is not stored. Fixed,
     // Retriangulate, and SchurBackSubstitution avoid that false independence.
-    const LandmarkUpdateMode landmark_mode = refine_landmarks_
-        ? landmark_update_mode_
-        : LandmarkUpdateMode::Fixed;
+    const LandmarkUpdateMode landmark_mode = schedulerConsumesTracksOnce()
+        ? LandmarkUpdateMode::Fixed
+        : (refine_landmarks_ ? landmark_update_mode_ : LandmarkUpdateMode::Fixed);
     const bool independent_landmark_mode =
         landmark_mode == LandmarkUpdateMode::IndependentEkf ||
         landmark_mode == LandmarkUpdateMode::IndependentEkfInflated ||
@@ -1756,8 +2046,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             const TYPE threshold = TYPE(1e-6) * hll_max;
             const Vec3 inverse = (es.eigenvalues().array() > threshold)
                 .select(es.eigenvalues().array().inverse(), TYPE(0));
-            const Vec3 increment = es.eigenvectors() * inverse.asDiagonal()
-                                 * es.eigenvectors().transpose() * el;
+            const Vec3 parameter_increment = es.eigenvectors() * inverse.asDiagonal()
+                                           * es.eigenvectors().transpose() * el;
+            const Vec3 increment = landmark_parameter_to_world[i] * parameter_increment;
             if (!increment.allFinite() || increment.norm() > TYPE(100)) {
                 continue;
             }
@@ -1790,9 +2081,20 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             const size_t index = i * LMK_SIZE;
             Vec3 dx_l = Vec3::Zero();
             auto &&cov_p = lmk->cov_position;
-            const Mat3_3 hll = Hll_diag.middleRows<LMK_SIZE>(index);
-            const Vec3 el = gl.segment<LMK_SIZE>(index);
+            Mat3_3 hll = Hll_diag.middleRows<LMK_SIZE>(index);
+            Vec3 el = gl.segment<LMK_SIZE>(index);
             ++n_lmk_update_attempts_;
+
+            // The persistent covariance is stored in world XYZ. Convert the
+            // local anchored normal equation back to that basis before the
+            // independent-map experiment consumes it.
+            if constexpr (isAnchoredLandmarkParameterization(
+                              landmark_parameterization)) {
+                if (!transformLandmarkNormalToWorld(
+                        landmark_parameter_to_world[i], hll, el)) {
+                    continue;
+                }
+            }
 
             if (landmark_mode != LandmarkUpdateMode::IndependentEkf) {
                 TYPE inflation_scale = TYPE(1);
@@ -1838,7 +2140,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
                 if (d <= hll_thresh) {
                     continue;
                 }
-                const TYPE R = uv_var / d / dt;
+                const TYPE R = visual_batch_variance / d;
                 const Vec3 hT = hll_basis.col(j);
                 Vec3 PhT = cov_p * hT;
                 const TYPE var = hT.dot(PhT) + R;
@@ -1874,7 +2176,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     // Detached map post-processor. It consumes only the newest keyframe
     // measurement and never writes Landmark::position/cov_position, so its
     // deliberately approximate independent covariance cannot alter ESKF state.
-    if (enable_shadow_landmark_postprocessor_ && is_keyframe) {
+    if (enable_shadow_landmark_postprocessor_ && is_keyframe &&
+        !schedulerConsumesTracksOnce()) {
         const TYPE image_variance = triangulation_uv_std * triangulation_uv_std;
         const TYPE huber_delta = std::max(
             visual_huber_delta_sigma * triangulation_uv_std, TYPE(1e-8));
@@ -2048,7 +2351,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 //        updateState(dx_p);
 ////        std::cout << "dx = " << dx_p.transpose() << std::endl;
 
-        const auto R = uv_var / dt;
+        const auto R = visual_batch_variance;
         MatXX PHT = cov_ * Hpp;
         MatXX S = PHT;
         S.diagonal().array() += R;
@@ -2090,7 +2393,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 //
 //        VecX dx_l = KT.transpose() * el;
 
-        const auto R = uv_var / dt;
+        const auto R = visual_batch_variance;
         MatXX PHT = cov_p * hll;
 
         MatXX S = PHT;
@@ -2118,12 +2421,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 
 #endif
 
-    // 方案4：非关键帧无任何临时数据结构，无需清理
-
-    // 移除一帧（仅当是关键帧且窗口已满时才pop滑窗）
-    if (is_keyframe && map_.isWinFull()) {
-        popFrame();
-    }
+    // Track consumption and scheduler-specific clone removal are handled by
+    // schedule_finalizer so every early-return path has identical lifecycle.
 }
 
 void SchurVINS::updateState(auto &&dx) {
@@ -2139,9 +2438,11 @@ void SchurVINS::updateState(auto &&dx) {
         state_.gravity += Eigen::Map<Vec3>(dx.data() + I::G);
     }
     for (size_t n = 0; n < map_.sfw.size(); ++n) {
-//        std::cout << "n = " << n << ", order = " << map_.sfw[n]->ordering << std::endl;
-        map_.sfw[n]->q() = (vec2quat(Eigen::Map<Vec3>(dx.data() + I::SIZE + n * A::SIZE + A::Q)) * map_.sfw[n]->q()).normalized();
-        map_.sfw[n]->p() += Eigen::Map<Vec3>(dx.data() + I::SIZE + n * A::SIZE + A::P);
+        Frame *frame = map_.sfw[n];
+        const size_t offset = I::SIZE + frame->ordering * A::SIZE;
+        frame->q() = (vec2quat(Eigen::Map<Vec3>(dx.data() + offset + A::Q)) *
+                      frame->q()).normalized();
+        frame->p() += Eigen::Map<Vec3>(dx.data() + offset + A::P);
     }
 }
 

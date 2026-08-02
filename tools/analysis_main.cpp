@@ -144,10 +144,13 @@ bool generateScenario(const std::string &name,
         collect(simulator);
         return true;
     }
-    if (name == "helix_3d" || name == "stop_go") {
+    if (name == "helix_3d" || name == "stop_go" ||
+        name == "rotation_translation") {
         const auto trajectory = name == "helix_3d"
             ? VIORepresentativeSimulator::Trajectory::Helix3D
-            : VIORepresentativeSimulator::Trajectory::StopGo;
+            : (name == "stop_go"
+               ? VIORepresentativeSimulator::Trajectory::StopGo
+               : VIORepresentativeSimulator::Trajectory::RotationTranslation);
         VIORepresentativeSimulator simulator(trajectory);
         configure(simulator);
         simulator.setDuration(duration);
@@ -378,7 +381,9 @@ int main(int argc, char **argv) {
                         "erra_prior,erra_post,"
                         "dxp,dxq,dxv,sigma_p,sigma_q,sigma_v,"
                         "nis_mean,nis_dof,obs_used,obs_downweighted,obs_rejected,"
-                        "oc_leak_before,oc_leak_after,improve_p\n");
+                        "obs_new,obs_reused,tracks_consumed,"
+                        "oc_leak_before,oc_leak_after,improve_p,"
+                        "motion_r,rdvio_case,rdvio_misalignment_deg,rotation_constraints\n");
 
         size_t g = 0;
         size_t n_improve = 0, n_total = 0;
@@ -399,7 +404,8 @@ int main(int argc, char **argv) {
             std::fprintf(f, "%.6f,%d,%zu,%zu,"
                             "%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,"
                             "%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%zu,%zu,%zu,%zu,"
-                            "%.6e,%.6e,%d\n",
+                            "%zu,%zu,%zu,"
+                            "%.6e,%.6e,%d,%d,%u,%.6e,%zu\n",
                 static_cast<double>(L.timestamp - t0) * 1e-6,
                 L.is_keyframe ? 1 : 0, L.n_lmk, L.win_size,
                 ep0, ep1, ev0, ev1, ea0, ea1,
@@ -407,8 +413,11 @@ int main(int argc, char **argv) {
                 std::sqrt(L.cov_p_trace), std::sqrt(L.cov_q_trace), std::sqrt(L.cov_v_trace),
                 L.nis_mean, L.nis_dof,
                 L.n_obs_used, L.n_obs_downweighted, L.n_obs_rejected,
+                L.n_obs_new, L.n_obs_reused, L.n_tracks_consumed,
                 L.oc_leak_before, L.oc_leak_after,
-                improved);
+                improved, L.is_rotation_frame ? 1 : 0,
+                static_cast<unsigned>(L.rdvio_case),
+                L.rdvio_misalignment_deg, L.rotation_only_constraints);
         }
         std::fclose(f);
         posterior_improve_rate = n_total
@@ -491,7 +500,7 @@ int main(int argc, char **argv) {
     }
 
     // ---- 写 landmark 真值(只写一次) ----
-    if (tag == "base") {
+    {
         const auto path = joinPath(out_dir, "lmk_" + scenario + ".csv");
         FILE *f = std::fopen(path.c_str(), "w");
         if (f) {
@@ -818,22 +827,26 @@ int main(int argc, char **argv) {
         const bool is_landmark_strategy = summary_group == "landmark";
         const bool is_landmark_consistency = summary_group == "landmark_consistency";
         const bool is_triangulation_scan = summary_group == "triangulation";
+        const bool is_scheduler = summary_group == "scheduler";
+        const bool is_parameterization = summary_group == "parameterization";
         const bool is_landmark = is_landmark_strategy || is_landmark_consistency ||
                                  is_triangulation_scan;
-        const auto path = joinPath(out_dir,
-                                   is_ablation ? "ablation_summary.csv"
-                                   : (is_observability ? "observability_summary.csv"
-                                      : (is_triangulation_scan
-                                         ? "triangulation_threshold_summary.csv"
-                                         : (is_landmark_consistency
-                                            ? "landmark_consistency_summary.csv"
-                                            : (is_landmark_strategy
-                                            ? "landmark_strategy_summary.csv"
-                                            : "summary.csv")))));
+        std::string summary_filename = "summary.csv";
+        if (is_ablation) summary_filename = "ablation_summary.csv";
+        else if (is_observability) summary_filename = "observability_summary.csv";
+        else if (is_scheduler) summary_filename = "scheduler_summary.csv";
+        else if (is_parameterization) summary_filename = "parameterization_summary.csv";
+        else if (is_triangulation_scan) summary_filename = "triangulation_threshold_summary.csv";
+        else if (is_landmark_consistency) summary_filename = "landmark_consistency_summary.csv";
+        else if (is_landmark_strategy) summary_filename = "landmark_strategy_summary.csv";
+        const auto path = joinPath(out_dir, summary_filename);
         const bool reset_summary = scenario == "circle_out"
             && ((!is_ablation && !is_observability && !is_landmark && tag == "base")
                 || (is_ablation && tag == "abl_full")
                 || (is_observability && tag == "oc_on")
+                || (is_scheduler && tag == "scheduler_legacy")
+                || (is_scheduler && tag == "scheduler_msckf_report")
+                || (is_parameterization && tag == "param_world_xyz")
                 || (is_landmark_strategy && tag == "lmk_fixed")
                 || (is_landmark_consistency && tag == "lmk_independent")
                 || (is_triangulation_scan && tag == "tri_p3"));
@@ -865,6 +878,23 @@ int main(int argc, char **argv) {
                         "hll_rank_tests,hll_discarded_directions,hll_discarded_gradient_ratio_mean,"
                         "hll_discarded_gradient_ratio_max,hpp_rank_tests,hpp_discarded_directions,"
                         "hpp_discarded_gradient_ratio_mean,hpp_discarded_gradient_ratio_max,"
+                        "tri_success,tri_attempts\n");
+                } else if (is_scheduler) {
+                    std::fprintf(f,
+                        "scenario,tag,scheduler,parameterization,one_shot,uv_var,duration,features,"
+                        "rmse_p,rmse_p_aligned,rpe_1s_p,rpe_1s_att,rmse_v,rmse_att,max_err_p,"
+                        "mean_nees,mean_nis,t_cost,updates,new_observations,reused_observations,"
+                        "reuse_rate,tracks_consumed,tracks_dropped,duplicate_observations_blocked,"
+                        "updates_skipped,max_window,tri_success,tri_attempts,"
+                        "r_frames,n_frames,case_rr,case_nn,case_rn,case_nr,"
+                        "compressed_frames,rotation_constraints,zero_translation_constraints\n");
+                } else if (is_parameterization) {
+                    std::fprintf(f,
+                        "scenario,tag,scheduler,parameterization,uv_var,duration,features,"
+                        "rmse_p,rmse_p_aligned,rpe_1s_p,rpe_1s_att,rmse_v,rmse_att,max_err_p,"
+                        "mean_nees,mean_nis,t_cost,updates,posterior_improve_rate,"
+                        "obs_downweight_rate,obs_reject_rate,hll_tests,hll_discarded,"
+                        "hll_effective_condition_mean,hll_effective_condition_max,"
                         "tri_success,tri_attempts\n");
                 } else if (is_landmark) {
                     std::fprintf(f,
@@ -942,6 +972,62 @@ int main(int argc, char **argv) {
                     ekf.hpp_discarded_gradient_ratio_max_,
                     triangulation_success,
                     ekf.triangulation_logs_.size());
+            } else if (is_scheduler) {
+                size_t max_window = 0;
+                for (const auto &log : ekf.logs_) {
+                    max_window = std::max(max_window, log.win_size);
+                }
+                const size_t lifecycle_observations =
+                    ekf.n_new_observations_ + ekf.n_reused_observations_;
+                const double reuse_rate = lifecycle_observations
+                    ? static_cast<double>(ekf.n_reused_observations_) /
+                      static_cast<double>(lifecycle_observations)
+                    : 0.0;
+                std::fprintf(f,
+                    "%s,%s,%s,%s,%d,%.9g,%.1f,%zu,"
+                    "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
+                    "%.6e,%.6e,%.3f,%zu,%zu,%zu,%.6e,"
+                    "%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu\n",
+                    scenario.c_str(), tag.c_str(),
+                    slam::visualUpdateSchedulerName(),
+                    slam::landmarkParameterizationName(),
+                    slam::schedulerConsumesTracksOnce() ? 1 : 0,
+                    uv_var, duration, feature_count,
+                    rmse_p, rmse_p_aligned, rpe_1s_p, rpe_1s_att,
+                    rmse_v, rmse_a, mp, mean_nees, mean_nis,
+                    static_cast<double>(ekf.t_cost_) / static_cast<double>(CLOCKS_PER_SEC),
+                    ekf.posterior_times_, ekf.n_new_observations_,
+                    ekf.n_reused_observations_, reuse_rate,
+                    ekf.n_tracks_consumed_, ekf.n_tracks_dropped_,
+                    ekf.n_duplicate_observations_blocked_,
+                    ekf.n_visual_updates_skipped_, max_window,
+                    triangulation_success, ekf.triangulation_logs_.size(),
+                    ekf.n_rdvio_rotation_frames_, ekf.n_rdvio_normal_frames_,
+                    ekf.n_rdvio_cases_[1], ekf.n_rdvio_cases_[2],
+                    ekf.n_rdvio_cases_[3], ekf.n_rdvio_cases_[4],
+                    ekf.n_rdvio_compressed_frames_,
+                    ekf.n_rdvio_rotation_constraints_,
+                    ekf.n_rdvio_zero_translation_constraints_);
+            } else if (is_parameterization) {
+                const double hll_condition_mean = ekf.n_hll_condition_tests_ > 0
+                    ? ekf.hll_effective_condition_sum_ /
+                      static_cast<double>(ekf.n_hll_condition_tests_)
+                    : std::numeric_limits<double>::quiet_NaN();
+                std::fprintf(f,
+                    "%s,%s,%s,%s,%.9g,%.1f,%zu,"
+                    "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
+                    "%.6e,%.6e,%.3f,%zu,%.6f,%.6f,%.6f,%zu,%zu,%.6e,%.6e,%zu,%zu\n",
+                    scenario.c_str(), tag.c_str(),
+                    slam::visualUpdateSchedulerName(),
+                    slam::landmarkParameterizationName(), uv_var, duration,
+                    feature_count, rmse_p, rmse_p_aligned, rpe_1s_p,
+                    rpe_1s_att, rmse_v, rmse_a, mp, mean_nees, mean_nis,
+                    static_cast<double>(ekf.t_cost_) / static_cast<double>(CLOCKS_PER_SEC),
+                    ekf.posterior_times_, posterior_improve_rate,
+                    obs_downweight_rate, obs_reject_rate,
+                    ekf.n_hll_rank_tests_, ekf.n_hll_discarded_directions_,
+                    hll_condition_mean, ekf.hll_effective_condition_max_,
+                    triangulation_success, ekf.triangulation_logs_.size());
             } else if (is_landmark) {
                 std::fprintf(f,
                     "%s,%s,%s,%d,%.9g,%.6f,%.6f,%.9g,%.4f,%.1f,%zu,"
@@ -989,6 +1075,12 @@ int main(int argc, char **argv) {
         }
         std::printf("[%s/%s] uv_var=%.9g  RMSE p=%.4f m  v=%.4f m/s  att=%.4f rad  max_p=%.4f m\n",
                     scenario.c_str(), tag.c_str(), uv_var, rmse_p, rmse_v, rmse_a, mp);
+        std::printf("scheduler=%s  observations(new/reused/blocked)=%zu/%zu/%zu  "
+                    "tracks(consumed/dropped)=%zu/%zu  skipped_updates=%zu\n",
+                    slam::visualUpdateSchedulerName(), ekf.n_new_observations_,
+                    ekf.n_reused_observations_, ekf.n_duplicate_observations_blocked_,
+                    ekf.n_tracks_consumed_, ekf.n_tracks_dropped_,
+                    ekf.n_visual_updates_skipped_);
     }
 
     return 0;

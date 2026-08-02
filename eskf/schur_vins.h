@@ -7,6 +7,8 @@
 
 #include "../common.h"
 #include "../data_structure/map.h"
+#include "landmark_parameterization.h"
+#include "visual_update_scheduler.h"
 
 /*
  * 开发日志:
@@ -139,7 +141,7 @@ namespace slam {
 
         //
         void pushFrame(const CameraData &cam_data, bool is_keyframe);
-        void popFrame();
+        void popFrame(size_t chronological_index = 0);
 
         // 更新 map
         void updateMap(const CameraData &cam_data);
@@ -194,11 +196,28 @@ namespace slam {
         ExtState ext_;
 
         constexpr static size_t LMK_SIZE = 3;
+        constexpr static LandmarkParameterization landmark_parameterization =
+            LANDMARK_PARAMETERIZATION;
+        constexpr static VisualUpdateScheduler visual_update_scheduler =
+            VISUAL_UPDATE_SCHEDULER;
+        static_assert(schedulerRetainedCloneCount(visual_update_scheduler) < WIN_SIZE,
+                      "scheduler must leave one slot for the incoming clone");
 
         // Schur 序贯伪量测的噪声密度。更新中使用 R_i=uv_var/(d_i*dt)，
         // 因此它不是像素方差。30 s / 600 点四场景长时扫描后取 1e-2：
         // 1e-4 在滑窗充分运行后会放大线性化/gauge 漂移，1e-2 的最坏误差更稳健。
         TYPE uv_var = TYPE(1e-2);
+        // One-shot MSCKF tracks are genuine pixel batches rather than a
+        // repeatedly sampled information density. Their covariance is
+        // triangulation_uv_std^2 times this robustness multiplier.
+        TYPE msckf_visual_noise_scale = TYPE(1);
+        // RD-VIO classifies a frame as rotation-dominant when the 70th
+        // percentile IMU-rotation-aligned bearing error is below this angle.
+        TYPE rdvio_rotation_threshold_deg = TYPE(0.60);
+        size_t rdvio_min_common_tracks = 20;
+        size_t rdvio_subframe_size = 3;
+        size_t rdvio_rotation_compression_trigger = 9;
+        TYPE rdvio_zero_translation_std = TYPE(0.03);
         // 过程噪声整体缩放因子(1.0 = 使用 INSState 中配置的原值)，用于敏感度扫描
         TYPE proc_noise_scale_ = TYPE(1);
         // Strict-ablation switches. Production defaults keep real triangulation and
@@ -251,27 +270,34 @@ namespace slam {
 
         // ---- 数据采集(用于可视化/分析，见 tools/) ----
         struct UpdateLog {
-            Tus timestamp;
+            Tus timestamp{};
             // 视觉更新【前】(先验)与【后】(后验)的状态，用于看修正作用
-            Vec3 p_prior, p_post;
-            Vec3 v_prior, v_post;
-            Quat q_prior, q_post;
-            Vec3 bg_post, ba_post, g_post;
+            Vec3 p_prior{Vec3::Zero()}, p_post{Vec3::Zero()};
+            Vec3 v_prior{Vec3::Zero()}, v_post{Vec3::Zero()};
+            Quat q_prior{Quat::Identity()}, q_post{Quat::Identity()};
+            Vec3 bg_post{Vec3::Zero()}, ba_post{Vec3::Zero()}, g_post{Vec3::Zero()};
             // 本次视觉更新施加的修正量范数
-            TYPE dx_p_norm, dx_q_norm, dx_v_norm;
+            TYPE dx_p_norm{}, dx_q_norm{}, dx_v_norm{};
             // 协方差(位置/姿态/速度的 trace，开根号得米/弧度量级)
-            TYPE cov_p_trace, cov_q_trace, cov_v_trace;
+            TYPE cov_p_trace{}, cov_q_trace{}, cov_v_trace{};
             // Schur 序贯伪量测的归一化创新平方统计；均值理论期望约为 1。
-            TYPE nis_mean;
-            size_t nis_dof;
-            size_t n_lmk;      // 参与本次更新的 landmark 数
-            size_t n_obs_used;
-            size_t n_obs_downweighted;
-            size_t n_obs_rejected;
-            size_t win_size;   // 滑窗帧数
-            bool is_keyframe;
-            TYPE oc_leak_before;
-            TYPE oc_leak_after;
+            TYPE nis_mean{};
+            size_t nis_dof{};
+            size_t n_lmk{};      // 参与本次更新的 landmark 数
+            size_t n_obs_used{};
+            size_t n_obs_downweighted{};
+            size_t n_obs_rejected{};
+            size_t n_obs_new{};
+            size_t n_obs_reused{};
+            size_t n_tracks_consumed{};
+            size_t win_size{};   // 滑窗帧数
+            bool is_keyframe{};
+            TYPE oc_leak_before{};
+            TYPE oc_leak_after{};
+            bool is_rotation_frame{};
+            uint8_t rdvio_case{};
+            TYPE rdvio_misalignment_deg{};
+            size_t rotation_only_constraints{};
         };
         std::vector<UpdateLog> logs_;
         std::vector<TriangulationLog> triangulation_logs_;
@@ -306,6 +332,9 @@ namespace slam {
         size_t n_hll_discarded_directions_ = 0;
         TYPE hll_discarded_gradient_ratio_sum_ = TYPE(0);
         TYPE hll_discarded_gradient_ratio_max_ = TYPE(0);
+        size_t n_hll_condition_tests_ = 0;
+        TYPE hll_effective_condition_sum_ = TYPE(0);
+        TYPE hll_effective_condition_max_ = TYPE(0);
         size_t n_hpp_rank_tests_ = 0;
         size_t n_hpp_discarded_directions_ = 0;
         TYPE hpp_discarded_gradient_ratio_sum_ = TYPE(0);
@@ -314,6 +343,22 @@ namespace slam {
         size_t n_lmk_update_accepted_ = 0;
         size_t n_lmk_retriangulation_success_ = 0;
         TYPE lmk_reprojection_cost_reduction_ = TYPE(0);
+        // Visual measurement lifecycle diagnostics. In the recommended MSCKF
+        // scheduler n_reused_observations_ must remain exactly zero.
+        size_t n_new_observations_ = 0;
+        size_t n_reused_observations_ = 0;
+        size_t n_tracks_consumed_ = 0;
+        size_t n_tracks_dropped_ = 0;
+        size_t n_visual_updates_skipped_ = 0;
+        // Defensive guard: a reused MSCKF sample is rejected before H/g.
+        // This counter and n_reused_observations_ must both remain zero.
+        size_t n_duplicate_observations_blocked_ = 0;
+        size_t n_rdvio_rotation_frames_ = 0;
+        size_t n_rdvio_normal_frames_ = 0;
+        std::array<size_t, 5> n_rdvio_cases_{};
+        size_t n_rdvio_compressed_frames_ = 0;
+        size_t n_rdvio_rotation_constraints_ = 0;
+        size_t n_rdvio_zero_translation_constraints_ = 0;
     };
 }
 

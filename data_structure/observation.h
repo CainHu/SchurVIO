@@ -22,15 +22,19 @@ namespace slam {
             pt.setZero();
             un_pt.setZero();
             field_speed.setZero();
+            visual_update_count = 0;
         }
 
         CameraID camera_id{};
-        Feature *fet;
+        Feature *fet{};
         Count track_cnt{};
-        Vec2  pt{};
-        Vec3  un_pt{};
-        Vec2  field_speed{};
+        Vec2  pt{Vec2::Zero()};
+        Vec3  un_pt{Vec3::Zero()};
+        Vec2  field_speed{Vec2::Zero()};
         bool is_outlier{false};
+        // Number of posterior batches that consumed this exact pixel sample.
+        // It must stay at zero before an MSCKF one-shot track update.
+        uint16_t visual_update_count{};
 
     };
 }

@@ -71,6 +71,9 @@ namespace slam {
         void reset() {
             is_initialized = false;
             is_key_frame = false;
+            is_rotation_frame = false;
+            rdvio_case = 0;
+            rdvio_misalignment_deg = TYPE(0);
 
             timestamp = 0;
             id = 0;
@@ -89,6 +92,10 @@ namespace slam {
     public:
         bool is_initialized{false};
         bool is_key_frame{false};
+        bool is_rotation_frame{false};
+        // 0=None, 1=RR, 2=NN, 3=RN, 4=NR.
+        uint8_t rdvio_case{};
+        TYPE rdvio_misalignment_deg{};
 
         Tus timestamp{};
 
@@ -96,7 +103,7 @@ namespace slam {
         FrameOrder ordering{};
 
         Landmark2FeatureMsg lmk2fet;
-        CameraMsg           cam2img;
+        CameraMsg           cam2img{};
 
         std::array<TYPE, DIM> state{};     // q, t, v, ba, bg, g
         std::array<TYPE, DIM> state_fej{}; // q, t, v, ba, bg, g

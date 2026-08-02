@@ -3,7 +3,7 @@ const char *kReportTemplate = R"HTML(<!DOCTYPE html>
 <html lang="zh">
 <head>
 <meta charset="utf-8">
-<title>SchurVIO 视觉后验分析报告</title>
+<title>%%REPORT_TITLE%%</title>
 <style>
 :root{
   --bg:#0f1117; --panel:#171a21; --line:#262b36; --fg:#e6e8ee; --dim:#8b93a7;
@@ -57,7 +57,7 @@ code{background:#0b0d12;padding:1px 5px;border-radius:3px;font-size:12px}
 </head>
 <body>
 <header>
-  <h1>SchurVIO 视觉后验分析报告</h1>
+  <h1>%%REPORT_TITLE%%</h1>
   <div class="sub">Schur 路径 · 四类含噪仿真 · 相机 20 Hz · IMU 200 Hz · 滑窗 30 帧 · 已知重力固定</div>
 </header>
 <main>
@@ -249,6 +249,12 @@ code{background:#0b0d12;padding:1px 5px;border-radius:3px;font-size:12px}
   </div>
 </section>
 
+<section>
+  <h2>12. 调度与三自由度特征参数化对比</h2>
+  <h3>同场景、同噪声配置下比较精度、耗时、观测生命周期及 Hll 数值条件</h3>
+  <div class="panel"><div id="algorithmComparison"></div></div>
+</section>
+
 </main>
 
 <script>
@@ -270,6 +276,9 @@ const RAW_SUM  = `%%DATA_SUMMARY%%`;
 const RAW_ABLATION = `%%DATA_ABLATION%%`;
 const RAW_OBSERVABILITY = `%%DATA_OBSERVABILITY%%`;
 const RAW_LANDMARK_CONSISTENCY = `%%DATA_LANDMARK_CONSISTENCY%%`;
+const RAW_SCHEDULER = `%%DATA_SCHEDULER%%`;
+const RAW_PARAMETERIZATION = `%%DATA_PARAMETERIZATION%%`;
+const REPORT_TAG = `%%REPORT_TAG%%`;
 
 function parseCSV(txt){
   const lines = txt.trim().split('\n');
@@ -310,6 +319,9 @@ const SUM = parseCSV(RAW_SUM).rows;
 const ABL = parseCSV(RAW_ABLATION).rows;
 const OBSERVABILITY = parseCSV(RAW_OBSERVABILITY).rows;
 const LANDMARK_CONSISTENCY = parseCSV(RAW_LANDMARK_CONSISTENCY).rows;
+const SCHEDULER = parseCSV(RAW_SCHEDULER).rows;
+const PARAMETERIZATION = parseCSV(RAW_PARAMETERIZATION).rows;
+const REPORT_ROWS = [...SUM, ...SCHEDULER, ...PARAMETERIZATION];
 
 const fmt=(v,n=4)=>{
   if(!isFinite(v)) return '—';
@@ -501,7 +513,7 @@ function drawScenarioOverview(scenario){
 (function(){
   SCENARIOS.forEach(drawScenarioOverview);
   const metrics=SCENARIOS.map(s=>{
-    const row=[...SUM].reverse().find(r=>String(r.scenario)===s.key&&String(r.tag)==='base');
+    const row=[...REPORT_ROWS].reverse().find(r=>String(r.scenario)===s.key&&String(r.tag)===REPORT_TAG);
     const used=s.update.reduce((a,r)=>a+(r.obs_used||0),0);
     const down=s.update.reduce((a,r)=>a+(r.obs_downweighted||0),0);
     const rejected=s.update.reduce((a,r)=>a+(r.obs_rejected||0),0);
@@ -544,7 +556,7 @@ function drawScenarioOverview(scenario){
     ['末帧位置误差', fmt(fin.err_p,4)+' m', '轨迹半径 5 m', fin.err_p<0.5?'good':'bad'],
     ['1 s 相对位移 RMSE',fmt(rpe,4)+' m','弱化全局平移 gauge 的局部运动指标',rpe<0.3?'good':'warn'],
   ];
-  const base=[...SUM].reverse().find(r=>String(r.scenario)==='circle_out'&&String(r.tag)==='base');
+  const base=[...REPORT_ROWS].reverse().find(r=>String(r.scenario)==='circle_out'&&String(r.tag)===REPORT_TAG);
   if(base&&base.updates>0){
     cards.push(['平均视觉后验耗时',fmt(1000*base.t_cost/base.updates,3)+' ms',
       `总计 ${fmt(base.t_cost,2)} s / ${base.updates} 次`,'']);
@@ -1385,8 +1397,52 @@ linePlot('cwin',{y0:0,y1:32,series:[
   {name:'滑窗帧数',color:C('--ok'),data:U.map(r=>[r.t,r.win]),lw:1.2},
 ]});
 
+// ================= 12. Scheduler / parameterization =================
+(function(){
+  const root=document.getElementById('algorithmComparison');
+  const schedulerRows=SCHEDULER.filter(r=>String(r.scenario)==='circle_out');
+  const parameterRows=PARAMETERIZATION.filter(r=>String(r.scenario)==='circle_out');
+  if(!schedulerRows.length&&!parameterRows.length){
+    root.innerHTML='<div class="sub">尚未生成调度或参数化对比 CSV。</div>';
+    return;
+  }
+  let html='';
+  if(schedulerRows.length){
+    html+='<h3>视觉更新调度（Circle-out）</h3><table><thead><tr>'+[
+      '调度','ATE (m)','1 s RPE (m)','平均后验 (ms)','复用率','丢弃轨迹','R/N 帧','RR/NN/RN/NR'
+    ].map(x=>`<th>${x}</th>`).join('')+'</tr></thead><tbody>';
+    for(const r of schedulerRows){
+      const ms=r.updates?1000*r.t_cost/r.updates:NaN;
+      html+=`<tr class="${String(r.tag)===REPORT_TAG?'best':''}"><td>${r.scheduler||r.tag}</td>`+
+        `<td>${fmt(r.rmse_p_aligned,4)}</td><td>${fmt(r.rpe_1s_p,4)}</td>`+
+        `<td>${fmt(ms,3)}</td><td>${fmt(100*(r.reuse_rate||0),2)}%</td>`+
+        `<td>${fmt(r.tracks_dropped,0)}</td><td>${fmt(r.r_frames,0)}/${fmt(r.n_frames,0)}</td>`+
+        `<td>${fmt(r.case_rr,0)}/${fmt(r.case_nn,0)}/${fmt(r.case_rn,0)}/${fmt(r.case_nr,0)}</td></tr>`;
+    }
+    html+='</tbody></table>';
+  }
+  if(parameterRows.length){
+    html+='<h3 style="margin-top:18px">三自由度 Landmark 参数化（Circle-out）</h3><table><thead><tr>'+[
+      '参数化','ATE (m)','1 s RPE (m)','平均后验 (ms)','Hll 有效条件数','Hll 丢弃方向','三角化成功'
+    ].map(x=>`<th>${x}</th>`).join('')+'</tr></thead><tbody>';
+    for(const r of parameterRows){
+      const ms=r.updates?1000*r.t_cost/r.updates:NaN;
+      html+=`<tr class="${String(r.tag)===REPORT_TAG?'best':''}"><td>${r.parameterization||r.tag}</td>`+
+        `<td>${fmt(r.rmse_p_aligned,4)}</td><td>${fmt(r.rpe_1s_p,4)}</td>`+
+        `<td>${fmt(ms,3)}</td><td>${fmt(r.hll_effective_condition_mean,2)}</td>`+
+        `<td>${fmt(r.hll_discarded,0)}</td><td>${fmt(r.tri_success,0)}/${fmt(r.tri_attempts,0)}</td></tr>`;
+    }
+    html+='</tbody></table>';
+  }
+  root.innerHTML=html;
+})();
+
 draw3D();
-window.addEventListener('resize',()=>location.reload());
+let resizeTimer=0;
+window.addEventListener('resize',()=>{
+  clearTimeout(resizeTimer);
+  resizeTimer=setTimeout(draw3D,120);
+});
 </script>
 </body>
 </html>

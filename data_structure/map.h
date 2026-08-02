@@ -35,27 +35,42 @@ namespace slam {
                 return false;
             }
 
-            // 判断是否为 Key Frame
-            if (!sfw.empty() && sfw.getLatestFrame()->timestamp + 200000 > image_info.timestamp) {
+            // Every-image schedulers also keep temporal frames in sfw. Compare
+            // against the latest actual keyframe rather than simply the latest
+            // clone, otherwise no later image could ever pass the time gate.
+            const Frame *latest_keyframe = nullptr;
+            for (size_t i = sfw.size(); i > 0; --i) {
+                const Frame *candidate = sfw[i - 1];
+                if (candidate && candidate->is_key_frame) {
+                    latest_keyframe = candidate;
+                    break;
+                }
+            }
+            if (latest_keyframe &&
+                latest_keyframe->timestamp + 200000 > image_info.timestamp) {
                 return false;
             }
 
             return true;
         }
 
-        // 将帧加入滑窗（仅关键帧）
-        Frame* pushKeyFrame(Tus timestamp) {
+        // Add either a keyframe or temporal frame to the clone window. The
+        // physical slot index is also the covariance-block ordering.
+        Frame* pushFrame(Tus timestamp, bool is_keyframe) {
             auto frame = pool_frm.allocate();
             sfw.pushFrame(frame);
             frame->timestamp = timestamp;
             frame->id = timestamp;
             frame->ordering = sfw.getLatestIndex();
-            frame->is_key_frame = true;
+            frame->is_key_frame = is_keyframe;
 
 //            std::cout << "frame->ordering = " << frame->ordering << std::endl;
 
             return frame;
         }
+
+        // Historical compatibility wrapper.
+        Frame* pushKeyFrame(Tus timestamp) { return pushFrame(timestamp, true); }
 
         // 创建临时帧（非关键帧），不加入滑窗，仅用于观测关联
         Frame* createTempFrame(Tus timestamp) {
@@ -113,15 +128,22 @@ namespace slam {
             }
         }
 
-        void popFrame() {
+        void popFrame(size_t chronological_index = 0) {
             static size_t count = 0;
             ++count;
 
-            Frame *frm = sfw.popFrame();
+            Frame *frm = sfw.popFrame(chronological_index);
+            if (!frm) {
+                throw std::runtime_error("null frame removed from sliding window");
+            }
             auto frm_id = frm->id;
             for (auto &it : frm->lmk2fet) {
                 LandmarkID lmk_id = it.first;
-                Landmark *lmk = lmk_map.at(lmk_id);
+                const auto landmark_it = lmk_map.find(lmk_id);
+                if (landmark_it == lmk_map.end()) {
+                    continue;
+                }
+                Landmark *lmk = landmark_it->second;
 
                 // 把 Frame 从 Landmark 中删去
                 if (!lmk->delete_frame(frm_id)) {
@@ -156,6 +178,42 @@ namespace slam {
             pool_frm.deallocate(frm, [](Frame &frame) {
                 frame.reset();
             });
+        }
+
+        // Consume a complete structureless track. All frame-side references
+        // are erased before pooled Feature/Observation objects are released so
+        // a later measurement with the same external id starts a fresh track.
+        bool removeLandmark(LandmarkID landmark_id) {
+            const auto landmark_it = lmk_map.find(landmark_id);
+            if (landmark_it == lmk_map.end()) {
+                return false;
+            }
+            Landmark *landmark = landmark_it->second;
+            for (const auto &[frame_id, feature] : landmark->frm2fet) {
+                (void)frame_id;
+                if (!feature) {
+                    continue;
+                }
+                if (feature->frame) {
+                    feature->frame->lmk2fet.erase(landmark_id);
+                }
+                for (auto *observation : feature->obs) {
+                    if (observation) {
+                        pool_obs.deallocate(observation, [](Observation &value) {
+                            value.reset();
+                        });
+                    }
+                }
+                pool_fet.deallocate(feature, [](Feature &value) {
+                    value.reset();
+                });
+            }
+            landmark->frm2fet.clear();
+            lmk_map.erase(landmark_it);
+            pool_lmk.deallocate(landmark, [](Landmark &value) {
+                value.reset();
+            });
+            return true;
         }
 
         [[nodiscard]] bool isWinFull() const { return sfw.isFull(); }
