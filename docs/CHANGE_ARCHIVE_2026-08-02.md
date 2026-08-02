@@ -176,3 +176,27 @@ VINS-Mono 的三角化重试不再依赖观测数量，而记录最新观测帧 
 - 新增 [SOURCE_LAYOUT.md](SOURCE_LAYOUT.md) 与 [SHADOW_LANDMARKS.md](SHADOW_LANDMARKS.md)；
 - 将根目录早期调试记录移入 `docs/archive/legacy_debug/`，并明确其历史属性；
 - `out/*.csv`、`out/*.html` 与 `out/*.log` 统一视为可再生实验产物，不进入提交。
+
+## 默认 MSCKF 混合后端
+
+在保持 MSCKF 一次性像素生命周期不变的前提下，新增受控的混合后端：
+
+- 默认路径复用 RD-VIO 的 R/N 运动分类和无深度旋转残差，但不采用四 Case 调度、R 子窗压缩
+  或零平移先验；
+- 低视差且仍可见的轨迹延迟消费，先使用最新纯旋转观测，等待后续平移基线；
+- 已丢失的低视差轨迹保存首尾 bearing、相机位姿快照和时间摘要；历史快照只用于影子候选
+  筛选，不直接构造导航残差；
+- 影子候选通过 3D NIS、几何评分和稳定次数检查后，只能由当前有效 clone 的 Schur 正规方程
+  完成延迟初始化；
+- 最多 20 个持久 Landmark 追加到联合状态，完整维护 `P_xl/P_ll`，并通过当前关键帧直接 EKF
+  更新；IMU 传播和 clone 增广同步维护交叉协方差；
+- 持久点晋升采用 4×3 图像网格限额，默认每格最多 2 个；
+- 默认旋转信息尺度为 0.02，持久点量测方差倍率为 64，均由严格长时扫描确定。
+
+源码新增 `eskf/schur_vins_persistent.cpp` 和 `eskf/schur_vins_track_archive.cpp`，分析输出新增延迟、
+轨迹摘要、候选池、持久点和无深度旋转约束统计；`summary.csv`、调度/帧策略 CSV 与 HTML 表格
+同步支持这些字段。
+
+100 s / 600 点回归中，Circle-out、Circle-in、Helix-3D、Stop-go、Rotation/translation 的位置
+RMSE 分别从 0.3443、0.4179、0.2013、0.6688、8.4281 m 变为 0.3262、0.3124、0.0867、
+0.0604、7.3984 m；所有场景保持 `reused=0`、`blocked=0`。

@@ -367,11 +367,26 @@ g_p\leftarrow g_p+J^TWr.
 
 普通前三个场景改善，但 Stop-go 恶化，专门的 R/N 场景还出现较大的 NEES。这说明当前移植能验证调度思想，却不能替代完整 RD-VIO 前端、预积分链和分层 BA。
 
+### 默认 MSCKF 的复用边界
+
+R/N 运动分类和第 6 节的无深度旋转残差只依赖相邻 bearing、clone 姿态与相机外参，不依赖
+RD-VIO 的四 Case 窗口，也不依赖 BA。因此默认 MSCKF 现在复用这两部分，但明确不复用：
+
+- RR/NN/RN/NR 关键帧转换；
+- R 子窗 3:1 压缩；
+- 零平移伪量测；
+- RD-VIO 的局部/全局 BA 和预积分拼接。
+
+默认路径中，低视差轨迹只有在准备消费时才尝试旋转因子；若轨迹仍可见，则消费最新一对旋转
+观测后保留剩余观测等待平移。若轨迹已丢失，则保存只用于影子候选筛选的首尾射线摘要。完整
+状态机和交叉协方差边界见 [影子候选与持久 Landmark](SHADOW_LANDMARKS.md)。
+
 ## 11. 对应代码与回归
 
 - `eskf/rdvio_scheduler.cpp`：R/N 判定、四 Case 和压缩计划；
 - `eskf/rdvio_constraints.cpp`：旋转与零平移因子；
-- `eskf/schur_vins_visual.cpp`：轨迹消费、Schur 后验及 clone 删除；
+- `eskf/schur_vins_visual.cpp`：轨迹消费、旋转因子分流、Schur 后验及 clone 删除；
+- `eskf/schur_vins_track_archive.cpp`：低视差丢失轨迹摘要和跨轨迹候选筛选；
 - [通用视觉调度与观测生命周期](VISUAL_UPDATE_SCHEDULING.md)；
 - [多视图三角化](TRIANGULATION.md)。
 
@@ -380,7 +395,8 @@ powershell -ExecutionPolicy Bypass `
   -File tools/run_scheduler_analysis.ps1 -Quick
 ```
 
-结果写入 `out/scheduler_summary.csv`，报告同时展示 Case 计数、R/N 帧数、压缩帧数、旋转因子和零平移因子数量。
+结果写入 `out/scheduler_summary.csv`，报告同时展示 Case 计数、R/N 帧数、压缩帧数、旋转因子、
+零平移因子、轨迹摘要复用和持久点更新数量。
 
 ## 12. 参考来源
 

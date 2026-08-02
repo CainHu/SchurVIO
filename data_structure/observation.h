@@ -23,6 +23,7 @@ namespace slam {
             un_pt.setZero();
             field_speed.setZero();
             visual_update_count = 0;
+            used_by_depth_free_rotation = false;
         }
 
         CameraID camera_id{};
@@ -35,6 +36,9 @@ namespace slam {
         // Number of posterior batches that consumed this exact pixel sample.
         // It must stay at zero before an MSCKF one-shot track update.
         uint16_t visual_update_count{};
+        // 该像素若先被无深度旋转因子消费，后续深度轨迹线性化应主动过滤它，
+        // 而不是把这种有意分流记为“重复观测保护触发”。
+        bool used_by_depth_free_rotation{false};
 
     };
 }

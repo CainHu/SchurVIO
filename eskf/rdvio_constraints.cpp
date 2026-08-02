@@ -11,6 +11,7 @@ namespace slam {
         const bool add_zero_translation_constraint,
         const bool use_fej,
         const TYPE visual_batch_variance,
+        const TYPE rotation_information_scale,
         const TYPE zero_translation_std,
         const TYPE hard_reprojection_limit,
         MatXX &Hpp,
@@ -18,6 +19,10 @@ namespace slam {
         RDVIOConstraintStatistics statistics;
 
         if (add_zero_translation_constraint && map.sfw.size() >= 2) {
+            // 零平移伪量测：r_t=0-(p_j-p_i)。当前误差状态的位置项采用加法，
+            // 因而 J_i=[0,-I]、J_j=[0,I]。权重写成 visual_batch_variance/
+            // sigma_t^2，是因为整个视觉正规方程最后统一按 visual_batch_variance
+            // 解释为伪量测噪声；这样该因子的实际方差仍为 sigma_t^2。
             const Frame *previous = map.sfw[map.sfw.size() - 2];
             const Frame *current = map.sfw[map.sfw.size() - 1];
             const Vec3 residual = -(current->p() - previous->p());
@@ -55,8 +60,12 @@ namespace slam {
             ++statistics.zero_translation_constraints;
         }
 
-        // A track without reliable depth can still constrain relative
-        // orientation: r = B^T (b_j - R_cj_w R_w_ci b_i).
+        // 轨迹深度不可观时仍可约束相对旋转：
+        //   d_w        = R_wc,i b_i
+        //   b_j_hat    = R_wc,j^T d_w
+        //   r_R        = B_j^T (b_j-b_j_hat)
+        // 其中 B_j=[t_x,t_y] 是 b_j 的正交切平面基。投影到切平面后残差只有
+        // 2 维，且不需要引入深度或执行 Schur 消元。
         for (Landmark *landmark : rotation_only_tracks) {
             Feature *from_feature = nullptr;
             Feature *to_feature = nullptr;
@@ -109,6 +118,8 @@ namespace slam {
                     ? to_feature->frame->q_fej().toRotationMatrix()
                     : to_feature->frame->q().toRotationMatrix()) * Ric;
             const Vec3 direction_world_jac = Rwc_from_jac * bearing_from;
+            // 左乘姿态误差下，delta(R d)≈-hat(Rd) delta_theta；代入
+            // b_j_hat=R_wc,j^T R_wc,i b_i，可得前后两帧姿态雅可比互为相反数。
             const Mat2_3 common = tangent.transpose() *
                 Rwc_to_jac.transpose() * hat(direction_world_jac);
             Mat2_6 J_from = Mat2_6::Zero();
@@ -119,7 +130,12 @@ namespace slam {
                 AugState::SIZE * from_feature->frame->ordering;
             const size_t to_index = INSState::SIZE +
                 AugState::SIZE * to_feature->frame->ordering;
-            constexpr TYPE weight = TYPE(0.5);
+            // 两个 bearing 都含像素噪声，差分残差近似具有 2 sigma_uv^2 方差，
+            // 基础信息权重为 1/2。工程缩放 rotation_information_scale 用于吸收
+            // R/N 误分类、IMU 旋转补偿误差和相邻 bearing 相关性；默认取保守值，
+            // 避免一个启发式退化约束压过正常的多视图 Schur 信息。
+            const TYPE weight = TYPE(0.5) *
+                std::max(rotation_information_scale, TYPE(0));
 
             Hpp.block<6, 6>(from_index, from_index)
                 .triangularView<Eigen::Upper>() +=
@@ -141,6 +157,8 @@ namespace slam {
 
             ++from_feature->obs[0]->visual_update_count;
             ++to_feature->obs[0]->visual_update_count;
+            from_feature->obs[0]->used_by_depth_free_rotation = true;
+            to_feature->obs[0]->used_by_depth_free_rotation = true;
             statistics.observations_used += 2;
             statistics.new_observations += 2;
             ++statistics.tracks_used;

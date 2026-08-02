@@ -79,6 +79,10 @@ stateDiagram-v2
 
 成功写入正规方程后立即加一。若同一对象再次到达线性化器，防御检查会计入 `duplicate_observations_blocked` 并拒绝它。
 
+低视差轨迹的无深度旋转分流是唯一的有意例外：对应像素同时标记
+`used_by_depth_free_rotation=true`。后续轨迹获得深度时，线性化器会主动跳过这些像素，只使用
+尚未消费的观测；这种正常分流不计入 `duplicate_observations_blocked`。
+
 轨迹消费后会删除 Landmark、Feature 和 Observation 对象。前端以后即使重新使用同一个数值 ID，地图中建立的也是一条新轨迹和一组新像素量测。真正需要禁止的是同一个 Observation 对象被第二次送入后验，而不是永久禁止某个整数 ID。
 
 ## Schur 一次性更新的矩阵流程
@@ -118,7 +122,7 @@ H_o^TH_o
 |---|---|---|---|---|---|
 | `LEGACY` | 仅关键帧 | 每个相机时刻都解当前关键帧批次 | 持久，历史观测会重复进入后验 | 满 30 帧后删最老帧 | 原实现回归基线 |
 | `SCHURVINS` | 每张图像 | 每张图像解活跃轨迹 | 持久并可重复线性化 | 更新时最多 4 帧参与，随后保留最新帧和较新的关键帧，共 3 帧 | 论文/官方代码风格对照 |
-| `MSCKF` | 由 frame policy 决定；默认仅关键帧 | 轨迹丢失、触及待删 clone 或长度达到 20 | 更新一次后整条删除；同 ID 后续重新建轨 | 默认保留 20 个关键帧 clone | 默认、Bayes 生命周期最清楚 |
+| `MSCKF` | 由 frame policy 决定；默认仅关键帧 | 轨迹丢失、触及待删 clone 或长度达到 20；低视差时可先用无深度旋转约束 | 普通轨迹更新一次后删除；低视差可延迟或归档；少量稳定点晋升为联合 SLAM 点 | 默认保留 20 个关键帧 clone | 默认混合后端，保持一次性生命周期 |
 | `VINS_MONO` | 每张图像 | 每张图像解当前批次 | 本 ESKF 对照模式中仍会重复 | 次新帧是关键帧则删最老帧，否则删次新非关键帧 | 仅帧调度 A/B |
 | `RDVIO` | 每张图像 | N 轨迹用 Schur；未三角化 R 轨迹用无深度旋转因子 | 与 MSCKF 一样一次性消费 | RR/NN/RN/NR 分层保留，长 R 子窗按 3:1 压缩 | 实验模式，详见 `RDVIO_SCHEDULING.md` |
 
@@ -137,7 +141,7 @@ VINS-Mono 在固定窗口内反复优化同一组残差是合理的，因为它�
 
 ### ROVIO/RVIO 与 RD-VIO 适配的边界
 
-ROVIO/RVIO 的核心差异不是“什么时候调用同一个 `updateVisual`”：它们涉及直接光度残差、robocentric 状态或不同前端，仍不能只靠帧删除顺序复刻。`RDVIO` 模式则已实现可一致迁移的 R/N 分类、四 Case、延迟三角化、无深度旋转量测和子窗压缩；没有前端支持的 IMU-PARSAC 与完整 BA 明确留在实现边界之外，详见 `RDVIO_SCHEDULING.md`。
+ROVIO/RVIO 的核心差异不是“什么时候调用同一个 `updateVisual`”：它们涉及直接光度残差、robocentric 状态或不同前端，仍不能只靠帧删除顺序复刻。`RDVIO` 模式已实现可一致迁移的 R/N 分类、四 Case、延迟三角化、无深度旋转量测和子窗压缩。当前又把“R/N 分类 + 无深度旋转因子”与 RD-VIO 调度解耦：默认 MSCKF 可复用旋转信息，但仍使用 Keyframe-only 窗口，不添加零平移先验，也不压缩 R 子窗。没有前端支持的 IMU-PARSAC 与完整 BA 明确留在实现边界之外，详见 `RDVIO_SCHEDULING.md` 和 `SHADOW_LANDMARKS.md`。
 
 ## Clone 保留与删除流程
 
@@ -204,6 +208,7 @@ cmake --build cmake-build-release --target VinsAnalysis -j 4
 - `new_observations`：第一次进入后验的有效观测数；
 - `reused_observations`：再次进入后验的观测数；
 - `duplicate_observations_blocked`：MSCKF 防御性检查拦截的重复观测数；
+- `depth_free_rotation_constraints`：低视差轨迹使用的无深度旋转因子数；
 - `tracks_consumed / tracks_dropped`：一次性结束的轨迹数和未成功进入后验的轨迹数；
 - `max_window`：更新时参与的最大 clone 数；
 - `keyframes / nonkeyframes / frames_stored`：帧策略判定与实际增广数量；

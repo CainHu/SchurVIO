@@ -5,6 +5,8 @@
 //                [landmark_init] [refine] [imu_noise] [bias_rw] [summary_group]
 //                [oc_fej] [oc_projection] [landmark_update] [tri_min_parallax_deg]
 //                [shadow_map] [landmark_q_m2_s] [adaptive_inflation_gain]
+//                [hybrid_persistent] [persistent_budget] [depth_free_rotation]
+//                [rotation_information_scale] [persistent_noise_scale]
 //     uv_var  Schur 序贯伪量测的噪声密度
 //     tag     输出文件名后缀，用于噪声扫描时区分多组结果
 //     scenario circle_out / circle_in / helix_3d / stop_go
@@ -186,6 +188,18 @@ int main(int argc, char **argv) {
         (argc > 17) ? std::atof(argv[17]) : 1e-3;
     const double landmark_adaptive_inflation_gain =
         (argc > 18) ? std::atof(argv[18]) : 1.0;
+    const bool enable_hybrid_persistent =
+        (argc > 19) ? std::atoi(argv[19]) != 0 : true;
+    const size_t persistent_budget =
+        (argc > 20)
+            ? static_cast<size_t>(std::strtoull(argv[20], nullptr, 10))
+            : 20;
+    const bool enable_depth_free_rotation =
+        (argc > 21) ? std::atoi(argv[21]) != 0 : true;
+    const double rotation_information_scale =
+        (argc > 22) ? std::atof(argv[22]) : 0.02;
+    const double persistent_noise_scale =
+        (argc > 23) ? std::atof(argv[23]) : 64.0;
     const bool legacy_white_noise = imu_noise_model == "legacy";
     using LandmarkInit = slam::SchurVINS::LandmarkInitializationMode;
     const LandmarkInit landmark_initialization_mode = landmark_init == "gt"
@@ -242,6 +256,11 @@ int main(int argc, char **argv) {
     ekf.enable_shadow_landmark_postprocessor_ = enable_shadow_map;
     ekf.landmark_process_noise_density_ = landmark_process_noise_density;
     ekf.landmark_adaptive_inflation_gain_ = landmark_adaptive_inflation_gain;
+    ekf.enable_hybrid_persistent_landmarks_ = enable_hybrid_persistent;
+    ekf.persistent_landmark_budget_ = persistent_budget;
+    ekf.enable_depth_free_rotation_constraints_ = enable_depth_free_rotation;
+    ekf.depth_free_rotation_information_scale_ = rotation_information_scale;
+    ekf.persistent_measurement_noise_scale_ = persistent_noise_scale;
     ekf.triangulation_uv_std = simulation.camera_noise_std / simulation.focal_length;
     ekf.triangulation_min_parallax_deg = triangulation_min_parallax_deg;
     ekf.setQPV(ground_truth[0].q, ground_truth[0].p, ground_truth[0].v);
@@ -862,6 +881,30 @@ int main(int argc, char **argv) {
         // base 是一组新实验的起点：先清掉旧算法留下的扫描结果，避免报告混用数据。
         FILE *f = std::fopen(path.c_str(), reset_summary ? "w" : "a");
         if (f) {
+            const auto appendHybridDiagnostics = [&](FILE *output) {
+                std::fprintf(
+                    output,
+                    ",%d,%d,%.6g,%.6g,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu\n",
+                    enable_hybrid_persistent ? 1 : 0,
+                    enable_depth_free_rotation ? 1 : 0,
+                    rotation_information_scale,
+                    persistent_noise_scale,
+                    ekf.n_tracks_deferred_,
+                    ekf.deferred_track_archives_.size(),
+                    ekf.n_track_archives_created_,
+                    ekf.n_track_archives_reused_,
+                    ekf.n_track_archives_rejected_,
+                    ekf.shadow_candidates_.size(),
+                    ekf.n_shadow_candidate_updates_,
+                    ekf.n_shadow_candidate_rejections_,
+                    ekf.persistent_landmarks_.size(),
+                    ekf.n_persistent_landmarks_promoted_,
+                    ekf.n_persistent_landmark_updates_,
+                    ekf.n_persistent_landmark_rejections_,
+                    ekf.n_rotation_dominant_frames_,
+                    ekf.n_translation_dominant_frames_,
+                    ekf.n_depth_free_rotation_constraints_);
+            };
             if (!exists) {
                 if (is_ablation) {
                     std::fprintf(f,
@@ -891,7 +934,12 @@ int main(int argc, char **argv) {
                         "reuse_rate,tracks_consumed,tracks_dropped,duplicate_observations_blocked,"
                         "updates_skipped,max_window,tri_success,tri_attempts,"
                         "r_frames,n_frames,case_rr,case_nn,case_rn,case_nr,"
-                        "compressed_frames,rotation_constraints,zero_translation_constraints\n");
+                        "compressed_frames,rotation_constraints,zero_translation_constraints,"
+                        "hybrid_persistent,depth_free_rotation_enabled,rotation_information_scale,persistent_noise_scale,deferred_tracks,active_track_archives,track_archives_created,"
+                        "track_archives_reused,track_archives_rejected,shadow_candidates,candidate_updates,"
+                        "candidate_rejections,persistent_landmarks,persistent_promoted,persistent_updates,"
+                        "persistent_rejections,rotation_dominant_frames,translation_dominant_frames,"
+                        "depth_free_rotation_constraints\n");
                 } else if (is_frame_policy) {
                     std::fprintf(f,
                         "scenario,tag,scheduler,frame_policy,retained_clones,parameterization,"
@@ -902,7 +950,12 @@ int main(int argc, char **argv) {
                         "updates_skipped,max_window,keyframes,nonkeyframes,frames_stored,"
                         "tri_success,tri_attempts,"
                         "r_frames,n_frames,case_rr,case_nn,case_rn,case_nr,"
-                        "compressed_frames,rotation_constraints,zero_translation_constraints\n");
+                        "compressed_frames,rotation_constraints,zero_translation_constraints,"
+                        "hybrid_persistent,depth_free_rotation_enabled,rotation_information_scale,persistent_noise_scale,deferred_tracks,active_track_archives,track_archives_created,"
+                        "track_archives_reused,track_archives_rejected,shadow_candidates,candidate_updates,"
+                        "candidate_rejections,persistent_landmarks,persistent_promoted,persistent_updates,"
+                        "persistent_rejections,rotation_dominant_frames,translation_dominant_frames,"
+                        "depth_free_rotation_constraints\n");
                 } else if (is_parameterization) {
                     std::fprintf(f,
                         "scenario,tag,scheduler,parameterization,uv_var,duration,features,"
@@ -929,7 +982,12 @@ int main(int argc, char **argv) {
                     std::fprintf(f,
                         "scenario,tag,uv_var,proc_scale,estimate_gravity,duration,features,"
                         "rmse_p,rmse_v,rmse_att,rmse_bg,rmse_ba,max_err_p,mean_nees,mean_nis,"
-                        "gravity_error,neg_cov,t_cost,updates,tri_success,tri_attempts\n");
+                        "gravity_error,neg_cov,t_cost,updates,tri_success,tri_attempts,"
+                        "hybrid_persistent,depth_free_rotation_enabled,rotation_information_scale,persistent_noise_scale,deferred_tracks,active_track_archives,track_archives_created,"
+                        "track_archives_reused,track_archives_rejected,shadow_candidates,candidate_updates,"
+                        "candidate_rejections,persistent_landmarks,persistent_promoted,persistent_updates,"
+                        "persistent_rejections,rotation_dominant_frames,translation_dominant_frames,"
+                        "depth_free_rotation_constraints\n");
                 }
             }
             if (is_ablation) {
@@ -1002,7 +1060,7 @@ int main(int argc, char **argv) {
                     "%s,%s,%s,%s,%d,%.9g,%.1f,%zu,"
                     "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
                     "%.6e,%.6e,%.3f,%zu,%zu,%zu,%.6e,"
-                    "%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu\n",
+                    "%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu",
                     scenario.c_str(), tag.c_str(),
                     slam::visualUpdateSchedulerName(),
                     slam::landmarkParameterizationName(),
@@ -1023,6 +1081,7 @@ int main(int argc, char **argv) {
                     ekf.n_rdvio_compressed_frames_,
                     ekf.n_rdvio_rotation_constraints_,
                     ekf.n_rdvio_zero_translation_constraints_);
+                appendHybridDiagnostics(f);
             } else if (is_frame_policy) {
                 size_t max_window = 0;
                 for (const auto &log : ekf.logs_) {
@@ -1038,7 +1097,7 @@ int main(int argc, char **argv) {
                     "%s,%s,%s,%s,%zu,%s,%d,%.9g,%.1f,%zu,"
                     "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
                     "%.6e,%.6e,%.3f,%zu,%zu,%zu,%.6e,"
-                    "%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu\n",
+                    "%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu",
                     scenario.c_str(), tag.c_str(),
                     slam::visualUpdateSchedulerName(),
                     slam::frameSelectionPolicyName(),
@@ -1063,6 +1122,7 @@ int main(int argc, char **argv) {
                     ekf.n_rdvio_compressed_frames_,
                     ekf.n_rdvio_rotation_constraints_,
                     ekf.n_rdvio_zero_translation_constraints_);
+                appendHybridDiagnostics(f);
             } else if (is_parameterization) {
                 const double hll_condition_mean = ekf.n_hll_condition_tests_ > 0
                     ? ekf.hll_effective_condition_sum_ /
@@ -1117,7 +1177,7 @@ int main(int argc, char **argv) {
                 std::fprintf(f,
                     "%s,%s,%.9g,%.4f,%d,%.1f,%zu,"
                     "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6e,%.6e,"
-                    "%.6e,%zu,%.3f,%zu,%zu,%zu\n",
+                    "%.6e,%zu,%.3f,%zu,%zu,%zu",
                     scenario.c_str(), tag.c_str(), uv_var, proc_scale,
                     slam::INSState::ESTIMATE_GRAVITY ? 1 : 0, duration, feature_count,
                     rmse_p, rmse_v, rmse_a, rmse_bg, rmse_ba, mp, mean_nees, mean_nis,
@@ -1125,6 +1185,7 @@ int main(int argc, char **argv) {
                     static_cast<double>(ekf.t_cost_) / static_cast<double>(CLOCKS_PER_SEC),
                     ekf.posterior_times_, triangulation_success,
                     ekf.triangulation_logs_.size());
+                appendHybridDiagnostics(f);
             }
             std::fclose(f);
         }
@@ -1146,6 +1207,30 @@ int main(int argc, char **argv) {
                     ekf.n_tracks_consumed_, ekf.n_tracks_dropped_,
                     100.0 * track_drop_rate,
                     ekf.n_visual_updates_skipped_);
+        std::printf(
+            "hybrid=%d  depth_free_rotation=%d(scale=%.3g)  persistent_noise_scale=%.3g  "
+            "deferred=%zu  candidates=%zu  candidate_updates/rejected=%zu/%zu  "
+            "persistent=%zu  promoted/updates/rejected=%zu/%zu/%zu\n"
+            "archives(active/created/reused/rejected/expired)=%zu/%zu/%zu/%zu/%zu  "
+            "motion(R/N)=%zu/%zu  depth_free_rotation_constraints=%zu\n",
+            enable_hybrid_persistent ? 1 : 0,
+            enable_depth_free_rotation ? 1 : 0,
+            rotation_information_scale,
+            persistent_noise_scale,
+            ekf.n_tracks_deferred_, ekf.shadow_candidates_.size(),
+            ekf.n_shadow_candidate_updates_, ekf.n_shadow_candidate_rejections_,
+            ekf.persistent_landmarks_.size(),
+            ekf.n_persistent_landmarks_promoted_,
+            ekf.n_persistent_landmark_updates_,
+            ekf.n_persistent_landmark_rejections_,
+            ekf.deferred_track_archives_.size(),
+            ekf.n_track_archives_created_,
+            ekf.n_track_archives_reused_,
+            ekf.n_track_archives_rejected_,
+            ekf.n_track_archives_expired_,
+            ekf.n_rotation_dominant_frames_,
+            ekf.n_translation_dominant_frames_,
+            ekf.n_depth_free_rotation_constraints_);
         if (slam::schedulerConsumesTracksOnce() && track_drop_rate > 0.8) {
             std::fprintf(stderr,
                          "warning: %.1f%% of one-shot tracks were dropped before visual update; "

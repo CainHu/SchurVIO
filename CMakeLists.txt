@@ -148,6 +148,8 @@ add_executable(VinsEKF main.cpp
         eskf/rdvio_scheduler.h
         eskf/schur_vins.cpp
         eskf/schur_vins_imu.cpp
+        eskf/schur_vins_persistent.cpp
+        eskf/schur_vins_track_archive.cpp
         eskf/schur_vins_shadow.cpp
         eskf/schur_vins_triangulation.cpp
         eskf/schur_vins_visual.cpp
@@ -189,6 +191,8 @@ add_executable(VinsAnalysis tools/analysis_main.cpp
         eskf/rdvio_scheduler.cpp
         eskf/schur_vins.cpp
         eskf/schur_vins_imu.cpp
+        eskf/schur_vins_persistent.cpp
+        eskf/schur_vins_track_archive.cpp
         eskf/schur_vins_shadow.cpp
         eskf/schur_vins_triangulation.cpp
         eskf/schur_vins_visual.cpp

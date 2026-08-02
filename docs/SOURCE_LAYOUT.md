@@ -20,8 +20,12 @@ Landmark 后处理集中在 `eskf/schur_vins.cpp`。这种组织方式的问题�
 | `eskf/schur_vins_imu.cpp` | IMU 名义状态积分、误差转移、协方差传播 | `processIMU()`、`predict()` |
 | `eskf/schur_vins_triangulation.cpp` | 多视图三角化、重投影精化、初始协方差 | `triangulateLandmark()` |
 | `eskf/schur_vins_visual.cpp` | clone 管理、帧策略、轨迹生命周期、视觉线性化、Schur/Joseph 后验 | `pushFrame()`、`updateVisual()` |
+| `eskf/schur_vins_persistent.cpp` | 几何质量评分、影子候选池、持久点延迟初始化、联合 EKF 更新 | `evaluateTrackGeometry()`、`promotePersistentLandmark()`、`updatePersistentLandmarks()` |
+| `eskf/schur_vins_track_archive.cpp` | 低视差轨迹首尾射线摘要、跨丢失轨迹候选三角化 | `archiveDeferredTrack()`、`updateShadowCandidateFromArchive()` |
 | `eskf/schur_vins_shadow.cpp` | 与导航解耦的影子 Landmark 后处理 | `updateShadowLandmarks()` |
-| `eskf/frame_selection_policy.{h,cpp}` | FIFO、关键帧、VINS-Mono、RD-VIO 帧选择策略 | `decide*Frame()` |
+| `eskf/frame_selection_policy.{h,cpp}` | FIFO、关键帧和 VINS-Mono 帧选择策略 | `decide*Frame()` |
+| `eskf/rdvio_scheduler.{h,cpp}` | 与后验解耦的 R/N 运动分类、RD-VIO 四 Case 和压窗计划 | `decideRDVIOFrame()`、`planRDVIOFrameRemovals()` |
+| `eskf/rdvio_constraints.{h,cpp}` | 无深度旋转约束和 RD-VIO 可选零平移约束 | `accumulateRDVIOConstraints()` |
 | `eskf/visual_update_scheduler.h` | 一次性/重复窗口视觉后验语义 | 编译期枚举与辅助函数 |
 
 ## 3. 调用流程
@@ -34,11 +38,15 @@ flowchart TD
     POLICY --> CLONE[pushFrame: clone 增广]
     CLONE --> VIS[updateVisual]
     VIS --> TRACK[轨迹筛选与消费]
+    TRACK --> ROT[低视差无深度旋转约束]
     TRACK --> TRI[triangulateLandmark]
     TRI --> LIN[重投影线性化]
     LIN --> SCHUR[逐点 Schur 消元]
     SCHUR --> POST[序贯 Joseph 后验]
-    POST --> MAP[Landmark 修正]
+    POST --> MAP[Landmark 修正与候选评分]
+    MAP --> PERSIST[少量持久点延迟初始化]
+    TRACK --> ARCHIVE[丢失低视差轨迹摘要]
+    ARCHIVE --> MAP
     MAP --> SHADOW[可选影子地图]
 ```
 
@@ -62,8 +70,9 @@ flowchart TD
 | IMU 积分与协方差传播 | `schur_vins_imu.cpp` | [MATHEMATICAL_PIPELINE.md](MATHEMATICAL_PIPELINE.md) |
 | 三角化与初始协方差 | `schur_vins_triangulation.cpp` | [TRIANGULATION.md](TRIANGULATION.md) |
 | 帧选择与轨迹生命周期 | `frame_selection_policy.cpp`、`schur_vins_visual.cpp` | [VISUAL_UPDATE_SCHEDULING.md](VISUAL_UPDATE_SCHEDULING.md) |
+| 纯旋转约束与轨迹摘要 | `rdvio_constraints.cpp`、`schur_vins_track_archive.cpp` | [SHADOW_LANDMARKS.md](SHADOW_LANDMARKS.md)、[RDVIO_SCHEDULING.md](RDVIO_SCHEDULING.md) |
 | Schur、有效子空间与 Joseph 更新 | `schur_vins_visual.cpp` | [MATHEMATICAL_PIPELINE.md](MATHEMATICAL_PIPELINE.md) |
-| 影子 Landmark | `schur_vins_shadow.cpp` | [SHADOW_LANDMARKS.md](SHADOW_LANDMARKS.md) |
+| 影子候选与持久 Landmark | `schur_vins_persistent.cpp`、`schur_vins_shadow.cpp` | [SHADOW_LANDMARKS.md](SHADOW_LANDMARKS.md) |
 
 ## 6. 维护约定
 

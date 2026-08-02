@@ -47,6 +47,14 @@ namespace slam {
             shadow_cov_position = Mat3_3::Identity() * TYPE(1e-4);
             shadow_nis_ema = TYPE(1);
 
+            geometry_score = TYPE(0);
+            geometry_max_parallax_deg = TYPE(0);
+            geometry_condition_number = std::numeric_limits<TYPE>::infinity();
+            geometry_reprojection_rmse = std::numeric_limits<TYPE>::infinity();
+            geometry_position_std = std::numeric_limits<TYPE>::infinity();
+            geometry_observation_count = 0;
+            deferred_consumption_count = 0;
+
             last_triangulation_frame_id = 0;
             triangulation_log_index = std::numeric_limits<size_t>::max();
 
@@ -79,6 +87,16 @@ namespace slam {
         Vec3 shadow_position{Vec3::Zero()};
         Mat3_3 shadow_cov_position{Mat3_3::Identity() * TYPE(1e-4)};
         TYPE shadow_nis_ema{TYPE(1)};
+
+        // 一次性轨迹最近一次三角化的几何质量。该组量只用于决定“延迟消费、
+        // 进入影子候选池或晋升为持久点”，不直接改变视觉残差权重。
+        TYPE geometry_score{};
+        TYPE geometry_max_parallax_deg{};
+        TYPE geometry_condition_number{std::numeric_limits<TYPE>::infinity()};
+        TYPE geometry_reprojection_rmse{std::numeric_limits<TYPE>::infinity()};
+        TYPE geometry_position_std{std::numeric_limits<TYPE>::infinity()};
+        size_t geometry_observation_count{};
+        size_t deferred_consumption_count{};
 
         // 三角化失败后，仅在最新观测帧变化时重试。滚动窗口中观测数量
         // 可能保持不变，因此不能用 observation_count 判断是否出现了新基线。

@@ -1417,23 +1417,29 @@ linePlot('cwin',{y0:0,y1:32,series:[
     const score=g=>g.rows.reduce((sum,r)=>sum+(Number(r.rmse_p_aligned)||0),0)/Math.max(g.rows.length,1);
     const best=groups.reduce((a,b)=>score(b)<score(a)?b:a,groups[0]);
     html+='<h3>固定 MSCKF 一次性后验的帧策略消融（统一 clone 预算）</h3><table><thead><tr>'+[
-      '帧策略','Circle-out','Circle-in','Helix','Stop-go','旋转-平移','平均对齐 ATE','轨迹丢弃率','更新数'
+      '帧策略','Circle-out','Circle-in','Helix','Stop-go','旋转-平移','平均对齐 ATE','轨迹丢弃率',
+      '无深度旋转约束','归档复用','持久点更新','更新数'
     ].map(x=>`<th>${x}</th>`).join('')+'</tr></thead><tbody>';
     for(const group of groups){
       const byScenario=new Map(group.rows.map(r=>[String(r.scenario),r]));
       const consumed=group.rows.reduce((sum,r)=>sum+(Number(r.tracks_consumed)||0),0);
       const dropped=group.rows.reduce((sum,r)=>sum+(Number(r.tracks_dropped)||0),0);
+      const rotationConstraints=group.rows.reduce((sum,r)=>sum+(Number(r.depth_free_rotation_constraints)||0),0);
+      const archivesReused=group.rows.reduce((sum,r)=>sum+(Number(r.track_archives_reused)||0),0);
+      const persistentUpdates=group.rows.reduce((sum,r)=>sum+(Number(r.persistent_updates)||0),0);
       const updates=group.rows.reduce((sum,r)=>sum+(Number(r.updates)||0),0);
       html+=`<tr class="${group===best?'best':''}"><td>${group.policy}</td>`+
         scenarioOrder.map(s=>`<td>${fmt(byScenario.get(s)?.rmse_p,4)}</td>`).join('')+
         `<td>${fmt(score(group),4)}</td><td>${fmt(100*dropped/Math.max(consumed,1),1)}%</td>`+
-        `<td>${fmt(updates,0)}</td></tr>`;
+        `<td>${fmt(rotationConstraints,0)}</td><td>${fmt(archivesReused,0)}</td>`+
+        `<td>${fmt(persistentUpdates,0)}</td><td>${fmt(updates,0)}</td></tr>`;
     }
     html+='</tbody></table>';
   }
   if(schedulerRows.length){
     html+='<h3 style="margin-top:18px">视觉更新调度（Circle-out）</h3><table><thead><tr>'+[
-      '调度','ATE (m)','1 s RPE (m)','平均后验 (ms)','复用率','丢弃轨迹','R/N 帧','RR/NN/RN/NR'
+      '调度','ATE (m)','1 s RPE (m)','平均后验 (ms)','复用率','丢弃轨迹','R/N 帧','RR/NN/RN/NR',
+      '无深度旋转约束','归档复用','持久点更新'
     ].map(x=>`<th>${x}</th>`).join('')+'</tr></thead><tbody>';
     for(const r of schedulerRows){
       const ms=r.updates?1000*r.t_cost/r.updates:NaN;
@@ -1441,7 +1447,9 @@ linePlot('cwin',{y0:0,y1:32,series:[
         `<td>${fmt(r.rmse_p_aligned,4)}</td><td>${fmt(r.rpe_1s_p,4)}</td>`+
         `<td>${fmt(ms,3)}</td><td>${fmt(100*(r.reuse_rate||0),2)}%</td>`+
         `<td>${fmt(r.tracks_dropped,0)}</td><td>${fmt(r.r_frames,0)}/${fmt(r.n_frames,0)}</td>`+
-        `<td>${fmt(r.case_rr,0)}/${fmt(r.case_nn,0)}/${fmt(r.case_rn,0)}/${fmt(r.case_nr,0)}</td></tr>`;
+        `<td>${fmt(r.case_rr,0)}/${fmt(r.case_nn,0)}/${fmt(r.case_rn,0)}/${fmt(r.case_nr,0)}</td>`+
+        `<td>${fmt(r.depth_free_rotation_constraints,0)}</td><td>${fmt(r.track_archives_reused,0)}</td>`+
+        `<td>${fmt(r.persistent_updates,0)}</td></tr>`;
     }
     html+='</tbody></table>';
   }

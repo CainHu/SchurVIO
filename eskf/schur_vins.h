@@ -127,6 +127,63 @@ namespace slam {
             bool has_ground_truth{};
         };
 
+        struct TrackGeometryQuality {
+            TYPE score{};
+            TYPE max_parallax_deg{};
+            TYPE condition_number{std::numeric_limits<TYPE>::infinity()};
+            TYPE reprojection_rmse{std::numeric_limits<TYPE>::infinity()};
+            TYPE position_std{std::numeric_limits<TYPE>::infinity()};
+            size_t observation_count{};
+            bool valid{};
+            bool promotable{};
+        };
+
+        struct ShadowCandidateState {
+            EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
+            LandmarkID id{};
+            Vec3 position{Vec3::Zero()};
+            Mat3_3 covariance{Mat3_3::Identity()};
+            TYPE quality_ema{};
+            TYPE consistency_nis_ema{TYPE(1)};
+            size_t stable_updates{};
+            size_t observation_count{};
+            Tus last_seen{};
+        };
+
+        // 已离开滑窗的低视差轨迹不能再参与导航更新，因为对应 clone 已被边缘化，
+        // 其位姿误差与当前状态之间的相关性不能被一个固定 pose 快照替代。这里仅保存
+        // 首尾两条射线，用于未来重新出现时检查“是否已经形成足够平移基线”。
+        struct ArchivedBearingSnapshot {
+            EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
+            Vec3 bearing_camera{Vec3::UnitZ()};
+            Mat3_3 rotation_world_camera{Mat3_3::Identity()};
+            Vec3 camera_center_world{Vec3::Zero()};
+            Tus timestamp{};
+        };
+
+        struct DeferredTrackArchive {
+            EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
+            LandmarkID id{};
+            ArchivedBearingSnapshot first;
+            ArchivedBearingSnapshot last;
+            TriangulationStatus last_status{TriangulationStatus::InsufficientViews};
+            size_t observation_count{};
+            TYPE archived_parallax_deg{};
+            Tus archived_at{};
+            Tus last_candidate_attempt{};
+        };
+
+        struct PersistentLandmarkState {
+            EIGEN_MAKE_ALIGNED_OPERATOR_NEW;
+            LandmarkID id{};
+            Vec3 position{Vec3::Zero()};
+            Vec3 position_fej{Vec3::Zero()};
+            TYPE promotion_quality{};
+            Tus last_seen{};
+            size_t update_count{};
+            size_t rejected_count{};
+        };
+
         explicit SchurVINS(slam::Map &map);
 
         // 处理IMU数据(预测步骤)
@@ -154,6 +211,53 @@ namespace slam {
             const std::vector<std::pair<LandmarkID, Landmark *>> &landmarks,
             bool is_keyframe,
             double dt);
+
+        [[nodiscard]] bool isPersistentLandmark(LandmarkID id) const;
+        [[nodiscard]] size_t persistentLandmarkOffset(size_t index) const;
+        [[nodiscard]] TrackGeometryQuality evaluateTrackGeometry(
+            const Landmark &landmark) const;
+        [[nodiscard]] bool shouldDeferTrackConsumption(
+            const Landmark &landmark,
+            TriangulationStatus status,
+            bool lost) const;
+        void updateShadowCandidate(
+            const Landmark &landmark,
+            const TrackGeometryQuality &quality,
+            Tus timestamp);
+        void updateShadowCandidateEstimate(
+            LandmarkID id,
+            const Vec3 &position,
+            const Mat3_3 &covariance,
+            const TrackGeometryQuality &quality,
+            Tus timestamp);
+        void archiveDeferredTrack(
+            const Landmark &landmark,
+            TriangulationStatus status,
+            Tus timestamp);
+        void updateShadowCandidateFromArchive(
+            LandmarkID id,
+            const Frame &current_frame,
+            const Vec2 &measurement,
+            Tus timestamp);
+        void pruneDeferredTrackArchives(Tus timestamp);
+        [[nodiscard]] bool shadowCandidateReady(
+            LandmarkID id,
+            const TrackGeometryQuality &quality) const;
+        bool promotePersistentLandmark(
+            Landmark &landmark,
+            const TrackGeometryQuality &quality,
+            const Mat3_3 &hll,
+            const Eigen::Matrix<TYPE, Eigen::Dynamic, 3> &hpl,
+            const Vec3 &gl,
+            const Mat3_3 &parameter_to_world,
+            const VecX &navigation_increment,
+            TYPE visual_variance,
+            Tus timestamp);
+        size_t updatePersistentLandmarks(
+            const CameraData &cam_data,
+            Frame *current_frame,
+            bool is_keyframe);
+        void applyJointStateCorrection(const VecX &dx);
 
         // 将误差状态注入名义状态。姿态采用左乘误差：R <- Exp(dtheta) R；
         // 位置、速度和零偏采用加法误差；随后每个 clone 按物理 ordering 注入。
@@ -259,6 +363,33 @@ namespace slam {
         // 使用的 Landmark::position。默认关闭，不增加生产路径计算量。
         bool enable_shadow_landmark_postprocessor_ = false;
         bool shadow_landmark_adaptive_inflation_ = true;
+        // 默认混合后端：普通轨迹仍走一次性 MSCKF，只有通过影子候选稳定性检查的
+        // 少量点才进入联合状态，并完整维护 P_xl/P_ll。
+        bool enable_hybrid_persistent_landmarks_ = true;
+        // 默认 MSCKF 也启用无深度旋转约束，但不采用 RD-VIO 的窗口调度。
+        // 对低视差轨迹使用球面切平面残差，只约束相邻 clone 的相对旋转。
+        bool enable_depth_free_rotation_constraints_ = true;
+        TYPE depth_free_rotation_information_scale_ = TYPE(0.02);
+        size_t persistent_landmark_budget_ = 20;
+        size_t shadow_candidate_capacity_ = 200;
+        size_t shadow_candidate_min_stable_updates_ = 2;
+        size_t deferred_track_max_frames_ = 80;
+        size_t deferred_track_archive_capacity_ = 400;
+        Tus deferred_track_archive_max_age_us_ = 15000000;
+        Tus deferred_track_archive_retry_interval_us_ = 250000;
+        size_t persistent_grid_columns_ = 4;
+        size_t persistent_grid_rows_ = 3;
+        size_t persistent_grid_cell_quota_ = 2;
+        TYPE persistent_min_geometry_score_ = TYPE(0.68);
+        TYPE persistent_max_position_std_ = TYPE(3.0);
+        TYPE persistent_update_chi2_threshold_ = TYPE(9.21);
+        // 持久点会跨很多关键帧重复观测。完整联合协方差消除了“把旧地图当独立量测”
+        // 的主要重复计数，但 FEJ 长期线性化误差、前端时间相关性和未建模地图过程噪声
+        // 仍会使理想像素方差过于乐观。100 s 五场景扫描选用 64 倍方差：所有场景
+        // 均不劣于原始 MSCKF，且比直接使用原始像素方差更稳定。
+        TYPE persistent_measurement_noise_scale_ = TYPE(64);
+        TYPE shadow_candidate_nis_threshold_ = TYPE(11.34);
+        TYPE shadow_candidate_ema_alpha_ = TYPE(0.25);
         constexpr static TYPE lmk_var = TYPE(0.01);
 
         // 三角化使用归一化像平面噪声；仿真中约为 1 pixel / fx = 0.0054。
@@ -312,6 +443,10 @@ namespace slam {
         Eigen::VectorXd Rll_;
 
         slam::Map &map_;
+        std::unordered_map<LandmarkID, ShadowCandidateState> shadow_candidates_;
+        std::unordered_map<LandmarkID, DeferredTrackArchive> deferred_track_archives_;
+        std::vector<PersistentLandmarkState> persistent_landmarks_;
+        std::unordered_map<LandmarkID, size_t> persistent_landmark_indices_;
 
         size_t posterior_times_ = 0;
         size_t t_cost_ = 0;
@@ -359,6 +494,16 @@ namespace slam {
         // Defensive guard: a reused MSCKF sample is rejected before H/g.
         // This counter and n_reused_observations_ must both remain zero.
         size_t n_duplicate_observations_blocked_ = 0;
+        size_t n_tracks_deferred_ = 0;
+        size_t n_track_archives_created_ = 0;
+        size_t n_track_archives_reused_ = 0;
+        size_t n_track_archives_rejected_ = 0;
+        size_t n_track_archives_expired_ = 0;
+        size_t n_shadow_candidate_updates_ = 0;
+        size_t n_shadow_candidate_rejections_ = 0;
+        size_t n_persistent_landmarks_promoted_ = 0;
+        size_t n_persistent_landmark_updates_ = 0;
+        size_t n_persistent_landmark_rejections_ = 0;
         size_t n_keyframes_selected_ = 0;
         size_t n_nonkeyframes_selected_ = 0;
         size_t n_frames_stored_ = 0;
@@ -368,6 +513,9 @@ namespace slam {
         size_t n_rdvio_compressed_frames_ = 0;
         size_t n_rdvio_rotation_constraints_ = 0;
         size_t n_rdvio_zero_translation_constraints_ = 0;
+        size_t n_rotation_dominant_frames_ = 0;
+        size_t n_translation_dominant_frames_ = 0;
+        size_t n_depth_free_rotation_constraints_ = 0;
     };
 }
 

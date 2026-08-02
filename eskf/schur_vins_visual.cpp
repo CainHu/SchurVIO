@@ -52,13 +52,24 @@ void SchurVINS::pushFrame(const CameraData &cam_data, bool is_keyframe) {
         cov_.middleCols<A::SIZE>(i).noalias() = cov_.leftCols<A::SIZE>();
         cov_.block<A::SIZE, A::SIZE>(i, i).noalias() = cov_.topLeftCorner<A::SIZE, A::SIZE>();
     } else {
-        cov_.middleRows<A::SIZE>(i).leftCols(i).noalias() = cov_.topRows<A::SIZE>().leftCols(i);
-        cov_.middleRows<A::SIZE>(i).rightCols(j) = cov_.topRows<A::SIZE>().rightCols(j);
+        cov_.block(i, 0, A::SIZE, i).noalias() =
+            cov_.block(0, 0, A::SIZE, i);
+        cov_.block(i, i + A::SIZE, A::SIZE, j).noalias() =
+            cov_.block(0, i + A::SIZE, A::SIZE, j);
 
-        cov_.middleCols<A::SIZE>(i).topRows(i).noalias() = cov_.leftCols<A::SIZE>().topRows(i);
-        cov_.middleCols<A::SIZE>(i).bottomRows(j).noalias() = cov_.leftCols<A::SIZE>().bottomRows(j);
+        cov_.block(0, i, i, A::SIZE).noalias() =
+            cov_.block(0, 0, i, A::SIZE);
+        cov_.block(i + A::SIZE, i, j, A::SIZE).noalias() =
+            cov_.block(i + A::SIZE, 0, j, A::SIZE);
 
         cov_.block<A::SIZE, A::SIZE>(i, i).noalias() = cov_.topLeftCorner<A::SIZE, A::SIZE>();
+    }
+    if (cov_.cols() > static_cast<Eigen::Index>(COV_SIZE)) {
+        const Eigen::Index persistent_size = cov_.cols() - COV_SIZE;
+        cov_.block(i, COV_SIZE, A::SIZE, persistent_size) =
+            cov_.block(0, COV_SIZE, A::SIZE, persistent_size);
+        cov_.block(COV_SIZE, i, persistent_size, A::SIZE) =
+            cov_.block(i, COV_SIZE, A::SIZE, persistent_size).transpose();
     }
 
 //    std::cout << "Output" << std::endl;
@@ -101,19 +112,33 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         const VINSMonoFrameDecision decision = decideVINSMonoFrame(
             map_, cam_data, state_.orientation, ext_.q_ic, parameters);
         is_keyframe = decision.is_keyframe;
-    } else if constexpr (frame_selection_policy == FrameSelectionPolicy::RDVIO) {
-        const RDVIOParameters parameters{
-            rdvio_rotation_threshold_deg,
-            rdvio_min_common_tracks,
-            rdvio_subframe_size,
-            rdvio_rotation_compression_trigger,
-            framePolicyRetainedCloneCount()};
-        const RDVIOFrameDecision decision = decideRDVIOFrame(
-            map_, cam_data, state_.orientation, ext_.q_ic,
-            is_keyframe, parameters);
+    }
+
+    // R/N 运动类型判定与 RD-VIO 的关键帧/压窗策略解耦。默认 MSCKF 只读取
+    // is_rotation_frame 来启用无深度旋转约束，仍保持自己的 FIFO clone 窗口；
+    // 只有显式选择 RDVIO frame policy 时才应用 RR/NN/RN/NR 调度决策。
+    const RDVIOParameters rdvio_parameters{
+        rdvio_rotation_threshold_deg,
+        rdvio_min_common_tracks,
+        rdvio_subframe_size,
+        rdvio_rotation_compression_trigger,
+        framePolicyRetainedCloneCount()};
+    const RDVIOFrameDecision motion_decision = decideRDVIOFrame(
+        map_, cam_data, state_.orientation, ext_.q_ic,
+        is_keyframe, rdvio_parameters);
+    is_rotation_frame = motion_decision.is_rotation_frame;
+    rdvio_misalignment_deg = motion_decision.misalignment_deg;
+    if (rdvio_misalignment_deg < TYPE(179)) {
+        if (is_rotation_frame) {
+            ++n_rotation_dominant_frames_;
+        } else {
+            ++n_translation_dominant_frames_;
+        }
+    }
+
+    if constexpr (frame_selection_policy == FrameSelectionPolicy::RDVIO) {
+        const RDVIOFrameDecision &decision = motion_decision;
         is_keyframe = decision.is_keyframe;
-        is_rotation_frame = decision.is_rotation_frame;
-        rdvio_misalignment_deg = decision.misalignment_deg;
         rdvio_case = static_cast<uint8_t>(decision.transition);
         if (decision.promote_previous_to_keyframe && !map_.sfw.empty()) {
             map_.sfw[map_.sfw.size() - 1]->is_key_frame = true;
@@ -142,6 +167,15 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         current_frame->rdvio_case = rdvio_case;
         current_frame->rdvio_misalignment_deg = rdvio_misalignment_deg;
         map_.addObservations(current_frame, cam_data);
+    }
+
+    pruneDeferredTrackArchives(cam_data.timestamp);
+    if (current_frame && enable_hybrid_persistent_landmarks_ &&
+        schedulerConsumesTracksOnce(visual_update_scheduler)) {
+        for (const auto &[id, measurement] : cam_data.measurements) {
+            updateShadowCandidateFromArchive(
+                id, *current_frame, measurement, cam_data.timestamp);
+        }
     }
 
     const size_t current_win_size = map_.sfw.size();
@@ -218,12 +252,16 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     }
 
     std::vector<LandmarkID> tracks_to_consume;
+    std::vector<LandmarkID> persistent_tracks_to_clear;
     size_t one_shot_tracks_used = 0;
     ExitHandler schedule_finalizer([&] {
         if constexpr (schedulerConsumesTracksOnce(visual_update_scheduler)) {
             n_tracks_consumed_ += tracks_to_consume.size();
             n_tracks_dropped_ += tracks_to_consume.size() - one_shot_tracks_used;
             for (const LandmarkID id : tracks_to_consume) {
+                map_.removeLandmark(id);
+            }
+            for (const LandmarkID id : persistent_tracks_to_clear) {
                 map_.removeLandmark(id);
             }
         }
@@ -258,19 +296,32 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     static std::vector<std::pair<LandmarkID, Landmark*>> ids;
     ids.resize(map_.lmk_map.size());
     ids.clear();
+    std::vector<TrackGeometryQuality> track_qualities;
+    track_qualities.reserve(map_.lmk_map.size());
+    std::vector<bool> track_continues_after_update;
+    track_continues_after_update.reserve(map_.lmk_map.size());
     std::vector<Landmark *> rotation_only_tracks;
+    std::vector<Landmark *> retained_rotation_only_tracks;
 
     for (const auto &[id, lmk] : map_.lmk_map) {
+        if (isPersistentLandmark(id)) {
+            if (cam_data.measurements.find(id) != cam_data.measurements.end()) {
+                persistent_tracks_to_clear.push_back(id);
+            }
+            continue;
+        }
         const size_t observation_count = lmk->frm2fet.size();
         bool schedule_track = true;
         bool consume_track = false;
+        bool requested_consumption = false;
+        bool lost = false;
 
         if constexpr (visual_update_scheduler == VisualUpdateScheduler::SchurVINS) {
             schedule_track = isSchurVinsActiveTrack(*lmk);
         } else if constexpr (schedulerConsumesTracksOnce(visual_update_scheduler)) {
             const bool observed_current =
                 cam_data.measurements.find(id) != cam_data.measurements.end();
-            const bool lost = !observed_current;
+            lost = !observed_current;
             const bool touches_marginalized_clone = std::any_of(
                 frame_ids_to_remove.begin(), frame_ids_to_remove.end(),
                 [&](const FrameID frame_id) {
@@ -279,19 +330,24 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             const bool reached_track_limit =
                 observation_count >= framePolicyRetainedCloneCount();
             consume_track = lost || touches_marginalized_clone || reached_track_limit;
+            requested_consumption = consume_track;
             schedule_track = consume_track;
-            if (consume_track) {
-                tracks_to_consume.push_back(id);
-            }
         }
 
         if (!schedule_track || observation_count <= 1) {
+            if (consume_track) {
+                tracks_to_consume.push_back(id);
+            }
             continue;
         }
 
         const FrameID latest_observation_frame_id = lmk->frm2fet.empty()
             ? FrameID(0)
             : lmk->frm2fet.rbegin()->first;
+        TriangulationStatus latest_triangulation_status =
+            lmk->is_triangulated
+                ? TriangulationStatus::Success
+                : TriangulationStatus::InsufficientViews;
         if (!lmk->is_triangulated &&
             !(visual_update_scheduler == VisualUpdateScheduler::RDVIO &&
               current_frame && current_frame->is_rotation_frame) &&
@@ -309,6 +365,11 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
                 }
             } else {
                 const auto triangulation = triangulateLandmark(*lmk);
+                latest_triangulation_status = triangulation.status;
+                lmk->geometry_max_parallax_deg = triangulation.max_parallax_deg;
+                lmk->geometry_condition_number = triangulation.condition_number;
+                lmk->geometry_reprojection_rmse = triangulation.reprojection_rmse;
+                lmk->geometry_observation_count = triangulation.observation_count;
                 logTriangulationAttempt(*lmk, triangulation, cam_data.timestamp, lmk_map);
                 if (triangulation.status == TriangulationStatus::Success) {
                     lmk->position = triangulation.position;
@@ -324,20 +385,117 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
                     lmk->shadow_cov_position = lmk->cov_position;
                     lmk->shadow_initialized = true;
                     lmk->is_triangulated = true;
+                    lmk->geometry_position_std = std::sqrt(std::max(
+                        TYPE(0), triangulation.covariance.trace() / TYPE(3)));
+                    lmk->geometry_score = evaluateTrackGeometry(*lmk).score;
                 }
             }
         }
 
+        if (consume_track && !lmk->is_triangulated &&
+            shouldDeferTrackConsumption(
+                *lmk, latest_triangulation_status, lost)) {
+            consume_track = false;
+            schedule_track = false;
+            ++lmk->deferred_consumption_count;
+            ++n_tracks_deferred_;
+        }
+        if (requested_consumption && !lmk->is_triangulated &&
+            observation_count > 1 &&
+            enable_depth_free_rotation_constraints_) {
+            // 即使轨迹因仍在视野中而被延迟，也先消费其中最新的一对纯旋转观测。
+            // 这些像素的 visual_update_count 会被置位；后续若获得平移基线，深度
+            // Schur 更新只使用尚未消费的观测，保持“一条像素量测只用一次”。
+            if (consume_track) {
+                rotation_only_tracks.push_back(lmk);
+            } else {
+                retained_rotation_only_tracks.push_back(lmk);
+            }
+        }
+        if (consume_track && !lmk->is_triangulated) {
+            archiveDeferredTrack(
+                *lmk, latest_triangulation_status, cam_data.timestamp);
+        }
+        if (consume_track) {
+            tracks_to_consume.push_back(id);
+        }
+
         if (lmk->is_triangulated) {
             ids.emplace_back(id, lmk);
+            track_qualities.push_back(evaluateTrackGeometry(*lmk));
+            track_continues_after_update.push_back(!lost);
             num_obs += observation_count;
             if constexpr (schedulerConsumesTracksOnce(visual_update_scheduler)) {
                 ++one_shot_tracks_used;
             }
-        } else if constexpr (visual_update_scheduler == VisualUpdateScheduler::RDVIO) {
-            if (consume_track && observation_count > 1) {
-                rotation_only_tracks.push_back(lmk);
+        }
+    }
+
+    const size_t persistent_updates = updatePersistentLandmarks(
+        cam_data, current_frame, is_keyframe);
+
+    std::vector<bool> promotion_candidates(ids.size(), false);
+    if (enable_hybrid_persistent_landmarks_ &&
+        schedulerConsumesTracksOnce(visual_update_scheduler) &&
+        persistent_landmarks_.size() < persistent_landmark_budget_) {
+        std::vector<size_t> ranked_candidates;
+        for (size_t index = 0; index < ids.size(); ++index) {
+            if (track_continues_after_update[index] &&
+                shadowCandidateReady(ids[index].first, track_qualities[index])) {
+                ranked_candidates.push_back(index);
             }
+        }
+        std::sort(
+            ranked_candidates.begin(), ranked_candidates.end(),
+            [&](const size_t lhs, const size_t rhs) {
+                return track_qualities[lhs].score > track_qualities[rhs].score;
+            });
+        const size_t remaining_budget =
+            persistent_landmark_budget_ - persistent_landmarks_.size();
+
+        // 持久点的价值来自长期、方向互补的几何，而不是单一区域的重复纹理。
+        // 将归一化像平面 [-1,1]x[-0.75,0.75] 划成网格，每格限制晋升数；
+        // 边界外的观测夹到最近网格，避免异常大坐标产生越界。
+        const size_t grid_columns = std::max<size_t>(1, persistent_grid_columns_);
+        const size_t grid_rows = std::max<size_t>(1, persistent_grid_rows_);
+        std::vector<size_t> grid_occupancy(grid_columns * grid_rows, 0);
+        const auto gridCell = [&](const Vec2 &measurement) {
+            const TYPE normalized_x = std::clamp(
+                (measurement.x() + TYPE(1)) / TYPE(2), TYPE(0), TYPE(1));
+            const TYPE normalized_y = std::clamp(
+                (measurement.y() + TYPE(0.75)) / TYPE(1.5), TYPE(0), TYPE(1));
+            const size_t column = std::min(
+                grid_columns - 1,
+                static_cast<size_t>(normalized_x * TYPE(grid_columns)));
+            const size_t row = std::min(
+                grid_rows - 1,
+                static_cast<size_t>(normalized_y * TYPE(grid_rows)));
+            return row * grid_columns + column;
+        };
+        for (const auto &persistent : persistent_landmarks_) {
+            const auto measurement = cam_data.measurements.find(persistent.id);
+            if (measurement != cam_data.measurements.end()) {
+                ++grid_occupancy[gridCell(measurement->second)];
+            }
+        }
+
+        size_t selected = 0;
+        for (const size_t candidate_index : ranked_candidates) {
+            if (selected >= remaining_budget) {
+                break;
+            }
+            const auto measurement =
+                cam_data.measurements.find(ids[candidate_index].first);
+            if (measurement == cam_data.measurements.end()) {
+                continue;
+            }
+            const size_t cell = gridCell(measurement->second);
+            if (grid_occupancy[cell] >= persistent_grid_cell_quota_) {
+                continue;
+            }
+            promotion_candidates[candidate_index] = true;
+            ++grid_occupancy[cell];
+            ++selected;
         }
     }
 
@@ -346,8 +504,14 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         current_frame && current_frame->is_rotation_frame &&
         map_.sfw.size() >= 2;
     if (ids.empty() && rotation_only_tracks.empty() &&
-        !has_rdvio_zero_translation) {
+        retained_rotation_only_tracks.empty() &&
+        !has_rdvio_zero_translation && persistent_updates == 0) {
         ++n_visual_updates_skipped_;
+        return;
+    }
+    if (ids.empty() && rotation_only_tracks.empty() &&
+        retained_rotation_only_tracks.empty() &&
+        !has_rdvio_zero_translation) {
         return;
     }
 
@@ -740,24 +904,50 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     size_t observations_new = 0;
     size_t observations_reused = 0;
     size_t rotation_only_constraints = 0;
+    size_t zero_translation_constraints = 0;
 
-    if constexpr (visual_update_scheduler == VisualUpdateScheduler::RDVIO) {
-        const RDVIOConstraintStatistics rdvio_statistics =
+    const auto accumulateDepthFreeRotation = [&]
+        (const std::vector<Landmark *> &tracks,
+         const bool add_zero_translation,
+         const bool removed_after_update) {
+        if (tracks.empty() && !add_zero_translation) {
+            return;
+        }
+        const RDVIOConstraintStatistics statistics =
             accumulateRDVIOConstraints(
-                map_, rotation_only_tracks, Ric,
-                has_rdvio_zero_translation,
+                map_, tracks, Ric, add_zero_translation,
                 enforce_observability_constraint_, visual_batch_variance,
+                visual_update_scheduler == VisualUpdateScheduler::RDVIO
+                    ? TYPE(1)
+                    : depth_free_rotation_information_scale_,
                 rdvio_zero_translation_std, visual_hard_reprojection_limit,
                 Hpp, gp);
-        observations_used += rdvio_statistics.observations_used;
-        observations_new += rdvio_statistics.new_observations;
-        n_new_observations_ += rdvio_statistics.new_observations;
-        one_shot_tracks_used += rdvio_statistics.tracks_used;
-        rotation_only_constraints += rdvio_statistics.rotation_constraints;
-        n_rdvio_rotation_constraints_ +=
-            rdvio_statistics.rotation_constraints;
-        n_rdvio_zero_translation_constraints_ +=
-            rdvio_statistics.zero_translation_constraints;
+        observations_used += statistics.observations_used;
+        observations_new += statistics.new_observations;
+        n_new_observations_ += statistics.new_observations;
+        if (removed_after_update) {
+            // 只有本帧结束后真正删除的轨迹才参与 consumed/dropped 统计。
+            // 被延迟的轨迹虽然已有一对旋转观测被消费，但仍留在 Map 中等待基线。
+            one_shot_tracks_used += statistics.tracks_used;
+        }
+        rotation_only_constraints += statistics.rotation_constraints;
+        zero_translation_constraints += statistics.zero_translation_constraints;
+        n_depth_free_rotation_constraints_ += statistics.rotation_constraints;
+        if constexpr (visual_update_scheduler == VisualUpdateScheduler::RDVIO) {
+            n_rdvio_rotation_constraints_ += statistics.rotation_constraints;
+            n_rdvio_zero_translation_constraints_ +=
+                statistics.zero_translation_constraints;
+        }
+    };
+    accumulateDepthFreeRotation(
+        rotation_only_tracks, has_rdvio_zero_translation, true);
+    accumulateDepthFreeRotation(
+        retained_rotation_only_tracks, false, false);
+    if (ids.empty() && rotation_only_constraints == 0 &&
+        zero_translation_constraints == 0) {
+        // 调度阶段可能找到低视差轨迹，但残差门控会拒绝全部候选。此时 Hpp/gp
+        // 仍为零，继续做 LDLT 只会产生“max diag=0”的无效更新与日志噪声。
+        return;
     }
 
     // 单个观测无法在消元 landmark 后约束位姿。先暂存每个点的第一条有效观测，
@@ -861,6 +1051,11 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             // 重复计数与协方差过度收缩。
             if constexpr (schedulerConsumesTracksOnce(visual_update_scheduler)) {
                 if (obs && obs->visual_update_count != 0) {
+                    if (obs->used_by_depth_free_rotation) {
+                        // 该像素已按设计进入球面旋转残差。深度后来变得可观时，只能
+                        // 使用同轨迹中剩余的新像素，不能把它再次写入重投影 Schur 系统。
+                        continue;
+                    }
                     ++n_duplicate_observations_blocked_;
                     ++observations_rejected;
                     continue;
@@ -1104,7 +1299,10 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         if (enforce_observability_constraint_ && project_observability_constraint_) {
             // 先用先验协方差平方根白化，使姿态（rad）和位置（m）进入同一无量纲
             // 度量，再构造零空间正交基，避免单位尺度直接影响投影结果。
-            MatXX prior_covariance = TYPE(0.5) * (cov_ + cov_.transpose());
+            const MatXX navigation_covariance =
+                cov_.topLeftCorner(COV_SIZE, COV_SIZE);
+            MatXX prior_covariance = TYPE(0.5) *
+                (navigation_covariance + navigation_covariance.transpose());
             Eigen::LLT<MatXX> prior_llt(prior_covariance);
             if (prior_llt.info() != Eigen::Success) {
                 const TYPE jitter = TYPE(1e-12) * std::max(
@@ -1224,8 +1422,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     // 记 w = sqrt(λ)^-1 * n, n ~ N[0, σ]
     // 则有 Cov[w] = σ^2 * λ^-1
     // 序贯 V.col(i)^T * y / λ(i) = V.col(i)^T * x + w(i), var[w] = σ^2 / λ(i)
-    VecX dx_p(COV_SIZE);
-    dx_p.setZero();
+    VecX dx_joint = VecX::Zero(cov_.rows());
     TYPE nis_sum = TYPE(0);
     size_t nis_count = 0;
     {
@@ -1303,8 +1500,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         //      (原本每次迭代都做一次 198x198 的 StrictlyLower = StrictlyUpper^T)
         //   3) 下三角在循环结束后统一恢复一次
         // 数学上完全等价: 中间过程只有 selfadjointView 在读 cov_p，它只看上三角。
-        VecX PhT(COV_SIZE);
-        VecX K(COV_SIZE);
+        VecX h_full = VecX::Zero(cov_.rows());
+        VecX PhT(cov_.rows());
+        VecX K(cov_.rows());
         const Eigen::Index basis_direction_count = has_consistent_projection
             ? projected_state_diagonal.size()
             : static_cast<Eigen::Index>(COV_SIZE);
@@ -1320,12 +1518,15 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 
             const auto R = visual_batch_variance / d;
             const auto hT = H_BASIS.col(i);
+            h_full.setZero();
+            h_full.head(COV_SIZE) = hT;
 
-            PhT.noalias() = cov_p.selfadjointView<Eigen::Upper>() * hT;
-            const TYPE var = hT.dot(PhT) + R;
+            PhT.noalias() =
+                cov_p.selfadjointView<Eigen::Upper>() * h_full;
+            const TYPE var = h_full.dot(PhT) + R;
             // 量测 z_i = rhs(i)/d，残差 = z_i - h_i^T·dx。
             // 序贯更新已经把伪量测噪声对角化，因此 e^2/var 可以直接累加为 NIS。
-            const TYPE e = rhs(i) / d - hT.dot(dx_p);
+            const TYPE e = rhs(i) / d - h_full.dot(dx_joint);
             if (enable_logging_ && var > TYPE(0) && std::isfinite(var) && std::isfinite(e)) {
                 nis_sum += e * e / var;
                 ++nis_count;
@@ -1333,14 +1534,41 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             K.noalias() = PhT / var;
             cov_p.triangularView<Eigen::Upper>() -= K * PhT.transpose();
 
-            PhT.noalias() = cov_p.selfadjointView<Eigen::Upper>() * hT;
+            PhT.noalias() =
+                cov_p.selfadjointView<Eigen::Upper>() * h_full;
             cov_p.triangularView<Eigen::Upper>() += (K * R - PhT) * K.transpose();
 
-            dx_p.noalias() += K * e;
+            dx_joint.noalias() += K * e;
         }
         cov_p.triangularView<Eigen::StrictlyLower>() = cov_p.triangularView<Eigen::StrictlyUpper>().transpose();
     }
-    updateState(dx_p);
+    const VecX dx_p = dx_joint.head(COV_SIZE);
+    applyJointStateCorrection(dx_joint);
+
+    if (enable_hybrid_persistent_landmarks_ &&
+        schedulerConsumesTracksOnce(visual_update_scheduler)) {
+        for (size_t index = 0; index < ids.size(); ++index) {
+            Landmark &landmark = *ids[index].second;
+            bool promoted = false;
+            if (promotion_candidates[index] &&
+                valid_observations_per_landmark[index] >= 2) {
+                const size_t landmark_offset = index * LMK_SIZE;
+                const Mat3_3 hll =
+                    Hll_diag.middleRows<LMK_SIZE>(landmark_offset);
+                const Eigen::Matrix<TYPE, Eigen::Dynamic, 3> hpl =
+                    Hpl.middleCols<LMK_SIZE>(landmark_offset);
+                promoted = promotePersistentLandmark(
+                    landmark, track_qualities[index], hll, hpl,
+                    gl.segment<LMK_SIZE>(landmark_offset),
+                    landmark_parameter_to_world[index], dx_p,
+                    visual_batch_variance, cam_data.timestamp);
+            }
+            if (!promoted) {
+                updateShadowCandidate(
+                    landmark, track_qualities[index], cam_data.timestamp);
+            }
+        }
+    }
 //    std::cout << "Update State Finished" << std::endl;
 
     // [数据采集] 记录视觉更新【后】的后验状态与修正量

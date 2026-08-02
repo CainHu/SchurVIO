@@ -111,7 +111,31 @@ void SchurVINS::predict(const slam::IMUData &imu_data, const double dt) {
     const Vec3 nRdv = accel_corr_world_ * (-dt);
     const Mat3_3 nRdv_X = hat(nRdv);
 
-    if constexpr (USE_STABLE_COVARIANCE_PREDICTION) {
+    if (cov_.rows() > static_cast<Eigen::Index>(COV_SIZE)) {
+        // 持久 Landmark 追加到固定导航块之后时，IMU 传播不仅要更新 P_xx，
+        // 还必须传播状态-地图交叉协方差 P_xl：
+        //   P_xx+ = F P_xx F^T，P_xl+ = F P_xl。
+        // INS 维度很小，直接构造其局部 F 比在多处分块公式中遗漏新增列更可靠。
+        using MatINS = Eigen::Matrix<TYPE, I::SIZE, I::SIZE>;
+        MatINS A = MatINS::Identity();
+        A.template block<3, 3>(I::Q, I::BG) = nRdt;
+        A.template block<3, 3>(I::P, I::V) = Mat3_3::Identity() * dt;
+        A.template block<3, 3>(I::V, I::Q) = nRdv_X;
+        A.template block<3, 3>(I::V, I::BA) = nRdt;
+        if constexpr (INSState::ESTIMATE_GRAVITY) {
+            A.template block<3, 3>(I::V, I::G) = Mat3_3::Identity() * dt;
+        }
+
+        const MatINS ins_covariance = cov.selfadjointView<Eigen::Upper>();
+        const MatXX cross_covariance = cov_.topRightCorner(
+            I::SIZE, cov_.cols() - I::SIZE);
+        cov.noalias() = A * ins_covariance * A.transpose();
+        cov = TYPE(0.5) * (cov + cov.transpose());
+        cov_.topRightCorner(I::SIZE, cov_.cols() - I::SIZE).noalias() =
+            A * cross_covariance;
+        cov_.bottomLeftCorner(cov_.rows() - I::SIZE, I::SIZE) =
+            cov_.topRightCorner(I::SIZE, cov_.cols() - I::SIZE).transpose();
+    } else if constexpr (USE_STABLE_COVARIANCE_PREDICTION) {
         using MatINS = Eigen::Matrix<TYPE, I::SIZE, I::SIZE>;
         using MatCross = Eigen::Matrix<TYPE, I::SIZE, COV_SIZE - I::SIZE>;
         MatINS A = MatINS::Identity();

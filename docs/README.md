@@ -41,7 +41,7 @@
 | [LANDMARK_UPDATE_STRATEGIES.md](LANDMARK_UPDATE_STRATEGIES.md) | 固定点、重三角化、Schur 回代与旧独立 EKF 的数学边界和严格对比 |
 | [HLL_STRUCTURE.md](HLL_STRUCTURE.md) | 理论：`Hll` 的零特征值 = 深度方向；`Hll` 换 LDLT |
 | [CONSISTENT_SUBSPACE_AND_LANDMARK_COVARIANCE.md](CONSISTENT_SUBSPACE_AND_LANDMARK_COVARIANCE.md) | `Hll/Hpp/gp` 同域投影、Landmark 协方差与影子地图实验 |
-| [SHADOW_LANDMARKS.md](SHADOW_LANDMARKS.md) | 影子点独立 EKF、交叉协方差边界、默认 MSCKF 下的作用和持久点路线 |
+| [SHADOW_LANDMARKS.md](SHADOW_LANDMARKS.md) | 独立影子地图、候选池、低视差归档、无深度旋转约束、持久点延迟初始化与完整交叉协方差 |
 | [archive/legacy_debug/README.md](archive/legacy_debug/README.md) | 早期坐标系、发散和状态增广调试文档；仅用于历史追溯 |
 
 各文档都记录了**失败的尝试和被数据推翻的判断**，不只记成功的部分。
