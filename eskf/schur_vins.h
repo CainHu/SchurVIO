@@ -7,6 +7,7 @@
 
 #include "../common.h"
 #include "../data_structure/map.h"
+#include "frame_selection_policy.h"
 #include "landmark_parameterization.h"
 #include "visual_update_scheduler.h"
 
@@ -143,13 +144,20 @@ namespace slam {
         void pushFrame(const CameraData &cam_data, bool is_keyframe);
         void popFrame(size_t chronological_index = 0);
 
-        // 更新 map
-        void updateMap(const CameraData &cam_data);
-
         // 视觉更新
         void updateVisual(const CameraData &cam_data, const std::unordered_map<size_t, Vec3> &lmk_map, double dt);
 
-        void updateState(auto &&dx);
+        // 独立影子地图后处理：只更新 shadow_position/shadow_cov_position，
+        // 不改变导航后验使用的 Landmark::position，也不向 ESKF 反馈信息。
+        void updateShadowLandmarks(
+            const CameraData &cam_data,
+            const std::vector<std::pair<LandmarkID, Landmark *>> &landmarks,
+            bool is_keyframe,
+            double dt);
+
+        // 将误差状态注入名义状态。姿态采用左乘误差：R <- Exp(dtheta) R；
+        // 位置、速度和零偏采用加法误差；随后每个 clone 按物理 ordering 注入。
+        void updateState(const VecX &dx);
 
         struct TriangulationResult {
             TriangulationStatus status{TriangulationStatus::InsufficientViews};
@@ -200,58 +208,55 @@ namespace slam {
             LANDMARK_PARAMETERIZATION;
         constexpr static VisualUpdateScheduler visual_update_scheduler =
             VISUAL_UPDATE_SCHEDULER;
-        static_assert(schedulerRetainedCloneCount(visual_update_scheduler) < WIN_SIZE,
-                      "scheduler must leave one slot for the incoming clone");
+        constexpr static FrameSelectionPolicy frame_selection_policy =
+            FRAME_SELECTION_POLICY;
+        static_assert(framePolicyRetainedCloneCount(frame_selection_policy) < WIN_SIZE,
+                      "frame policy must leave one slot for the incoming clone");
 
         // Schur 序贯伪量测的噪声密度。更新中使用 R_i=uv_var/(d_i*dt)，
         // 因此它不是像素方差。30 s / 600 点四场景长时扫描后取 1e-2：
         // 1e-4 在滑窗充分运行后会放大线性化/gauge 漂移，1e-2 的最坏误差更稳健。
         TYPE uv_var = TYPE(1e-2);
-        // One-shot MSCKF tracks are genuine pixel batches rather than a
-        // repeatedly sampled information density. Their covariance is
-        // triangulation_uv_std^2 times this robustness multiplier.
+        // MSCKF 一次性轨迹对应真实像素样本批次，其协方差为
+        // triangulation_uv_std^2 乘以该鲁棒缩放，不按相机 dt 重复积分。
         TYPE msckf_visual_noise_scale = TYPE(1);
-        // RD-VIO classifies a frame as rotation-dominant when the 70th
-        // percentile IMU-rotation-aligned bearing error is below this angle.
+        // RD-VIO 风格判定：公共特征经 IMU 旋转补偿后的角误差 70% 分位数
+        // 小于该阈值时，将当前帧标为旋转主导 R 帧。
         TYPE rdvio_rotation_threshold_deg = TYPE(0.60);
         size_t rdvio_min_common_tracks = 20;
         size_t rdvio_subframe_size = 3;
         size_t rdvio_rotation_compression_trigger = 9;
         TYPE rdvio_zero_translation_std = TYPE(0.03);
+        TYPE vins_mono_keyframe_parallax_deg = TYPE(1.25);
+        size_t vins_mono_min_common_tracks = 20;
+        Tus vins_mono_max_keyframe_interval_us = 1000000;
         // 过程噪声整体缩放因子(1.0 = 使用 INSState 中配置的原值)，用于敏感度扫描
         TYPE proc_noise_scale_ = TYPE(1);
-        // Strict-ablation switches. Production defaults keep real triangulation and
-        // landmark refinement enabled; GT initialization is analysis-only.
+        // 严格消融开关。生产默认使用真实三角化与 Landmark 修正；真值初始化
+        // 只允许分析程序使用，不能进入默认算法。
         LandmarkInitializationMode landmark_initialization_mode_ =
             LandmarkInitializationMode::Triangulation;
         LandmarkUpdateMode landmark_update_mode_ = LandmarkUpdateMode::Retriangulate;
-        // Compatibility switch used by the historical strict-ablation CLI.
-        // false always forces Fixed regardless of landmark_update_mode_.
+        // 历史消融命令兼容开关；false 时无条件使用 Fixed，不读取 update mode。
         bool refine_landmarks_ = true;
-        // FEJ-based observability constraint for the Schur visual update.
-        // It preserves the four VIO gauge directions: global translation (3)
-        // and global yaw about gravity (1). Enabled by default; analysis can
-        // disable it for a controlled A/B comparison.
+        // 基于 FEJ 的可观性约束，保护 VIO 的四维 gauge：全局平移 3 维和绕
+        // 重力方向的全局偏航 1 维。默认开启，仅在严格 A/B 中允许关闭。
         bool enforce_observability_constraint_ = true;
-        // Optional prior-whitened hard projection of the Schur-reduced normal
-        // equation.  Hll inverse, projected Hpp and gp share their retained
-        // eigenspaces. FEJ remains the production default; this path is an
-        // explicitly enabled experiment.
+        // 可选的先验白化硬投影。Hll 伪逆、投影后的 Hpp 和 gp 必须共享同一
+        // 有效子空间；生产默认仍是 FEJ，该路径只用于显式开启的实验。
         bool project_observability_constraint_ = false;
         TYPE hll_rank_relative_threshold_ = TYPE(1e-8);
         TYPE hpp_rank_relative_threshold_ = TYPE(1e-6);
 
-        // Experimental independent-map covariance models. The fixed term has
-        // units m^2/s and is integrated once per visual update. Adaptive mode
-        // scales it with a per-landmark normalized-innovation EMA.
+        // 独立地图协方差实验参数。固定项单位为 m^2/s，每次视觉更新按 dt 积分；
+        // 自适应模式再由每个 Landmark 的归一化创新 EMA 调节膨胀量。
         TYPE landmark_process_noise_density_ = TYPE(1e-3);
         TYPE landmark_adaptive_inflation_gain_ = TYPE(1);
         TYPE landmark_adaptive_inflation_max_scale_ = TYPE(25);
         TYPE landmark_nis_ema_alpha_ = TYPE(0.05);
 
-        // A practical detached map estimate: it consumes only the newest
-        // keyframe observation and never changes Landmark::position used by
-        // the ESKF. Disabled by default to keep the production cost unchanged.
+        // 影子 Landmark：只消费最新关键帧观测，且永不修改 ESKF 构造残差时
+        // 使用的 Landmark::position。默认关闭，不增加生产路径计算量。
         bool enable_shadow_landmark_postprocessor_ = false;
         bool shadow_landmark_adaptive_inflation_ = true;
         constexpr static TYPE lmk_var = TYPE(0.01);
@@ -259,7 +264,8 @@ namespace slam {
         // 三角化使用归一化像平面噪声；仿真中约为 1 pixel / fx = 0.0054。
         // 它与历史视觉后验中的 uv_var（聚合伪量测噪声）含义不同，不能直接复用 400。
         TYPE triangulation_uv_std = TYPE(0.0054);
-        TYPE triangulation_min_parallax_deg = TYPE(8.0);
+        TYPE triangulation_min_parallax_deg =
+            TYPE(schedulerDefaultTriangulationParallaxDeg());
         TYPE triangulation_max_reprojection_rmse = TYPE(0.03);
         TYPE triangulation_max_position_std = TYPE(50);
 
@@ -353,6 +359,9 @@ namespace slam {
         // Defensive guard: a reused MSCKF sample is rejected before H/g.
         // This counter and n_reused_observations_ must both remain zero.
         size_t n_duplicate_observations_blocked_ = 0;
+        size_t n_keyframes_selected_ = 0;
+        size_t n_nonkeyframes_selected_ = 0;
+        size_t n_frames_stored_ = 0;
         size_t n_rdvio_rotation_frames_ = 0;
         size_t n_rdvio_normal_frames_ = 0;
         std::array<size_t, 5> n_rdvio_cases_{};

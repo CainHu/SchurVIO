@@ -66,6 +66,7 @@ int main(int argc, char **argv) {
     const std::string landmark_consistency =
         readFile("out/landmark_consistency_summary.csv");
     const std::string scheduler = readFile("out/scheduler_summary.csv");
+    const std::string frame_policy = readFile("out/frame_policy_summary.csv");
     const std::string parameterization = readFile("out/parameterization_summary.csv");
 
     if (trajectories.front().empty()) {
@@ -99,6 +100,7 @@ int main(int argc, char **argv) {
     sub("%%DATA_OBSERVABILITY%%", esc(observability));
     sub("%%DATA_LANDMARK_CONSISTENCY%%", esc(landmark_consistency));
     sub("%%DATA_SCHEDULER%%", esc(scheduler));
+    sub("%%DATA_FRAME_POLICY%%", esc(frame_policy));
     sub("%%DATA_PARAMETERIZATION%%", esc(parameterization));
     sub("%%REPORT_TAG%%", esc(tag));
     sub("%%REPORT_TITLE%%", esc(title));

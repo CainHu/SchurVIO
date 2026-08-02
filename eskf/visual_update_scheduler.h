@@ -61,28 +61,23 @@ namespace slam {
         return "unknown";
     }
 
-    [[nodiscard]] constexpr bool schedulerAugmentsEveryImage(
-        const VisualUpdateScheduler scheduler = VISUAL_UPDATE_SCHEDULER) {
-        return scheduler != VisualUpdateScheduler::Legacy;
-    }
-
     [[nodiscard]] constexpr bool schedulerConsumesTracksOnce(
         const VisualUpdateScheduler scheduler = VISUAL_UPDATE_SCHEDULER) {
         return scheduler == VisualUpdateScheduler::MSCKF ||
                scheduler == VisualUpdateScheduler::RDVIO;
     }
 
-    // Number of clones retained after the current image has been processed.
-    // One additional current clone can temporarily participate in an update.
-    [[nodiscard]] constexpr size_t schedulerRetainedCloneCount(
+    [[nodiscard]] constexpr double schedulerDefaultTriangulationParallaxDeg(
         const VisualUpdateScheduler scheduler = VISUAL_UPDATE_SCHEDULER) {
         switch (scheduler) {
-            case VisualUpdateScheduler::Legacy: return 29;
-            case VisualUpdateScheduler::SchurVINS: return 3;
-            case VisualUpdateScheduler::MSCKF: return 10;
-            case VisualUpdateScheduler::VINSMono: return 10;
-            case VisualUpdateScheduler::RDVIO: return 18;
+            case VisualUpdateScheduler::MSCKF:
+            case VisualUpdateScheduler::RDVIO:
+                return 2.0;
+            case VisualUpdateScheduler::Legacy:
+            case VisualUpdateScheduler::SchurVINS:
+            case VisualUpdateScheduler::VINSMono:
+                return 8.0;
         }
-        return 10;
+        return 2.0;
     }
 }

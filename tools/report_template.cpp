@@ -275,9 +275,10 @@ const RAW_TRI  = `%%DATA_TRIANGULATION%%`;
 const RAW_SUM  = `%%DATA_SUMMARY%%`;
 const RAW_ABLATION = `%%DATA_ABLATION%%`;
 const RAW_OBSERVABILITY = `%%DATA_OBSERVABILITY%%`;
-const RAW_LANDMARK_CONSISTENCY = `%%DATA_LANDMARK_CONSISTENCY%%`;
-const RAW_SCHEDULER = `%%DATA_SCHEDULER%%`;
-const RAW_PARAMETERIZATION = `%%DATA_PARAMETERIZATION%%`;
+  const RAW_LANDMARK_CONSISTENCY = `%%DATA_LANDMARK_CONSISTENCY%%`;
+  const RAW_SCHEDULER = `%%DATA_SCHEDULER%%`;
+  const RAW_FRAME_POLICY = `%%DATA_FRAME_POLICY%%`;
+  const RAW_PARAMETERIZATION = `%%DATA_PARAMETERIZATION%%`;
 const REPORT_TAG = `%%REPORT_TAG%%`;
 
 function parseCSV(txt){
@@ -320,6 +321,7 @@ const ABL = parseCSV(RAW_ABLATION).rows;
 const OBSERVABILITY = parseCSV(RAW_OBSERVABILITY).rows;
 const LANDMARK_CONSISTENCY = parseCSV(RAW_LANDMARK_CONSISTENCY).rows;
 const SCHEDULER = parseCSV(RAW_SCHEDULER).rows;
+const FRAME_POLICY = parseCSV(RAW_FRAME_POLICY).rows;
 const PARAMETERIZATION = parseCSV(RAW_PARAMETERIZATION).rows;
 const REPORT_ROWS = [...SUM, ...SCHEDULER, ...PARAMETERIZATION];
 
@@ -1401,14 +1403,36 @@ linePlot('cwin',{y0:0,y1:32,series:[
 (function(){
   const root=document.getElementById('algorithmComparison');
   const schedulerRows=SCHEDULER.filter(r=>String(r.scenario)==='circle_out');
+  const framePolicyRows=FRAME_POLICY;
   const parameterRows=PARAMETERIZATION.filter(r=>String(r.scenario)==='circle_out');
-  if(!schedulerRows.length&&!parameterRows.length){
-    root.innerHTML='<div class="sub">尚未生成调度或参数化对比 CSV。</div>';
+  if(!schedulerRows.length&&!framePolicyRows.length&&!parameterRows.length){
+    root.innerHTML='<div class="sub">尚未生成调度、帧策略或参数化对比 CSV。</div>';
     return;
   }
   let html='';
+  if(framePolicyRows.length){
+    const scenarioOrder=['circle_out','circle_in','helix_3d','stop_go','rotation_translation'];
+    const policyOrder=[...new Set(framePolicyRows.map(r=>String(r.frame_policy)))];
+    const groups=policyOrder.map(policy=>({policy,rows:framePolicyRows.filter(r=>String(r.frame_policy)===policy)}));
+    const score=g=>g.rows.reduce((sum,r)=>sum+(Number(r.rmse_p_aligned)||0),0)/Math.max(g.rows.length,1);
+    const best=groups.reduce((a,b)=>score(b)<score(a)?b:a,groups[0]);
+    html+='<h3>固定 MSCKF 一次性后验的帧策略消融（统一 clone 预算）</h3><table><thead><tr>'+[
+      '帧策略','Circle-out','Circle-in','Helix','Stop-go','旋转-平移','平均对齐 ATE','轨迹丢弃率','更新数'
+    ].map(x=>`<th>${x}</th>`).join('')+'</tr></thead><tbody>';
+    for(const group of groups){
+      const byScenario=new Map(group.rows.map(r=>[String(r.scenario),r]));
+      const consumed=group.rows.reduce((sum,r)=>sum+(Number(r.tracks_consumed)||0),0);
+      const dropped=group.rows.reduce((sum,r)=>sum+(Number(r.tracks_dropped)||0),0);
+      const updates=group.rows.reduce((sum,r)=>sum+(Number(r.updates)||0),0);
+      html+=`<tr class="${group===best?'best':''}"><td>${group.policy}</td>`+
+        scenarioOrder.map(s=>`<td>${fmt(byScenario.get(s)?.rmse_p,4)}</td>`).join('')+
+        `<td>${fmt(score(group),4)}</td><td>${fmt(100*dropped/Math.max(consumed,1),1)}%</td>`+
+        `<td>${fmt(updates,0)}</td></tr>`;
+    }
+    html+='</tbody></table>';
+  }
   if(schedulerRows.length){
-    html+='<h3>视觉更新调度（Circle-out）</h3><table><thead><tr>'+[
+    html+='<h3 style="margin-top:18px">视觉更新调度（Circle-out）</h3><table><thead><tr>'+[
       '调度','ATE (m)','1 s RPE (m)','平均后验 (ms)','复用率','丢弃轨迹','R/N 帧','RR/NN/RN/NR'
     ].map(x=>`<th>${x}</th>`).join('')+'</tr></thead><tbody>';
     for(const r of schedulerRows){

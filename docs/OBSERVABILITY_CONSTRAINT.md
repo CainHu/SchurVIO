@@ -75,6 +75,37 @@ $$
 
 FEJ 与硬投影的作用层级不同：FEJ 在构造雅可比时保持历史线性化点的一致性，尽量让正确零空间自然出现；硬投影是在正规方程已经形成后再做代数修补。当前实验说明前者有效而稳定，后者应继续保持为研究开关，不能仅凭“投影后泄漏为零”就默认启用。
 
+### 联合零空间经过 Schur 消元后的传递关系
+
+```mermaid
+flowchart LR
+    A["联合残差 Jp dxp + Jl dxl"] --> B["联合 gauge: Jp Np + Jl Nl = 0"]
+    B --> C["Hll 在统一相对阈值下求伪逆"]
+    C --> D["Schur: Hs = Hpp - Hpl Hll+ Hlp"]
+    D --> E["理论结果: Hs Np = 0"]
+    E --> F["分解 Hs 并确定实际有效子空间 U+"]
+    F --> G{"gp 是否位于 Range(Hs)?"}
+    G -- 是 --> H["在 U+ 内做序贯后验更新"]
+    G -- 否 --> I["先统一 Hll/Hs/gp 的秩判定"]
+    I --> H
+```
+
+若联合 Hessian 的零空间向量记为
+
+$$
+N=\begin{bmatrix}N_p\\N_l\end{bmatrix},\qquad
+\begin{bmatrix}H_{pp}&H_{pl}\\H_{lp}&H_{ll}\end{bmatrix}N=0,
+$$
+
+且 $N_l=-H_{ll}^{+}H_{lp}N_p$ 位于所保留的 $H_{ll}$ 有效子空间，则第一行给出
+
+$$
+\left(H_{pp}-H_{pl}H_{ll}^{+}H_{lp}\right)N_p=H_sN_p=0.
+$$
+
+这说明 Schur 消元本身不会凭空破坏 gauge；真正敏感的是伪逆截断是否让 $N_l$ 与
+$H_{ll}^{+}$ 的有效域不一致，以及梯度 $g_s$ 是否经过了同一有效子空间过滤。
+
 ## 四维不可观方向
 
 当前误差姿态采用左乘形式：
@@ -115,6 +146,21 @@ I_{3\times3} & -[p_i-p_0]_{\times}\hat g
 4. landmark 使用当前 `position`，因为它是长寿命、持续精化的地图点。一次更新内所有观测共享同一 landmark 线性化点，因此联合平移/旋转 gauge 仍成立，同时避免永久冻结旧深度。
 
 这相当于约束短寿命滑窗状态的线性化点，而允许持久 landmark 正常重线性化。
+
+```mermaid
+sequenceDiagram
+    participant IMU as IMU传播
+    participant Clone as Clone增广
+    participant FEJ as FEJ快照
+    participant Visual as 后续视觉更新
+    IMU->>Clone: 传播到相机时刻并复制当前位姿
+    Clone->>FEJ: 首次记录 q_fej, p_fej
+    loop Clone仍在滑窗中
+        Visual->>Visual: 用当前状态计算残差与可见性
+        Visual->>FEJ: 用冻结位姿计算 J_pose/J_lmk
+        FEJ-->>Visual: 保持历史线性化零空间一致
+    end
+```
 
 ## 为什么没有默认开启 Schur 后硬投影
 

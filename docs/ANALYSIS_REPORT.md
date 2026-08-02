@@ -122,6 +122,20 @@ INSState::ESTIMATE_GRAVITY = false;
 
 ## 6. 视觉后验是否正确修正 ESKF
 
+```mermaid
+flowchart LR
+    GT["同时间 GT"] --> PRE["视觉前 prior 误差"]
+    GT --> POST["视觉后 posterior 误差"]
+    PRE --> DELTA["单次误差改善 Delta e"]
+    POST --> DELTA
+    POST --> TRAJ["整段轨迹"]
+    TRAJ --> ATE["Raw RMSE / gauge对齐 ATE"]
+    TRAJ --> RPE["1 s 相对位姿 RPE"]
+    POST --> CONS["P 与创新协方差 S"]
+    CONS --> NEES["NEES：状态一致性"]
+    CONS --> NIS["NIS：量测一致性"]
+```
+
 分析日志在每次视觉更新前后分别保存 `q/p/v`，并与同时间 GT 比较。报告给出：
 
 ```math
@@ -136,6 +150,30 @@ INSState::ESTIMATE_GRAVITY = false;
 - 修正量是否有限、是否出现孤立大尖峰；
 - NEES/NIS 是否显示过度自信；
 - 四种几何和运动下是否都不发散。
+
+姿态误差使用四元数差的对数映射，避免直接相减欧拉角的跳变：
+
+$$
+e_R=\operatorname{Log}(R_{gt}^TR_{est}),
+\qquad
+\operatorname{RMSE}_R=
+\sqrt{\frac1N\sum_i\|e_{R,i}\|^2}.
+$$
+
+对状态误差 $e_x$ 和对应协方差块 $P_x$，归一化估计误差平方为
+
+$$
+\operatorname{NEES}=e_x^TP_x^{+}e_x.
+$$
+
+对量测创新 $r$、雅可比 $H$ 和创新协方差 $S=HP^-H^T+R$，归一化创新平方为
+
+$$
+\operatorname{NIS}=r^TS^{+}r.
+$$
+
+这里使用伪逆是为了兼容视觉 gauge 和被主动截断的退化方向。NEES/NIS 应与其**实际有效
+自由度**的卡方分布比较；只看均值或把名义矩阵维数直接当自由度，会误判一致性。
 
 报告中的多场景汇总正是为避免只凭一条“好看”的圆周轨迹判断算法正确。
 

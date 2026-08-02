@@ -26,7 +26,7 @@ if (Test-Path -LiteralPath $cache) {
 
 Push-Location $projectRoot
 try {
-    foreach ($parallax in @(3, 5, 7, 8, 10)) {
+    foreach ($parallax in @(1, 2, 3, 5, 8)) {
         $tag = "tri_p$parallax"
         Write-Host "Circle-out triangulation / $parallax deg"
         & $analysis "0.01" $tag "1.0" "circle_out" "$Duration" "$Features" `

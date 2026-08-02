@@ -25,6 +25,42 @@ else()
     message(FATAL_ERROR "Unknown SCHUR_VIO_VISUAL_SCHEDULER=${SCHUR_VIO_VISUAL_SCHEDULER}")
 endif()
 
+# Frame selection and clone-retention policy. AUTO selects the recommended
+# scheduler-specific behavior, while explicit policies allow a fixed visual
+# posterior (for example MSCKF) to compare frame strategies independently.
+set(SCHUR_VIO_FRAME_POLICY "AUTO" CACHE STRING
+    "Frame policy: AUTO, KEYFRAME_ONLY, FIFO, KEYFRAME_PRIORITY, VINS_MONO, or RDVIO")
+set_property(CACHE SCHUR_VIO_FRAME_POLICY PROPERTY STRINGS
+             AUTO KEYFRAME_ONLY FIFO KEYFRAME_PRIORITY VINS_MONO RDVIO)
+string(TOUPPER "${SCHUR_VIO_FRAME_POLICY}" SCHUR_VIO_FRAME_POLICY_UPPER)
+if(SCHUR_VIO_FRAME_POLICY_UPPER STREQUAL "AUTO")
+    set(SCHUR_VIO_FRAME_POLICY_VALUE 0)
+elseif(SCHUR_VIO_FRAME_POLICY_UPPER STREQUAL "KEYFRAME_ONLY")
+    set(SCHUR_VIO_FRAME_POLICY_VALUE 1)
+elseif(SCHUR_VIO_FRAME_POLICY_UPPER STREQUAL "FIFO")
+    set(SCHUR_VIO_FRAME_POLICY_VALUE 2)
+elseif(SCHUR_VIO_FRAME_POLICY_UPPER STREQUAL "KEYFRAME_PRIORITY")
+    set(SCHUR_VIO_FRAME_POLICY_VALUE 3)
+elseif(SCHUR_VIO_FRAME_POLICY_UPPER STREQUAL "VINS_MONO")
+    set(SCHUR_VIO_FRAME_POLICY_VALUE 4)
+elseif(SCHUR_VIO_FRAME_POLICY_UPPER STREQUAL "RDVIO")
+    set(SCHUR_VIO_FRAME_POLICY_VALUE 5)
+else()
+    message(FATAL_ERROR "Unknown SCHUR_VIO_FRAME_POLICY=${SCHUR_VIO_FRAME_POLICY}")
+endif()
+
+# Zero selects the policy's historical clone budget. A positive value makes
+# clone count identical across frame-policy ablations; Map::N_WIN is 30, so 29
+# is the largest safe retained count with one slot left for the incoming clone.
+set(SCHUR_VIO_FRAME_WINDOW_SIZE "0" CACHE STRING
+    "Retained clone count for frame-policy comparison; 0 uses the policy default")
+if(NOT SCHUR_VIO_FRAME_WINDOW_SIZE MATCHES "^[0-9]+$")
+    message(FATAL_ERROR "SCHUR_VIO_FRAME_WINDOW_SIZE must be an integer in [0, 29]")
+endif()
+if(SCHUR_VIO_FRAME_WINDOW_SIZE GREATER 29)
+    message(FATAL_ERROR "SCHUR_VIO_FRAME_WINDOW_SIZE must be <= 29")
+endif()
+
 # The map continues to store world XYZ. This option changes only the local
 # three-DOF landmark coordinates used while constructing the Schur system.
 set(SCHUR_VIO_LANDMARK_PARAMETERIZATION "WORLD_XYZ" CACHE STRING
@@ -104,11 +140,17 @@ add_executable(VinsEKF main.cpp
         vio_frontend_simulator.h
         eskf/landmark_parameterization.cpp
         eskf/landmark_parameterization.h
+        eskf/frame_selection_policy.cpp
+        eskf/frame_selection_policy.h
         eskf/rdvio_constraints.cpp
         eskf/rdvio_constraints.h
         eskf/rdvio_scheduler.cpp
         eskf/rdvio_scheduler.h
         eskf/schur_vins.cpp
+        eskf/schur_vins_imu.cpp
+        eskf/schur_vins_shadow.cpp
+        eskf/schur_vins_triangulation.cpp
+        eskf/schur_vins_visual.cpp
         eskf/schur_vins.h
         eskf/visual_update_scheduler.h
         common.h
@@ -127,6 +169,8 @@ add_executable(VinsEKF main.cpp
 target_include_directories(VinsEKF PUBLIC "E:/eigen-3.4.0/eigen-3.4.0")
 target_compile_definitions(VinsEKF PRIVATE
         SCHUR_VIO_VISUAL_SCHEDULER=${SCHUR_VIO_VISUAL_SCHEDULER_VALUE}
+        SCHUR_VIO_FRAME_POLICY=${SCHUR_VIO_FRAME_POLICY_VALUE}
+        SCHUR_VIO_FRAME_WINDOW_SIZE=${SCHUR_VIO_FRAME_WINDOW_SIZE}
         SCHUR_VIO_LANDMARK_PARAMETERIZATION=${SCHUR_VIO_LANDMARK_PARAMETERIZATION_VALUE})
 
 # 分析工具: 导出 CSV 供 tools/report.html 可视化
@@ -140,15 +184,22 @@ add_executable(VinsAnalysis tools/analysis_main.cpp
         vio_frontend_simulator1.cpp
         vio_representative_simulator.cpp
         eskf/landmark_parameterization.cpp
+        eskf/frame_selection_policy.cpp
         eskf/rdvio_constraints.cpp
         eskf/rdvio_scheduler.cpp
         eskf/schur_vins.cpp
+        eskf/schur_vins_imu.cpp
+        eskf/schur_vins_shadow.cpp
+        eskf/schur_vins_triangulation.cpp
+        eskf/schur_vins_visual.cpp
         data_structure/sliding_window.cpp
         data_structure/observation.cpp
 )
 target_include_directories(VinsAnalysis PUBLIC "E:/eigen-3.4.0/eigen-3.4.0")
 target_compile_definitions(VinsAnalysis PRIVATE
         SCHUR_VIO_VISUAL_SCHEDULER=${SCHUR_VIO_VISUAL_SCHEDULER_VALUE}
+        SCHUR_VIO_FRAME_POLICY=${SCHUR_VIO_FRAME_POLICY_VALUE}
+        SCHUR_VIO_FRAME_WINDOW_SIZE=${SCHUR_VIO_FRAME_WINDOW_SIZE}
         SCHUR_VIO_LANDMARK_PARAMETERIZATION=${SCHUR_VIO_LANDMARK_PARAMETERIZATION_VALUE})
 
 # 报告生成器: 把 out/*.csv 嵌进自包含的 HTML(无外部依赖)

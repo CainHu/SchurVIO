@@ -5,6 +5,10 @@
 2. 为什么它比 Schur 慢这么多？是稀疏性的原因吗？
 3. 还有优化空间吗？
 
+> 本文 FLOP 表中的 198 维 Schur 状态来自开启重力估计的历史基准。当前默认关闭重力
+> 估计后为 195 维；这只带来小幅常数变化，不改变 QR 保留大量量测行、Schur 提前压缩
+> 到固定状态维数这一复杂度结论。
+
 ## 一、你的做法没有问题，这是标准 MSCKF
 
 流程完全正确：
@@ -18,6 +22,49 @@
 
 这就是 MSCKF 的 null-space projection + measurement compression，
 教科书做法，实现上也没有错误。**慢不是因为做错了，是这个方法本身的代价。**
+
+对一个被 $K$ 帧观测的三维 landmark，堆叠方程为
+
+$$
+r_f=H_{x,f}\delta x+H_{f}\delta p_f+n,
+\qquad H_f\in\mathbb R^{2K\times3}.
+$$
+
+薄 QR 分解 $H_f=Q_1R_f$，并补成正交基 $Q=[Q_1\;Q_2]$。左乘 $Q^T$ 后，
+$Q_2^TH_f=0$，因此与特征点无关的约束为
+
+$$
+r_f^o=Q_2^Tr_f=Q_2^TH_{x,f}\delta x+Q_2^Tn,
+\qquad r_f^o\in\mathbb R^{2K-3}.
+$$
+
+白噪声下，Schur 消元使用的投影矩阵
+
+$$
+\Pi_f=I-H_f(H_f^TH_f)^+H_f^T
+$$
+
+恰好等于 $Q_2Q_2^T$，所以
+
+$$
+H_{x,f}^T\Pi_fH_{x,f}
+=(Q_2^TH_{x,f})^T(Q_2^TH_{x,f}).
+$$
+
+也就是说，在相同线性化、权重与秩阈值下，QR 与 Schur 保存的是同一份状态信息；两者
+主要差别是**何时把量测行压缩成状态信息矩阵**。
+
+```mermaid
+flowchart TB
+    O["每点 2K 行重投影残差"] --> Q1["小 QR：构造 Q2^T Hx 与 Q2^T r"]
+    Q1 --> Q2["拼接全部点：m x n 稠密高矩阵"]
+    Q2 --> Q3["大 QR：m 行最终压到 n 行"]
+    O --> S1["累计 Hpp/Hpl/Hll 与 gp/gl"]
+    S1 --> S2["每点 3x3 Schur 补"]
+    S2 --> S3["始终得到 n x n 的 Hs"]
+    Q3 --> U["等价状态后验"]
+    S3 --> U
+```
 
 ## 二、慢的根因：不是稀疏性，是"信息压缩的时机"
 

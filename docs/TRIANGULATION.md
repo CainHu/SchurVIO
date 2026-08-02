@@ -133,6 +133,34 @@ P_{l,world}\approx P_{l|a}+G_aP_{aa}G_a^T.
 `Landmark::cov_position` 的是 `P_l,world`。这是保持每点小矩阵开销的工程近似。严格模型
 还应保留 landmark 与所有 clone 的交叉协方差，并构造联合残差协方差。
 
+### 从观测轨迹到可用 Landmark 的完整流程
+
+```mermaid
+flowchart TD
+    A["收集同一 ID 的关键帧观测"] --> B{"有效观测数 >= 2?"}
+    B -- 否 --> R1["insufficient_views：等待新关键帧"]
+    B -- 是 --> C["按时间排序并恢复世界系视线"]
+    C --> D["搜索全部观测对的最大视差"]
+    D --> E{"theta_max >= theta_min?"}
+    E -- 否 --> R2["low_parallax：保留轨迹并延迟初始化"]
+    E -- 是 --> F["构造 3x3 射线正规方程 H_ray p = b_ray"]
+    F --> G{"秩与条件数合格?"}
+    G -- 否 --> R3["ill_conditioned：等待几何改善"]
+    G -- 是 --> H["LDLT 求射线交会初值"]
+    H --> I["最多 5 次鲁棒 Gauss-Newton"]
+    I --> J{"正深度、重投影与步长检查"}
+    J -- 失败 --> R4["按失败原因拒绝本次初始化"]
+    J -- 通过 --> K["Lambda^-1 给出条件协方差"]
+    K --> L["传播锚帧位姿协方差到世界系"]
+    L --> M{"最大标准差 <= 门限?"}
+    M -- 否 --> R5["excessive_uncertainty：等待更多基线"]
+    M -- 是 --> N["写入 position / cov_position / is_triangulated"]
+```
+
+流程中的“失败”不是永久删除特征。除明显误匹配外，低视差和病态通常只是当前时刻的
+几何条件不足；`last_triangulation_frame_id` 让算法仅在最新观测帧变化后重试，从而兼顾
+延迟三角化的成功率与运行时间。
+
 ## 5. 失败分类与重试
 
 | 状态 | 触发条件 | 后续行为 |
@@ -144,7 +172,7 @@ P_{l,world}\approx P_{l|a}+G_aP_{aa}G_a^T.
 | `high_reprojection_error` | 归一化 RMSE 大于 0.03 | 拒绝疑似误匹配/坏初值 |
 | `excessive_uncertainty` | 最大位置标准差大于 50 m | 等更多约束 |
 
-`last_triangulation_obs_count` 保证同一组观测只尝试一次；新增关键帧观测后才重试。低视差
+`last_triangulation_frame_id` 保证同一组最新观测只尝试一次；即使滚动窗口的观测数量保持不变，只要新帧替换旧帧便会重试。低视差
 通常在 3×3 射线求解之前退出，所以失败重试的时间成本很低。
 
 ## 6. 复杂度与实时性
@@ -180,6 +208,12 @@ $$
 
 以及条件点协方差向世界系传播时使用的绝对锚点协方差。这样既利用了对深度最敏感的基线，也消除了结果对哈希遍历顺序的依赖。
 
-Circle-out 的 30 s 视差扫描比较了 3°、5°、7°、8° 和 10°。低门限会更早接纳点，但初始深度误差明显更大；10° 的成功点数和局部 RPE 又开始变差。综合初始几何质量、最终地图点误差和保留约束数量，默认值设为 8°，完整数据见 [LANDMARK_UPDATE_STRATEGIES.md](LANDMARK_UPDATE_STRATEGIES.md)。
+## Scheduler-aware parallax default
+
+The earlier 30 s Circle-out sweep selected 8 degrees under a persistent-window measurement lifecycle. That threshold cannot be transferred unchanged to one-shot MSCKF tracks: once a track reaches the clone boundary, rejecting it permanently discards the measurement batch.
+
+The current defaults are 2 degrees for MSCKF/RD-VIO and 8 degrees for the historical Legacy/SchurVINS/VINS-Mono comparison modes. An explicit command-line value still overrides the scheduler default. MSCKF also retains 20 rather than 10 clones, giving about one second of baseline at 20 Hz.
+
+In the 100 s / 600 feature Circle-out regression, 10 clones plus 8 degrees accepted only 488 of 20739 triangulation candidates and produced 238.94 m position RMSE. The corrected 20-clone plus 2-degree configuration accepted 10342 of 10680 candidates and reduced RMSE to 0.64 m. Reprojection, positive-depth, conditioning, and position-uncertainty gates still reject weak geometry.
 
 扫描可通过 `tools/run_triangulation_threshold_analysis.ps1` 复现，汇总写入 `out/triangulation_threshold_summary.csv`。

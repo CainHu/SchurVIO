@@ -1,6 +1,6 @@
 # 视觉更新优化总览
 
-本目录记录 SchurVIO 视觉后验更新的性能优化过程。
+本目录记录 SchurVIO 的源码结构、数学推导、视觉后验策略、精度消融与历史问题归档。
 
 ## 整体结果
 
@@ -23,6 +23,8 @@
 
 | 文档 | 内容 |
 |---|---|
+| [SOURCE_LAYOUT.md](SOURCE_LAYOUT.md) | 当前 `schur_vins_*.cpp` 拆分、调用流程、数学文档映射和维护约定 |
+| [MATHEMATICAL_PIPELINE.md](MATHEMATICAL_PIPELINE.md) | 从 IMU 传播、clone 增广、三角化到 Schur/Joseph 后验的数学总流程 |
 | [OPT_QR_PATH.md](OPT_QR_PATH.md) | QR 路径 203.5 s → 61.8 s |
 | [OPT_SCHUR_PATH.md](OPT_SCHUR_PATH.md) | Schur 路径 18.3 s → 11.9 s |
 | [OPT_LDLT.md](OPT_LDLT.md) | `Hpp` 分解改用 LDLT，11.9 s → 9.7 s |
@@ -38,12 +40,28 @@
 | [OBSERVABILITY_CONSTRAINT.md](OBSERVABILITY_CONSTRAINT.md) | FEJ 可观性约束：四维 VIO gauge、Schur 实现、硬投影反例与四场景 A/B |
 | [LANDMARK_UPDATE_STRATEGIES.md](LANDMARK_UPDATE_STRATEGIES.md) | 固定点、重三角化、Schur 回代与旧独立 EKF 的数学边界和严格对比 |
 | [HLL_STRUCTURE.md](HLL_STRUCTURE.md) | 理论：`Hll` 的零特征值 = 深度方向；`Hll` 换 LDLT |
+| [CONSISTENT_SUBSPACE_AND_LANDMARK_COVARIANCE.md](CONSISTENT_SUBSPACE_AND_LANDMARK_COVARIANCE.md) | `Hll/Hpp/gp` 同域投影、Landmark 协方差与影子地图实验 |
+| [SHADOW_LANDMARKS.md](SHADOW_LANDMARKS.md) | 影子点独立 EKF、交叉协方差边界、默认 MSCKF 下的作用和持久点路线 |
+| [archive/legacy_debug/README.md](archive/legacy_debug/README.md) | 早期坐标系、发散和状态增广调试文档；仅用于历史追溯 |
 
 各文档都记录了**失败的尝试和被数据推翻的判断**，不只记成功的部分。
 
+推荐按以下顺序阅读数学部分：
+
+```mermaid
+flowchart LR
+    A["数学总流程"] --> B["三角化"]
+    B --> C["Landmark 参数化"]
+    C --> D["Schur 与 QR 等价性"]
+    D --> E["Hll/Hpp 零空间"]
+    E --> F["FEJ 与一致有效子空间"]
+    F --> G["视觉调度与 RD-VIO"]
+    G --> H["消融和报告指标"]
+```
+
 ## 路径切换
 
-`eskf/schur_vins.cpp` 顶部：
+`eskf/schur_vins_visual.cpp` 顶部：
 
 ```cpp
 //#define USE_QR
@@ -61,6 +79,8 @@
 | `USE_LDLT_FOR_HPP` | `eskf/schur_vins.h` | `true` | `Hpp` 分解：`true`=LDLT，`false`=特征分解 |
 | `USE_LDLT_FOR_HLL` | `eskf/schur_vins.h` | `true` | `Hll` 分解，同上（性能上两者无差别） |
 | `SCHUR_VIO_VISUAL_SCHEDULER` | `CMakeLists.txt` / `eskf/visual_update_scheduler.h` | `MSCKF` | 视觉调度：Legacy、SchurVINS、MSCKF 或 VINS-Mono 风格 |
+| `SCHUR_VIO_FRAME_POLICY` | `CMakeLists.txt` / `eskf/frame_selection_policy.h` | `AUTO` | 帧选择：默认 MSCKF 下解析为关键帧策略 |
+| `SCHUR_VIO_FRAME_WINDOW_SIZE` | `CMakeLists.txt` | `0` | `0` 使用策略默认预算，非零时固定 clone 数用于公平消融 |
 
 `ESTIMATE_EXTRINSIC` 关闭时，外参雅可比 `J_ext` / `J_EXT` 的代码通过 `if constexpr`
 屏蔽——不参与运行，但始终参与语法和类型检查，不会腐烂。

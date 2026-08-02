@@ -47,7 +47,7 @@ namespace slam {
             shadow_cov_position = Mat3_3::Identity() * TYPE(1e-4);
             shadow_nis_ema = TYPE(1);
 
-            last_triangulation_obs_count = 0;
+            last_triangulation_frame_id = 0;
             triangulation_log_index = std::numeric_limits<size_t>::max();
 
             anchor_obs = nullptr;
@@ -80,8 +80,9 @@ namespace slam {
         Mat3_3 shadow_cov_position{Mat3_3::Identity() * TYPE(1e-4)};
         TYPE shadow_nis_ema{TYPE(1)};
 
-        // 三角化失败后，仅在关键帧观测数增加时重试，避免非关键帧更新反复做无效计算。
-        size_t last_triangulation_obs_count{};
+        // 三角化失败后，仅在最新观测帧变化时重试。滚动窗口中观测数量
+        // 可能保持不变，因此不能用 observation_count 判断是否出现了新基线。
+        FrameID last_triangulation_frame_id{};
         // 指向 SchurVINS 中成功初始化记录；landmark 被移出滑窗后记录仍可用于离线评估。
         size_t triangulation_log_index{std::numeric_limits<size_t>::max()};
 

@@ -1,5 +1,6 @@
 out/*.csv
 out/*.html
+out/*.log
 out/_shot.png
 .idea/
 cmake-build-*/

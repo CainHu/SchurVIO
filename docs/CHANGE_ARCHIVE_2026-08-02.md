@@ -23,9 +23,15 @@ RD-VIO 调度和三种锚定 Landmark 参数化均作为实验选项保留，不
 | `eskf/rdvio_scheduler.{h,cpp}` | R/N 判定、RR/NN/RN/NR 转移、关键帧提升和纯旋转子窗压缩计划 |
 | `eskf/rdvio_constraints.{h,cpp}` | 无深度纯旋转约束和零平移约束对 `Hpp/gp` 的累加 |
 | `eskf/landmark_parameterization.{h,cpp}` | 四种 3-DOF 参数化、锚帧位姿雅可比、局部正规方程回到世界 XYZ |
-| `eskf/schur_vins.cpp` | 视觉更新流程编排、Schur 消元、状态后验和统计日志 |
+| `eskf/schur_vins.cpp` | 外层相机/IMU 数据流、误差状态注入和名义状态设置 |
+| `eskf/schur_vins_imu.cpp` | IMU 名义状态积分、误差转移和协方差传播 |
+| `eskf/schur_vins_triangulation.cpp` | 多视图三角化、非线性精化和初始点协方差 |
+| `eskf/schur_vins_visual.cpp` | clone 管理、轨迹调度、Schur 消元、状态后验和统计日志 |
+| `eskf/schur_vins_shadow.cpp` | 不反馈导航状态的影子 Landmark 地图后处理 |
 
-拆分后，参数化和 RD-VIO 的数学实现不再与轨迹筛选、Schur 消元及地图后处理混在同一代码段中。主流程仍采用编译期调度选择，因此默认构建不会为未选择的调度引入运行时分派。
+拆分后，IMU、三角化、视觉后验和影子地图不再堆叠在一个约 2400 行的源文件中。
+主流程仍采用编译期调度选择，因此默认构建不会为未选择的调度引入运行时分派；拆分也不改变
+矩阵装配顺序和浮点累加顺序。完整源码对应关系见 [SOURCE_LAYOUT.md](SOURCE_LAYOUT.md)。
 
 ## 本次归档功能
 
@@ -106,6 +112,67 @@ powershell -ExecutionPolicy Bypass -File tools/run_multi_scenario_analysis.ps1 `
 - [Landmark 参数化](LANDMARK_PARAMETERIZATION.md)
 - [仿真场景](SIMULATION_SCENARIOS.md)
 
+## 后续文档数学增强
+
+在代码归档之后，文档又补充了一轮可独立审阅的数学说明：
+
+- 新增 [数学总流程](MATHEMATICAL_PIPELINE.md)，串联 IMU 传播、clone 增广、重投影、
+  Schur 消元、有效子空间、序贯 Joseph 更新和地图后处理；
+- [Landmark 参数化](LANDMARK_PARAMETERIZATION.md) 补齐 World/Anchored XYZ、三自由度逆深度、
+  log-depth 的正反变换、锚帧雅可比、Schur 坐标不变性和协方差回变换；
+- [RD-VIO 调度](RDVIO_SCHEDULING.md) 补齐论文判据与工程分位数判据的差异、四 Case 状态机、
+  无深度旋转因子、零平移风险与 R 子窗压缩流程；
+- 三角化、QR/Schur、`Hll/Hpp` 零空间、FEJ、Landmark 修正、仿真生成和报告指标均新增
+  对应公式及 Mermaid 流程图。
+
+该小节所述的数学增强阶段当时只修改 Markdown；后续源码拆分、帧策略和长时回归修复
+已在本文后续章节单独记录。
+
 ## 版本库边界
 
 本归档提交源码、CMake 配置、实验脚本和 Markdown 结论。`out/` 中的 CSV/HTML 属于可再生实验产物，不进入提交；IDE 配置、构建目录和 `tmp/` 下的论文/临时仓库同样不归档到 Git。归档分支为 `codex/covariance-stability`，本文所在提交即本轮归档点。
+
+## 100 秒长时发散回归修复
+
+后续长时回归暴露出调度与几何门限不匹配：一次性 MSCKF 只保留 10 个 clone，却继承了持久窗口
+实验使用的 8 度三角化门限。在 20 Hz 相机频率下，大多数轨迹到达窗口边界时仍未积累足够视差，
+随后被永久丢弃。
+
+- MSCKF 默认保留 20 个 clone；
+- MSCKF/RD-VIO 默认使用 2 度门限，历史重复窗口模式仍使用 8 度；
+- `VinsAnalysis` 输出 clone 数、视差门限与轨迹丢弃率，并在丢弃率超过 80% 时告警；
+- 多场景脚本不再为一次性调度扫描无效的 `uv_var`；
+- 三角化门限扫描覆盖 1、2、3、5、8 度。
+
+同一组 100 s / 600 点实验中，四个场景位置 RMSE 从 238.9374、70.0672、1.8628、
+409.8012 m 降至 0.6409、2.8183、0.6934、0.4838 m；平均 NIS 仍接近 1，且所有场景
+保持 `reused=0`、`blocked=0`。
+
+## MSCKF 帧策略解耦与默认策略
+
+视觉后验生命周期和帧保留策略现已成为两个独立的编译期选择：
+
+- `SCHUR_VIO_VISUAL_SCHEDULER` 控制一次性或重复窗口后验语义；
+- `SCHUR_VIO_FRAME_POLICY` 控制图像增广、关键帧/R-N 分类和 clone 删除；
+- `SCHUR_VIO_FRAME_WINDOW_SIZE` 可固定公共 clone 预算，用于公平消融。
+
+`tools/run_frame_policy_analysis.ps1` 固定 MSCKF、WORLD_XYZ、20 个 clone 和 2 度门限。
+100 s / 600 点结果中，关键帧策略在 Circle-out、Circle-in、Helix-3D、Stop-go 和
+Rotation-translation 上分别为 0.3443、0.4179、0.2013、0.6688、8.4281 m；FIFO 分别为
+0.6409、2.8183、0.6934、0.4838、8.9361 m。因此 MSCKF 的 `AUTO` 默认解析为关键帧策略，
+同时保持 `reused=0`、`blocked=0`。
+
+VINS-Mono 的三角化重试不再依赖观测数量，而记录最新观测帧 ID。固定长度滚动窗口替换旧帧后，
+即使观测总数不变也会重新尝试三角化。修复后的 100 s VINS-Mono 四个标准场景结果为
+0.3211、0.1234、0.0348、0.1661 m，不再出现 Stop-go 零更新；但其 NIS 仍约 0.001，
+因为当前 ESKF 对照实现仍会重复使用活动窗口残差。
+
+## 源码拆分与注释增强
+
+- 将原 `schur_vins.cpp` 拆为外层流程、IMU、三角化、视觉后验和影子地图五个编译单元；
+- 补充 clone 增广、IMU 传播、多视图三角化、`Hll` 伪逆、Schur 消元、FEJ、
+  序贯伪量测和 Joseph 协方差更新的中文公式注释；
+- 删除视觉后验中由 `#if 1` 屏蔽的旧直接逆更新死代码，保留可回归的 QR/Schur 主路径；
+- 新增 [SOURCE_LAYOUT.md](SOURCE_LAYOUT.md) 与 [SHADOW_LANDMARKS.md](SHADOW_LANDMARKS.md)；
+- 将根目录早期调试记录移入 `docs/archive/legacy_debug/`，并明确其历史属性；
+- `out/*.csv`、`out/*.html` 与 `out/*.log` 统一视为可再生实验产物，不进入提交。

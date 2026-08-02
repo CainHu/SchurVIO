@@ -37,11 +37,26 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "Scenario $scenario failed with exit code $LASTEXITCODE" }
     }
 
-    # Keep parameter sweeps on circle_out; the four base rows measure cross-scenario robustness.
-    foreach ($uv in @("0.0001", "0.001", "0.003", "0.01", "0.03", "0.1")) {
-        $tag = "uv_" + $uv.Replace(".", "p")
-        & $analysis $uv $tag "1.0" "circle_out" "$Duration" "$Features"
-        if ($LASTEXITCODE -ne 0) { throw "uv_var=$uv failed with exit code $LASTEXITCODE" }
+    $scheduler = ""
+    if (Test-Path -LiteralPath $cache) {
+        $schedulerLine = Select-String -Path $cache -Pattern '^SCHUR_VIO_VISUAL_SCHEDULER:STRING=(.+)$' |
+            Select-Object -First 1
+        if ($schedulerLine -and $schedulerLine.Matches.Count) {
+            $scheduler = $schedulerLine.Matches[0].Groups[1].Value.ToUpperInvariant()
+        }
+    }
+
+    # One-shot schedulers use normalized image variance directly, so uv_var is
+    # intentionally inactive. Sweeping it would create duplicate result rows.
+    if ($scheduler -in @("MSCKF", "RDVIO")) {
+        Write-Host "Skipping uv_var sweep for one-shot scheduler $scheduler"
+    }
+    else {
+        foreach ($uv in @("0.0001", "0.001", "0.003", "0.01", "0.03", "0.1")) {
+            $tag = "uv_" + $uv.Replace(".", "p")
+            & $analysis $uv $tag "1.0" "circle_out" "$Duration" "$Features"
+            if ($LASTEXITCODE -ne 0) { throw "uv_var=$uv failed with exit code $LASTEXITCODE" }
+        }
     }
 
     foreach ($scale in @(@("0.5", "proc_0p5"), @("2.0", "proc_2p0"))) {

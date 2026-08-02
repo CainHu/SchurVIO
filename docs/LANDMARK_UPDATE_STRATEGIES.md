@@ -47,6 +47,29 @@ $$
 
 真正的“完整相关”方案需要把 $P_{xl}$ 纳入状态、在增广和边缘化时同步维护；其存储和更新开销随地图点数增长，会改变当前 MSCKF/Schur 架构。因此本轮采用 Schur 回代作为工程边界明确的替代方案，并在文档和代码中显式说明这一限制。
 
+```mermaid
+flowchart TD
+    Z["同一批像素观测 z"] --> X["更新状态 x"]
+    Z --> L["更新 Landmark l"]
+    X <--> C["产生互协方差 Pxl"]
+    L <--> C
+    C --> F["完整联合 EKF：长期保存并传播 Pxl"]
+    C --> B["Schur 回代：仅保持当前批次一阶一致"]
+    C --> I["Independent EKF：忽略 Pxl，可能重复计数"]
+```
+
+三种 landmark 修正方式的概率边界可概括为
+
+$$
+\begin{aligned}
+\text{联合 EKF: }&p(x,l\mid z_{1:k}),\\
+\text{Schur 回代: }&\arg\min_{\delta x,\delta l}\|r-J_x\delta x-J_l\delta l\|_W^2
+\quad\text{（当前批次）},\\
+\text{独立 EKF: }&p(x\mid z_{1:k})\,p(l\mid z_{1:k})
+\quad\text{（近似假设 }P_{xl}=0\text{）}.
+\end{aligned}
+$$
+
 ## 3. 三组候选策略
 
 | 策略 | 做法 | 优点 | 局限 |

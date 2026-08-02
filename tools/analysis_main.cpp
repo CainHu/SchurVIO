@@ -179,7 +179,8 @@ int main(int argc, char **argv) {
     const bool observability_projection = (argc > 13) ? std::atoi(argv[13]) != 0 : false;
     const std::string landmark_update = (argc > 14) ? argv[14] : "retriangulate";
     const double triangulation_min_parallax_deg =
-        (argc > 15) ? std::atof(argv[15]) : 8.0;
+        (argc > 15) ? std::atof(argv[15])
+                    : slam::schedulerDefaultTriangulationParallaxDeg();
     const bool enable_shadow_map = (argc > 16) ? std::atoi(argv[16]) != 0 : false;
     const double landmark_process_noise_density =
         (argc > 17) ? std::atof(argv[17]) : 1e-3;
@@ -828,6 +829,7 @@ int main(int argc, char **argv) {
         const bool is_landmark_consistency = summary_group == "landmark_consistency";
         const bool is_triangulation_scan = summary_group == "triangulation";
         const bool is_scheduler = summary_group == "scheduler";
+        const bool is_frame_policy = summary_group == "frame_policy";
         const bool is_parameterization = summary_group == "parameterization";
         const bool is_landmark = is_landmark_strategy || is_landmark_consistency ||
                                  is_triangulation_scan;
@@ -835,6 +837,7 @@ int main(int argc, char **argv) {
         if (is_ablation) summary_filename = "ablation_summary.csv";
         else if (is_observability) summary_filename = "observability_summary.csv";
         else if (is_scheduler) summary_filename = "scheduler_summary.csv";
+        else if (is_frame_policy) summary_filename = "frame_policy_summary.csv";
         else if (is_parameterization) summary_filename = "parameterization_summary.csv";
         else if (is_triangulation_scan) summary_filename = "triangulation_threshold_summary.csv";
         else if (is_landmark_consistency) summary_filename = "landmark_consistency_summary.csv";
@@ -846,6 +849,7 @@ int main(int argc, char **argv) {
                 || (is_observability && tag == "oc_on")
                 || (is_scheduler && tag == "scheduler_legacy")
                 || (is_scheduler && tag == "scheduler_msckf_report")
+                || (is_frame_policy && tag == "frame_keyframe_only")
                 || (is_parameterization && tag == "param_world_xyz")
                 || (is_landmark_strategy && tag == "lmk_fixed")
                 || (is_landmark_consistency && tag == "lmk_independent")
@@ -886,6 +890,17 @@ int main(int argc, char **argv) {
                         "mean_nees,mean_nis,t_cost,updates,new_observations,reused_observations,"
                         "reuse_rate,tracks_consumed,tracks_dropped,duplicate_observations_blocked,"
                         "updates_skipped,max_window,tri_success,tri_attempts,"
+                        "r_frames,n_frames,case_rr,case_nn,case_rn,case_nr,"
+                        "compressed_frames,rotation_constraints,zero_translation_constraints\n");
+                } else if (is_frame_policy) {
+                    std::fprintf(f,
+                        "scenario,tag,scheduler,frame_policy,retained_clones,parameterization,"
+                        "one_shot,uv_var,duration,features,"
+                        "rmse_p,rmse_p_aligned,rpe_1s_p,rpe_1s_att,rmse_v,rmse_att,max_err_p,"
+                        "mean_nees,mean_nis,t_cost,updates,new_observations,reused_observations,"
+                        "reuse_rate,tracks_consumed,tracks_dropped,duplicate_observations_blocked,"
+                        "updates_skipped,max_window,keyframes,nonkeyframes,frames_stored,"
+                        "tri_success,tri_attempts,"
                         "r_frames,n_frames,case_rr,case_nn,case_rn,case_nr,"
                         "compressed_frames,rotation_constraints,zero_translation_constraints\n");
                 } else if (is_parameterization) {
@@ -1008,6 +1023,46 @@ int main(int argc, char **argv) {
                     ekf.n_rdvio_compressed_frames_,
                     ekf.n_rdvio_rotation_constraints_,
                     ekf.n_rdvio_zero_translation_constraints_);
+            } else if (is_frame_policy) {
+                size_t max_window = 0;
+                for (const auto &log : ekf.logs_) {
+                    max_window = std::max(max_window, log.win_size);
+                }
+                const size_t lifecycle_observations =
+                    ekf.n_new_observations_ + ekf.n_reused_observations_;
+                const double reuse_rate = lifecycle_observations
+                    ? static_cast<double>(ekf.n_reused_observations_) /
+                      static_cast<double>(lifecycle_observations)
+                    : 0.0;
+                std::fprintf(f,
+                    "%s,%s,%s,%s,%zu,%s,%d,%.9g,%.1f,%zu,"
+                    "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
+                    "%.6e,%.6e,%.3f,%zu,%zu,%zu,%.6e,"
+                    "%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu\n",
+                    scenario.c_str(), tag.c_str(),
+                    slam::visualUpdateSchedulerName(),
+                    slam::frameSelectionPolicyName(),
+                    slam::framePolicyRetainedCloneCount(),
+                    slam::landmarkParameterizationName(),
+                    slam::schedulerConsumesTracksOnce() ? 1 : 0,
+                    uv_var, duration, feature_count,
+                    rmse_p, rmse_p_aligned, rpe_1s_p, rpe_1s_att,
+                    rmse_v, rmse_a, mp, mean_nees, mean_nis,
+                    static_cast<double>(ekf.t_cost_) / static_cast<double>(CLOCKS_PER_SEC),
+                    ekf.posterior_times_, ekf.n_new_observations_,
+                    ekf.n_reused_observations_, reuse_rate,
+                    ekf.n_tracks_consumed_, ekf.n_tracks_dropped_,
+                    ekf.n_duplicate_observations_blocked_,
+                    ekf.n_visual_updates_skipped_, max_window,
+                    ekf.n_keyframes_selected_, ekf.n_nonkeyframes_selected_,
+                    ekf.n_frames_stored_,
+                    triangulation_success, ekf.triangulation_logs_.size(),
+                    ekf.n_rdvio_rotation_frames_, ekf.n_rdvio_normal_frames_,
+                    ekf.n_rdvio_cases_[1], ekf.n_rdvio_cases_[2],
+                    ekf.n_rdvio_cases_[3], ekf.n_rdvio_cases_[4],
+                    ekf.n_rdvio_compressed_frames_,
+                    ekf.n_rdvio_rotation_constraints_,
+                    ekf.n_rdvio_zero_translation_constraints_);
             } else if (is_parameterization) {
                 const double hll_condition_mean = ekf.n_hll_condition_tests_ > 0
                     ? ekf.hll_effective_condition_sum_ /
@@ -1075,12 +1130,28 @@ int main(int argc, char **argv) {
         }
         std::printf("[%s/%s] uv_var=%.9g  RMSE p=%.4f m  v=%.4f m/s  att=%.4f rad  max_p=%.4f m\n",
                     scenario.c_str(), tag.c_str(), uv_var, rmse_p, rmse_v, rmse_a, mp);
-        std::printf("scheduler=%s  observations(new/reused/blocked)=%zu/%zu/%zu  "
-                    "tracks(consumed/dropped)=%zu/%zu  skipped_updates=%zu\n",
-                    slam::visualUpdateSchedulerName(), ekf.n_new_observations_,
-                    ekf.n_reused_observations_, ekf.n_duplicate_observations_blocked_,
+        const double track_drop_rate = ekf.n_tracks_consumed_ > 0
+            ? static_cast<double>(ekf.n_tracks_dropped_) /
+              static_cast<double>(ekf.n_tracks_consumed_)
+            : 0.0;
+        std::printf("scheduler=%s  frame_policy=%s  clones=%zu  parallax=%.2f deg  "
+                    "observations(new/reused/blocked)=%zu/%zu/%zu  "
+                    "tracks(consumed/dropped)=%zu/%zu (%.1f%%)  skipped_updates=%zu\n",
+                    slam::visualUpdateSchedulerName(),
+                    slam::frameSelectionPolicyName(),
+                    slam::framePolicyRetainedCloneCount(),
+                    triangulation_min_parallax_deg,
+                    ekf.n_new_observations_, ekf.n_reused_observations_,
+                    ekf.n_duplicate_observations_blocked_,
                     ekf.n_tracks_consumed_, ekf.n_tracks_dropped_,
+                    100.0 * track_drop_rate,
                     ekf.n_visual_updates_skipped_);
+        if (slam::schedulerConsumesTracksOnce() && track_drop_rate > 0.8) {
+            std::fprintf(stderr,
+                         "warning: %.1f%% of one-shot tracks were dropped before visual update; "
+                         "check clone span and triangulation parallax threshold\n",
+                         100.0 * track_drop_rate);
+        }
     }
 
     return 0;
