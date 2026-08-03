@@ -221,3 +221,12 @@ RMSE 分别从 0.3443、0.4179、0.2013、0.6688、8.4281 m 变为 0.3262、0.31
 
 `README.md`、`SOURCE_LAYOUT.md`、`VISUAL_UPDATE_SCHEDULING.md` 和 `SHADOW_LANDMARKS.md` 已统一指向
 该专题，后续修改默认混合后端时应同步更新此文档。
+
+### `updateVisual()` 源码注释细化
+
+- 按帧分类、clone 增广、压窗规划、轨迹消费、三角化、旋转约束、普通 Schur、联合 EKF 和条件晋升
+  的真实执行顺序补充中文阶段注释，并给出关键正规方程、Kalman 增益和条件回代公式。
+- 明确 `requested_consumption`、`consume_track` 与 `schedule_track` 的差异，以及低视差延迟后为何仍可
+  先消费无深度旋转像素。
+- 明确已有持久点、普通 MSCKF 轨迹和历史摘要的互斥边界，说明 `P_LM` 传播与像素重复使用的区别。
+- 本次只修改注释和文档，不改变帧策略、轨迹集合、矩阵装配、浮点运算顺序或任何运行参数。

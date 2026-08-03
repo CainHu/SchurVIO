@@ -79,22 +79,28 @@ void SchurVINS::popFrame(const size_t chronological_index) {
 }
 void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_map<size_t, Vec3> &lmk_map, const double dt) {
     /*
-     * 视觉后验总流程（默认 MSCKF + Schur）：
+     * 视觉后验总流程（默认 Hybrid MSCKF + Schur）：
      *
-     * 1. 帧策略：判断关键帧/R-N 帧，增广 clone，并生成待删除 clone 集合。
-     * 2. 轨迹生命周期：一次性轨迹满足 lost、touchBoundary 或达到长度上限时消费。
-     * 3. 三角化：由多帧归一化像平面观测初始化世界点 p_f。
-     * 4. 重投影线性化：
+     * 1. 帧分类：判断关键帧以及 R（旋转主导）/N（平移主导）运动类型。
+     * 2. clone 调度：按帧策略增广当前相机位姿，并在真正删帧前生成待删除 clone 集合。
+     * 3. 观测分流：把已有持久点、普通一次性轨迹和无深度旋转轨迹分到互斥集合。
+     * 4. 持久点更新：已有持久点用当前关键帧像素直接更新完整联合状态 [x_M, p_L]。
+     * 5. 轨迹消费：普通轨迹满足 lost、touchBoundary 或达到长度上限时请求一次性消费；
+     *    低视差且仍可见的轨迹可以延迟删除，等待后续平移基线。
+     * 6. 三角化：由多帧归一化像平面观测初始化世界点 p_f，并记录视差、条件数和重投影质量。
+     * 7. 无深度旋转约束：三角化失败时仍可从相邻 bearing 提取只依赖姿态的切平面残差。
+     * 8. 普通轨迹重投影线性化：
      *        r_i = z_i - pi(T_ci,w p_f)
      *            ≈ H_x,i delta x + H_f,i delta p_f + n_i。
-     * 5. 累加联合正规方程：
-     *        [Hpp Hpl; Hlp Hll] [delta x; delta p_f] = [gp; gl]。
-     * 6. 逐点 Schur 消元：
+     * 9. 累加联合正规方程并逐点 Schur 消元：
+     *        [Hpp Hpl; Hlp Hll] [delta x; delta p_f] = [gp; gl]，
      *        Hs = Hpp - Hpl Hll^dagger Hlp，
      *        gs = gp  - Hpl Hll^dagger gl。
-     * 7. FEJ 可观性约束：保护全局平移 3 维与重力方向偏航 1 维 gauge。
-     * 8. 将 Hs 对角化成互不相关的一维伪量测，再用 Joseph 形式序贯更新。
-     * 9. 根据配置重三角化/Schur 回代 Landmark；影子地图只做独立后处理。
+     * 10. FEJ 可观性约束：保护全局平移 3 维与重力方向偏航 1 维 gauge。
+     * 11. 联合 EKF：把 Hs 对角化为互不相关的一维伪量测，用 Joseph 形式更新完整协方差；
+     *     虽然普通 MSCKF 的量测雅可比只直接作用于 x_M，P_LM 会把修正传播到已有持久点。
+     * 12. 条件初始化：少量成熟普通点复用本次 Hll/Hpl/gl 追加为新持久点；未晋升点只更新
+     *     影子候选统计，不再产生第二次导航量测更新，也不让历史 pose 快照进入 H/g。
      *
      * 调度 finalizer 在所有提前返回路径执行，保证轨迹消费和 clone 删除不会遗漏。
      */
@@ -136,6 +142,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         }
     }
 
+    // motion_decision 对所有模式都会计算，因为默认 MSCKF 也需要 R/N 标签来决定是否
+    // 构造无深度旋转残差；但 RR/NN/RN/NR 的关键帧切换和压窗动作只属于显式 RDVIO
+    // 帧策略。promote_previous_to_keyframe 用于在运动段切换时回溯确认上一帧为关键帧。
     if constexpr (frame_selection_policy == FrameSelectionPolicy::RDVIO) {
         const RDVIOFrameDecision &decision = motion_decision;
         is_keyframe = decision.is_keyframe;
@@ -152,6 +161,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             ++n_rdvio_normal_frames_;
         }
     }
+    // 关键帧统计描述“策略判定”，store_current_frame 描述“是否创建 clone”，二者不能
+    // 混为一谈：除 KeyframeOnly 外，其余策略即使判为非关键帧，也会为该图像增广 clone。
     if (is_keyframe) {
         ++n_keyframes_selected_;
     } else {
@@ -160,6 +171,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     const bool store_current_frame = is_keyframe || framePolicyAugmentsEveryImage();
     Frame *current_frame = nullptr;
     if (store_current_frame) {
+        // addObservations() 会把当前图像的全部 ID 临时写入 Map，包括已存在于联合状态中的
+        // 持久 ID。后面的 isPersistentLandmark() 分支会立即把这些 ID 与普通 MSCKF 集合
+        // 分开，并由 finalizer 清理临时 Map 轨迹，因此持久像素不会再次进入 ids/Hpl/Hll。
         pushFrame(cam_data, is_keyframe);
         ++n_frames_stored_;
         current_frame = map_.getWinLatestFrame();
@@ -169,6 +183,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         map_.addObservations(current_frame, cam_data);
     }
 
+    // 低视差轨迹被最终丢弃时，只归档首尾 bearing、相机位姿快照和几何质量摘要。
+    // 这里用新观测更新影子候选证据；归档 pose 不属于当前滤波状态，绝不能直接重建
+    // H/g，否则会忽略该 pose 被边缘化时丢失的相关性并造成虚假信息增益。
     pruneDeferredTrackArchives(cam_data.timestamp);
     if (current_frame && enable_hybrid_persistent_landmarks_ &&
         schedulerConsumesTracksOnce(visual_update_scheduler)) {
@@ -178,10 +195,13 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         }
     }
 
+    // 必须先规划本帧结束时要删除哪些 clone，再判断哪些轨迹触及窗口边界。若先删 clone，
+    // 对应 Observation/Feature 引用会消失，普通 MSCKF 将失去在边缘化前消费整条轨迹的机会。
     const size_t current_win_size = map_.sfw.size();
     std::vector<size_t> frames_to_remove;
     size_t rdvio_compressed_frames = 0;
     if constexpr (frame_selection_policy == FrameSelectionPolicy::KeyframeOnly) {
+        // 只保存关键帧；超预算时删除时间最早的关键帧 clone。
         if (current_win_size > framePolicyRetainedCloneCount()) {
             frames_to_remove.push_back(0);
         }
@@ -217,10 +237,13 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             }
         }
     } else if constexpr (frame_selection_policy == FrameSelectionPolicy::FIFO) {
+        // 标准 MSCKF 固定长度滑窗：每张图像都增广，超预算后删除最老 clone。
         if (current_win_size > framePolicyRetainedCloneCount()) {
             frames_to_remove.push_back(0);
         }
     } else if constexpr (frame_selection_policy == FrameSelectionPolicy::VINSMono) {
+        // 对齐 VINS-Mono 的滑窗语义：次新帧不是关键帧时优先删除次新帧；若次新帧已被
+        // 确认为关键帧，则保留关键帧并删除最老帧。这里只比较帧选择/压窗，不引入 BA。
         if (current_win_size > framePolicyRetainedCloneCount()) {
             const size_t second_newest = current_win_size - 2;
             frames_to_remove.push_back(map_.sfw[second_newest]->is_key_frame
@@ -241,6 +264,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         rdvio_compressed_frames = removal_plan.compressed_frame_count;
     }
 
+    // 删除计划可能来自多段 RD-VIO 压缩，先排序去重；同时在删除 clone 之前保存 FrameID，
+    // 因为轨迹调度按稳定的 FrameID 查询是否触及边界，而不是按会移动的窗口下标查询。
     std::sort(frames_to_remove.begin(), frames_to_remove.end());
     frames_to_remove.erase(
         std::unique(frames_to_remove.begin(), frames_to_remove.end()),
@@ -254,6 +279,11 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     std::vector<LandmarkID> tracks_to_consume;
     std::vector<LandmarkID> persistent_tracks_to_clear;
     size_t one_shot_tracks_used = 0;
+    // RAII finalizer 覆盖函数中所有提前 return：
+    // 1) 先删除已经消费的普通轨迹以及持久 ID 在 Map 中的临时轨迹，解除它们对帧的引用；
+    // 2) 再按下标逆序删除 clone，避免先删低下标导致后续下标整体左移；
+    // 3) persistent_tracks_to_clear 只清理 Map::lmk_map 中的临时对象，不会删除联合状态里的
+    //    PersistentLandmark，也不会缩减 P_LL/P_LM。
     ExitHandler schedule_finalizer([&] {
         if constexpr (schedulerConsumesTracksOnce(visual_update_scheduler)) {
             n_tracks_consumed_ += tracks_to_consume.size();
@@ -274,6 +304,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         }
     });
 
+    // 少于两个 clone 时既无法三角化，也无法构造相邻 bearing 的旋转约束；仍让 finalizer
+    // 执行，以便完成本帧可能产生的轨迹/窗口清理。
     if (current_win_size < 2) {
         ++n_visual_updates_skipped_;
         return;
@@ -292,6 +324,11 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         return false;
     };
 
+    // ids、track_qualities、track_continues_after_update 三个数组按同一下标严格对齐：
+    // ids[i] 给出参与普通 Schur 的轨迹，另外两个数组分别服务于质量排序和“当前仍可见”判断。
+    // static ids 先 resize 再 clear 只是复用上次分配的容量，不代表预先填入有效元素。
+    // rotation_only_tracks 会在本帧后删除；retained_rotation_only_tracks 只消费最新旋转像素，
+    // 轨迹本体继续留在 Map 中等待平移基线。
     size_t num_obs = 0;
     static std::vector<std::pair<LandmarkID, Landmark*>> ids;
     ids.resize(map_.lmk_map.size());
@@ -304,6 +341,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     std::vector<Landmark *> retained_rotation_only_tracks;
 
     for (const auto &[id, lmk] : map_.lmk_map) {
+        // 已有持久 ID 的当前像素由 updatePersistentLandmarks() 直接从 cam_data 读取。
+        // 这里必须 continue，保证 Z^P（持久点直接观测）与 Z^M（普通 MSCKF 观测）互斥；
+        // persistent_tracks_to_clear 仅记录 addObservations() 临时创建、帧末需清理的 Map 轨迹。
         if (isPersistentLandmark(id)) {
             if (cam_data.measurements.find(id) != cam_data.measurements.end()) {
                 persistent_tracks_to_clear.push_back(id);
@@ -311,6 +351,10 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             continue;
         }
         const size_t observation_count = lmk->frm2fet.size();
+        // 三个布尔量分别表达不同阶段，不能合并：
+        // requested_consumption：原始一次性调度器是否因 lost/触边/长度上限要求结算轨迹；
+        // consume_track：经过低视差延迟判定后，本帧是否真正删除该轨迹；
+        // schedule_track：本帧是否进入三角化和普通重投影线性化。
         bool schedule_track = true;
         bool consume_track = false;
         bool requested_consumption = false;
@@ -334,6 +378,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             schedule_track = consume_track;
         }
 
+        // 单观测点的 H_f 为 2x3，消元后不能独立约束位姿。若它已经触发一次性消费，
+        // 仍加入 tracks_to_consume，最终计入 dropped 并清理，避免无效单点长期滞留。
         if (!schedule_track || observation_count <= 1) {
             if (consume_track) {
                 tracks_to_consume.push_back(id);
@@ -341,6 +387,10 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             continue;
         }
 
+        // last_triangulation_frame_id 防止在完全相同的观测集合上重复做昂贵三角化；只要
+        // 最新观测帧变化，就允许重新尝试。RD-VIO 的 R 帧显式跳过深度初始化，因为纯旋转
+        // 不提供三角化基线。失败时仍保存视差、条件数、重投影 RMSE，供延迟和影子筛选使用。
+        // GroundTruth/OraclePosition 是实验诊断模式，不属于默认实际估计路径。
         const FrameID latest_observation_frame_id = lmk->frm2fet.empty()
             ? FrameID(0)
             : lmk->frm2fet.rbegin()->first;
@@ -392,6 +442,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             }
         }
 
+        // 低视差且当前仍可见的轨迹可以撤销“本帧删除”，继续等待未来平移基线。注意此时
+        // requested_consumption 保持为 true：这样仍可先提取最新一对无深度旋转信息，而
+        // consume_track=false 则保证轨迹本体和未消费像素继续保留。
         if (consume_track && !lmk->is_triangulated &&
             shouldDeferTrackConsumption(
                 *lmk, latest_triangulation_status, lost)) {
@@ -412,6 +465,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
                 retained_rotation_only_tracks.push_back(lmk);
             }
         }
+        // 只有最终确定删除且仍无法三角化的轨迹才写入历史摘要；被延迟的轨迹仍拥有完整
+        // Map 观测，不需要归档。tracks_to_consume 的实际删除统一交给 finalizer。
         if (consume_track && !lmk->is_triangulated) {
             archiveDeferredTrack(
                 *lmk, latest_triangulation_status, cam_data.timestamp);
@@ -420,6 +475,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             tracks_to_consume.push_back(id);
         }
 
+        // 只有成功获得深度的普通轨迹才进入 ids，并同步追加质量、生命周期和观测数。
+        // one_shot_tracks_used 表示“消费轨迹中确实贡献了普通视觉因子”的数量，最终用于
+        // 区分 consumed 与 dropped；它不等于像素数，也不包含仍保留的旋转轨迹。
         if (lmk->is_triangulated) {
             ids.emplace_back(id, lmk);
             track_qualities.push_back(evaluateTrackGeometry(*lmk));
@@ -431,15 +489,22 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         }
     }
 
+    // 更新顺序是“已有持久点直接联合 EKF”在前，“普通 MSCKF Schur 更新”在后。
+    // 两者不重复使用像素：已有持久 ID 已在上面的循环中 continue，不会进入 ids；普通
+    // MSCKF 随后虽能通过 P_LM 间接修正持久点，但使用的是另一组普通轨迹观测。
     const size_t persistent_updates = updatePersistentLandmarks(
         cam_data, current_frame, is_keyframe);
 
+    // 晋升分两层：本段只根据历史稳定证据、当前轨迹质量、总预算和图像网格设置“允许尝试”；
+    // 真正追加联合状态还要等普通轨迹完成线性化，并通过有效观测数、Hll 可逆性和回代检查。
     std::vector<bool> promotion_candidates(ids.size(), false);
     if (enable_hybrid_persistent_landmarks_ &&
         schedulerConsumesTracksOnce(visual_update_scheduler) &&
         persistent_landmarks_.size() < persistent_landmark_budget_) {
         std::vector<size_t> ranked_candidates;
         for (size_t index = 0; index < ids.size(); ++index) {
+            // 只晋升本次更新后仍可见的点。已经 lost 的轨迹即使几何很好，也无法在下一帧
+            // 作为持久点继续提供直接重投影观测，因而不占用固定持久点预算。
             if (track_continues_after_update[index] &&
                 shadowCandidateReady(ids[index].first, track_qualities[index])) {
                 ranked_candidates.push_back(index);
@@ -472,6 +537,7 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
                 static_cast<size_t>(normalized_y * TYPE(grid_rows)));
             return row * grid_columns + column;
         };
+        // 只有当前图像实际可见的已有持久点占用当前网格；不可见点不应永久封锁该区域。
         for (const auto &persistent : persistent_landmarks_) {
             const auto measurement = cam_data.measurements.find(persistent.id);
             if (measurement != cam_data.measurements.end()) {
@@ -493,6 +559,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
             if (grid_occupancy[cell] >= persistent_grid_cell_quota_) {
                 continue;
             }
+            // 此处只是候选标记，不做 EKF 更新，也不修改协方差；条件初始化在普通 MSCKF
+            // 联合状态修正完成后，复用该轨迹已经构造的 Hll/Hpl/gl 执行。
             promotion_candidates[candidate_index] = true;
             ++grid_occupancy[cell];
             ++selected;
@@ -503,21 +571,26 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         visual_update_scheduler == VisualUpdateScheduler::RDVIO &&
         current_frame && current_frame->is_rotation_frame &&
         map_.sfw.size() >= 2;
+    // 第一种空更新：持久点、普通点、旋转约束和 RD-VIO 零平移先验均不存在，计为 skipped。
     if (ids.empty() && rotation_only_tracks.empty() &&
         retained_rotation_only_tracks.empty() &&
         !has_rdvio_zero_translation && persistent_updates == 0) {
         ++n_visual_updates_skipped_;
         return;
     }
+    // 第二种空更新：已有持久点刚刚已经完成直接 EKF，但本帧没有后续普通/旋转因子。
+    // 直接返回即可，不能再记 skipped，否则统计会把有效的持久点更新误报为空更新。
     if (ids.empty() && rotation_only_tracks.empty() &&
         retained_rotation_only_tracks.empty() &&
         !has_rdvio_zero_translation) {
         return;
     }
 
-    // 重复窗口模式把 uv_var 解释为信息密度，因此离散后使用 uv_var/dt；
-    // MSCKF 一次性轨迹代表真实像素样本批次，噪声应直接取归一化像平面方差
-    // sigma_uv^2，不能再除以 dt，否则相机频率越高会凭空增加信息量。
+    // 三类调度器沿用各自历史噪声语义：
+    // 1) MSCKF/RD-VIO 一次性轨迹：R_uv = sigma_uv^2 * msckf_visual_noise_scale；
+    //    每个像素批次只使用一次，不能再除以 dt，否则相机频率越高会凭空增加信息量。
+    // 2) SchurVINS 历史活跃轨迹路径：保持 R_uv = sigma_uv^2。
+    // 3) Legacy/VINS-Mono 等重复窗口对照：把 uv_var 视为连续时间信息密度，离散成 uv_var/dt。
     const TYPE image_variance = std::max(
         triangulation_uv_std * triangulation_uv_std, TYPE(1e-12));
     const TYPE visual_batch_variance = [&] {
@@ -906,6 +979,11 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     size_t rotation_only_constraints = 0;
     size_t zero_translation_constraints = 0;
 
+    // 两类轨迹最终都把无深度旋转信息累加到同一个 Hpp/gp，区别只在生命周期：
+    // - rotation_only_tracks：轨迹本帧结束后删除，若残差有效则算作一次成功消费；
+    // - retained_rotation_only_tracks：只标记并消费最新旋转像素，轨迹继续等待平移基线。
+    // RD-VIO 原生调度使用完整信息倍率 1；默认 Hybrid MSCKF 使用较保守的
+    // depth_free_rotation_information_scale_，避免弱纯旋转模型压过可观的平移/深度信息。
     const auto accumulateDepthFreeRotation = [&]
         (const std::vector<Landmark *> &tracks,
          const bool add_zero_translation,
@@ -939,6 +1017,9 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
                 statistics.zero_translation_constraints;
         }
     };
+    // 先累加即将删除的轨迹，并可按 RD-VIO 策略附加相邻 R clone 的零平移约束；
+    // 再累加保留轨迹。像素级 visual_update_count 由约束构造器维护，后续普通深度
+    // Schur 只会读取尚未消费的 Observation，从而保持单个像素量测最多使用一次。
     accumulateDepthFreeRotation(
         rotation_only_tracks, has_rdvio_zero_translation, true);
     accumulateDepthFreeRotation(
@@ -1422,6 +1503,12 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
     // 记 w = sqrt(λ)^-1 * n, n ~ N[0, σ]
     // 则有 Cov[w] = σ^2 * λ^-1
     // 序贯 V.col(i)^T * y / λ(i) = V.col(i)^T * x + w(i), var[w] = σ^2 / λ(i)
+    // 联合误差状态排列为 delta x_joint=[delta x_M, delta p_L]，其中 x_M 包含 INS、外参
+    // 和全部 clone，p_L 是已有持久点。普通 MSCKF 已消掉本次临时点，所以它的直接
+    // 雅可比为 h_full=[h_M, 0]；但 Kalman 增益
+    //   K = P h_full^T S^-1 = [P_MM h_M^T; P_LM h_M^T] S^-1
+    // 的持久点行通常非零，因此普通轨迹仍会通过交叉协方差 P_LM 一致地修正已有持久点。
+    // 这是相关性传播，不是再次使用 updatePersistentLandmarks() 的持久点像素。
     VecX dx_joint = VecX::Zero(cov_.rows());
     TYPE nis_sum = TYPE(0);
     size_t nis_count = 0;
@@ -1518,6 +1605,8 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
 
             const auto R = visual_batch_variance / d;
             const auto hT = H_BASIS.col(i);
+            // Hpp/H_BASIS 只定义在固定维度的主状态 x_M 上；扩展到完整联合状态时，
+            // 新增持久点列显式补零。不能截断 cov_，否则会丢失 P_LM 带来的间接修正。
             h_full.setZero();
             h_full.head(COV_SIZE) = hT;
 
@@ -1543,10 +1632,17 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         cov_p.triangularView<Eigen::StrictlyLower>() = cov_p.triangularView<Eigen::StrictlyUpper>().transpose();
     }
     const VecX dx_p = dx_joint.head(COV_SIZE);
+    // 一次性注入完整联合修正：前 COV_SIZE 维更新 INS/外参/clone，尾部每 3 维更新一个
+    // 已有持久点。随后 applyJointStateCorrection() 负责名义状态注入，cov_ 已在上面同步更新。
     applyJointStateCorrection(dx_joint);
 
     if (enable_hybrid_persistent_landmarks_ &&
         schedulerConsumesTracksOnce(visual_update_scheduler)) {
+        // 晋升不是第二次 K=P H^T S^-1 量测更新。普通轨迹的像素已经在上面的 Schur/Joseph
+        // 更新中使用一次；这里复用同一线性化得到的 Hll/Hpl/gl，计算
+        //   delta p_f = Hll^-1(gl - Hlp delta x_M)
+        // 及其与旧状态的条件交叉协方差，然后把新点追加到联合状态。旧 cov_ 左上块保持
+        // 不变，只扩展 P_xf/P_ff，因此不会再次收紧导航状态。未晋升轨迹只更新影子统计。
         for (size_t index = 0; index < ids.size(); ++index) {
             Landmark &landmark = *ids[index].second;
             bool promoted = false;
