@@ -23,7 +23,7 @@ Landmark 后处理集中在 `eskf/schur_vins.cpp`。这种组织方式的问题�
 | `eskf/schur_vins_persistent.cpp` | 几何质量评分、影子候选池、持久点延迟初始化、联合 EKF 更新 | `evaluateTrackGeometry()`、`promotePersistentLandmark()`、`updatePersistentLandmarks()` |
 | `eskf/schur_vins_track_archive.cpp` | 低视差轨迹首尾射线摘要、跨丢失轨迹候选三角化 | `archiveDeferredTrack()`、`updateShadowCandidateFromArchive()` |
 | `eskf/schur_vins_shadow.cpp` | 与导航解耦的影子 Landmark 后处理 | `updateShadowLandmarks()` |
-| `eskf/frame_selection_policy.{h,cpp}` | FIFO、关键帧和 VINS-Mono 帧选择策略 | `decide*Frame()` |
+| `eskf/frame_selection_policy.{h,cpp}` | FIFO、关键帧、VINS-Mono 和实验性冗余感知删帧策略 | `decide*Frame()`、`planKeyframeRedundancyRemoval()` |
 | `eskf/rdvio_scheduler.{h,cpp}` | 与后验解耦的 R/N 运动分类、RD-VIO 四 Case 和压窗计划 | `decideRDVIOFrame()`、`planRDVIOFrameRemovals()` |
 | `eskf/rdvio_constraints.{h,cpp}` | 无深度旋转约束和 RD-VIO 可选零平移约束 | `accumulateRDVIOConstraints()` |
 | `eskf/visual_update_scheduler.h` | 一次性/重复窗口视觉后验语义 | 编译期枚举与辅助函数 |
@@ -69,7 +69,7 @@ flowchart TD
 |---|---|---|
 | IMU 积分与协方差传播 | `schur_vins_imu.cpp` | [MATHEMATICAL_PIPELINE.md](MATHEMATICAL_PIPELINE.md) |
 | 三角化与初始协方差 | `schur_vins_triangulation.cpp` | [TRIANGULATION.md](TRIANGULATION.md) |
-| 帧选择与轨迹生命周期 | `frame_selection_policy.cpp`、`schur_vins_visual.cpp` | [VISUAL_UPDATE_SCHEDULING.md](VISUAL_UPDATE_SCHEDULING.md) |
+| 帧选择与轨迹生命周期 | `frame_selection_policy.cpp`、`schur_vins_visual.cpp` | [VISUAL_UPDATE_SCHEDULING.md](VISUAL_UPDATE_SCHEDULING.md)、[KEYFRAME_REDUNDANCY_POLICY.md](KEYFRAME_REDUNDANCY_POLICY.md) |
 | 混合 MSCKF 状态扩维、筛选、晋升和联合更新 | `schur_vins_visual.cpp`、`schur_vins_persistent.cpp`、`schur_vins_imu.cpp` | [HYBRID_MSCKF.md](HYBRID_MSCKF.md) |
 | 无深度纯旋转约束 | `rdvio_constraints.cpp`、`rdvio_scheduler.cpp`、`schur_vins_visual.cpp` | [DEPTH_FREE_ROTATION_CONSTRAINT.md](DEPTH_FREE_ROTATION_CONSTRAINT.md) |
 | 低视差延迟与轨迹摘要 | `schur_vins_visual.cpp`、`schur_vins_track_archive.cpp` | [HYBRID_MSCKF.md](HYBRID_MSCKF.md)、[RDVIO_SCHEDULING.md](RDVIO_SCHEDULING.md) |

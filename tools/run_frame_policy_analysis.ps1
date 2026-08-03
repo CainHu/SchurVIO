@@ -30,7 +30,8 @@ function Add-CompilerRuntimeToPath {
     $cache = Join-Path $buildPath "CMakeCache.txt"
     if (-not (Test-Path -LiteralPath $cache)) { return }
     $compilerLine = Select-String -Path $cache `
-        -Pattern '^CMAKE_CXX_COMPILER:(?:STRING|FILEPATH)=(.+)$' | Select-Object -First 1
+        -Pattern '^CMAKE_CXX_COMPILER:(?:STRING|FILEPATH|UNINITIALIZED)=(.+)$' |
+        Select-Object -First 1
     if ($compilerLine -and $compilerLine.Matches.Count) {
         $compilerDirectory = Split-Path $compilerLine.Matches[0].Groups[1].Value
         if ($compilerDirectory -and (Test-Path -LiteralPath $compilerDirectory)) {
@@ -53,7 +54,14 @@ function Select-FramePolicy([string]$policy) {
     Add-CompilerRuntimeToPath
 }
 
-$policies = @("KEYFRAME_ONLY", "FIFO", "KEYFRAME_PRIORITY", "VINS_MONO", "RDVIO")
+$policies = @(
+    "KEYFRAME_ONLY",
+    "KEYFRAME_REDUNDANCY",
+    "FIFO",
+    "KEYFRAME_PRIORITY",
+    "VINS_MONO",
+    "RDVIO"
+)
 
 Push-Location $projectRoot
 try {

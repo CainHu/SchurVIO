@@ -30,6 +30,7 @@
 | [OPT_LDLT.md](OPT_LDLT.md) | `Hpp` 分解改用 LDLT，11.9 s → 9.7 s |
 | [QR_VS_SCHUR.md](QR_VS_SCHUR.md) | 理论：为什么 QR 比 Schur 慢 5 倍；两条失败的优化尝试 |
 | [VISUAL_UPDATE_SCHEDULING.md](VISUAL_UPDATE_SCHEDULING.md) | Legacy / SchurVINS / MSCKF / VINS-Mono 调度、一次性观测生命周期与宏切换 |
+| [KEYFRAME_REDUNDANCY_POLICY.md](KEYFRAME_REDUNDANCY_POLICY.md) | **实验性冗余删帧专题**：旋转补偿视差、未成熟轨迹保护、删除评分、状态框图与消融字段 |
 | [HYBRID_MSCKF.md](HYBRID_MSCKF.md) | **默认混合 MSCKF 专题**：状态扩维、持久点四层筛选、Schur 延迟初始化、联合 EKF、低视差延迟与无深度旋转约束 |
 | [DEPTH_FREE_ROTATION_CONSTRAINT.md](DEPTH_FREE_ROTATION_CONSTRAINT.md) | **纯旋转专题**：深度自然约消、小平移偏差、球面切平面残差、FEJ 雅可比、噪声与 EKF 接入 |
 | [RDVIO_SCHEDULING.md](RDVIO_SCHEDULING.md) | RD-VIO 的 RR/NN/RN/NR、延迟三角化、无深度旋转因子、R 子窗压缩与严格结果 |
@@ -82,7 +83,7 @@ flowchart LR
 | `USE_LDLT_FOR_HPP` | `eskf/schur_vins.h` | `true` | `Hpp` 分解：`true`=LDLT，`false`=特征分解 |
 | `USE_LDLT_FOR_HLL` | `eskf/schur_vins.h` | `true` | `Hll` 分解，同上（性能上两者无差别） |
 | `SCHUR_VIO_VISUAL_SCHEDULER` | `CMakeLists.txt` / `eskf/visual_update_scheduler.h` | `MSCKF` | 视觉调度：Legacy、SchurVINS、MSCKF 或 VINS-Mono 风格 |
-| `SCHUR_VIO_FRAME_POLICY` | `CMakeLists.txt` / `eskf/frame_selection_policy.h` | `AUTO` | 帧选择：默认 MSCKF 下解析为关键帧策略 |
+| `SCHUR_VIO_FRAME_POLICY` | `CMakeLists.txt` / `eskf/frame_selection_policy.h` | `AUTO` | 帧选择：默认 MSCKF 下解析为 `KEYFRAME_ONLY`；可显式选择实验性 `KEYFRAME_REDUNDANCY` |
 | `SCHUR_VIO_FRAME_WINDOW_SIZE` | `CMakeLists.txt` | `0` | `0` 使用策略默认预算，非零时固定 clone 数用于公平消融 |
 
 `ESTIMATE_EXTRINSIC` 关闭时，外参雅可比 `J_ext` / `J_EXT` 的代码通过 `if constexpr`

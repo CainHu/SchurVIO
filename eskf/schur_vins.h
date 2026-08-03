@@ -507,6 +507,16 @@ namespace slam {
         size_t n_keyframes_selected_ = 0;
         size_t n_nonkeyframes_selected_ = 0;
         size_t n_frames_stored_ = 0;
+        // 冗余感知关键帧策略诊断。只有显式选择 KEYFRAME_REDUNDANCY 时非零；
+        // 累计量除以 n_keyframe_redundancy_removals_ 可得到每次删帧均值。
+        size_t n_keyframe_redundancy_removals_ = 0;
+        size_t n_keyframe_redundancy_nonoldest_removals_ = 0;
+        size_t n_keyframe_redundancy_oldest_fallbacks_ = 0;
+        size_t n_keyframe_redundancy_selected_low_parallax_tracks_ = 0;
+        size_t n_keyframe_redundancy_selected_unique_tracks_ = 0;
+        TYPE keyframe_redundancy_score_sum_ = TYPE(0);
+        TYPE keyframe_redundancy_ratio_sum_ = TYPE(0);
+        TYPE keyframe_redundancy_parallax_loss_sum_ = TYPE(0);
         size_t n_rdvio_rotation_frames_ = 0;
         size_t n_rdvio_normal_frames_ = 0;
         std::array<size_t, 5> n_rdvio_cases_{};

@@ -205,6 +205,41 @@ void SchurVINS::updateVisual(const CameraData &cam_data, const std::unordered_ma
         if (current_win_size > framePolicyRetainedCloneCount()) {
             frames_to_remove.push_back(0);
         }
+    } else if constexpr (
+        frame_selection_policy == FrameSelectionPolicy::KeyframeRedundancy) {
+        if (current_win_size > framePolicyRetainedCloneCount()) {
+            KeyframeRedundancyParameters parameters;
+            parameters.minimum_parallax_deg = triangulation_min_parallax_deg;
+            const KeyframeRemovalDecision decision =
+                planKeyframeRedundancyRemoval(
+                    map_, ext_.q_ic, framePolicyRetainedCloneCount(), parameters);
+
+            // 规划器异常或候选集合为空时仍使用最老帧，保证窗口上界和默认 MSCKF
+            // 的确定性行为不被破坏。正常路径会同时记录被选帧的几何诊断量，供
+            // frame_policy_summary.csv 判断“非最老删除”是否真的减少了低视差损失。
+            const size_t selected_index = decision.valid
+                ? decision.selected.chronological_index
+                : size_t(0);
+            frames_to_remove.push_back(selected_index);
+            ++n_keyframe_redundancy_removals_;
+            if (selected_index != 0) {
+                ++n_keyframe_redundancy_nonoldest_removals_;
+            }
+            if (!decision.valid || decision.used_oldest_fallback) {
+                ++n_keyframe_redundancy_oldest_fallbacks_;
+            }
+            if (decision.valid) {
+                n_keyframe_redundancy_selected_low_parallax_tracks_ +=
+                    decision.selected.low_parallax_tracks;
+                n_keyframe_redundancy_selected_unique_tracks_ +=
+                    decision.selected.unique_geometry_tracks;
+                keyframe_redundancy_score_sum_ += decision.selected.score;
+                keyframe_redundancy_ratio_sum_ +=
+                    decision.selected.redundancy_ratio;
+                keyframe_redundancy_parallax_loss_sum_ +=
+                    decision.selected.mean_parallax_loss_ratio;
+            }
+        }
     } else if constexpr (frame_selection_policy == FrameSelectionPolicy::KeyframePriority) {
         if (current_win_size > framePolicyRetainedCloneCount()) {
             // 始终保留当前图像，然后优先保留较新的关键帧；剩余预算再由较新的

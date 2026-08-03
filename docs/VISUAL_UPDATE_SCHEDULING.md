@@ -199,7 +199,7 @@ cmake -S . -B cmake-build-release `
 cmake --build cmake-build-release --target VinsAnalysis -j 4
 ```
 
-后端可选 `LEGACY`、`SCHURVINS`、`MSCKF`、`VINS_MONO`、`RDVIO`；帧策略可选 `AUTO`、`KEYFRAME_ONLY`、`FIFO`、`KEYFRAME_PRIORITY`、`VINS_MONO`、`RDVIO`。`SCHUR_VIO_FRAME_WINDOW_SIZE=0` 使用策略默认预算，正整数则用于统一预算消融。
+后端可选 `LEGACY`、`SCHURVINS`、`MSCKF`、`VINS_MONO`、`RDVIO`；帧策略可选 `AUTO`、`KEYFRAME_ONLY`、`KEYFRAME_REDUNDANCY`、`FIFO`、`KEYFRAME_PRIORITY`、`VINS_MONO`、`RDVIO`。`SCHUR_VIO_FRAME_WINDOW_SIZE=0` 使用策略默认预算，正整数则用于统一预算消融。
 
 ## 审计与回归
 
@@ -213,6 +213,7 @@ cmake --build cmake-build-release --target VinsAnalysis -j 4
 - `max_window`：更新时参与的最大 clone 数；
 - `keyframes / nonkeyframes / frames_stored`：帧策略判定与实际增广数量；
 - `r_frames / n_frames / compressed_frames`：RD-VIO 帧策略的 R/N 分类和压缩数量。
+- `redundancy_*`：实验性冗余删帧的非最老选择、保守回退、低视差风险和视差损失；数学定义见 [KEYFRAME_REDUNDANCY_POLICY.md](KEYFRAME_REDUNDANCY_POLICY.md)。
 
 MSCKF 的两个硬性回归条件为
 
@@ -292,6 +293,7 @@ The previous Legacy result was numerically stable but reused about 5.46 million 
   旋转因子的完整推导、小平移近似误差、切平面噪声、正规方程和一次性像素边界；
 - `eskf/visual_update_scheduler.h`：视觉后端与量测生命周期；
 - `eskf/frame_selection_policy.h/.cpp`：关键帧判定、帧策略和统一 clone 预算；
+- [KEYFRAME_REDUNDANCY_POLICY.md](KEYFRAME_REDUNDANCY_POLICY.md)：冗余感知删帧的评分公式、轨迹分类和状态框图；
 - `SchurVINS::updateVisual`：轨迹触发条件、一次性消费和帧删除计划；
 - `SlidingWindow::active_idx`：把时间顺序与固定协方差物理 slot 解耦；
 - `Map::removeLandmark`：安全删除轨迹在 frame/feature/observation 两侧的所有引用；

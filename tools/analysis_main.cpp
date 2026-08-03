@@ -951,6 +951,10 @@ int main(int argc, char **argv) {
                         "tri_success,tri_attempts,"
                         "r_frames,n_frames,case_rr,case_nn,case_rn,case_nr,"
                         "compressed_frames,rotation_constraints,zero_translation_constraints,"
+                        "redundancy_removals,redundancy_nonoldest_removals,"
+                        "redundancy_oldest_fallbacks,redundancy_selected_low_parallax_tracks,"
+                        "redundancy_selected_unique_tracks,redundancy_score_mean,"
+                        "redundancy_ratio_mean,redundancy_parallax_loss_mean,"
                         "hybrid_persistent,depth_free_rotation_enabled,rotation_information_scale,persistent_noise_scale,deferred_tracks,active_track_archives,track_archives_created,"
                         "track_archives_reused,track_archives_rejected,shadow_candidates,candidate_updates,"
                         "candidate_rejections,persistent_landmarks,persistent_promoted,persistent_updates,"
@@ -1122,6 +1126,27 @@ int main(int argc, char **argv) {
                     ekf.n_rdvio_compressed_frames_,
                     ekf.n_rdvio_rotation_constraints_,
                     ekf.n_rdvio_zero_translation_constraints_);
+                const double redundancy_removals = static_cast<double>(
+                    ekf.n_keyframe_redundancy_removals_);
+                std::fprintf(
+                    f, ",%zu,%zu,%zu,%zu,%zu,%.6f,%.6f,%.6f",
+                    ekf.n_keyframe_redundancy_removals_,
+                    ekf.n_keyframe_redundancy_nonoldest_removals_,
+                    ekf.n_keyframe_redundancy_oldest_fallbacks_,
+                    ekf.n_keyframe_redundancy_selected_low_parallax_tracks_,
+                    ekf.n_keyframe_redundancy_selected_unique_tracks_,
+                    redundancy_removals > 0
+                        ? ekf.keyframe_redundancy_score_sum_ /
+                          redundancy_removals
+                        : 0.0,
+                    redundancy_removals > 0
+                        ? ekf.keyframe_redundancy_ratio_sum_ /
+                          redundancy_removals
+                        : 0.0,
+                    redundancy_removals > 0
+                        ? ekf.keyframe_redundancy_parallax_loss_sum_ /
+                          redundancy_removals
+                        : 0.0);
                 appendHybridDiagnostics(f);
             } else if (is_parameterization) {
                 const double hll_condition_mean = ekf.n_hll_condition_tests_ > 0
@@ -1207,6 +1232,22 @@ int main(int argc, char **argv) {
                     ekf.n_tracks_consumed_, ekf.n_tracks_dropped_,
                     100.0 * track_drop_rate,
                     ekf.n_visual_updates_skipped_);
+        if (ekf.n_keyframe_redundancy_removals_ > 0) {
+            const double removal_count = static_cast<double>(
+                ekf.n_keyframe_redundancy_removals_);
+            std::printf(
+                "redundancy_removals=%zu  nonoldest/fallback=%zu/%zu  "
+                "selected_low_parallax/unique=%zu/%zu  "
+                "mean(score/redundancy/parallax_loss)=%.3f/%.3f/%.3f\n",
+                ekf.n_keyframe_redundancy_removals_,
+                ekf.n_keyframe_redundancy_nonoldest_removals_,
+                ekf.n_keyframe_redundancy_oldest_fallbacks_,
+                ekf.n_keyframe_redundancy_selected_low_parallax_tracks_,
+                ekf.n_keyframe_redundancy_selected_unique_tracks_,
+                ekf.keyframe_redundancy_score_sum_ / removal_count,
+                ekf.keyframe_redundancy_ratio_sum_ / removal_count,
+                ekf.keyframe_redundancy_parallax_loss_sum_ / removal_count);
+        }
         std::printf(
             "hybrid=%d  depth_free_rotation=%d(scale=%.3g)  persistent_noise_scale=%.3g  "
             "deferred=%zu  candidates=%zu  candidate_updates/rejected=%zu/%zu  "
