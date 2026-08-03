@@ -18,6 +18,9 @@
 - `eskf/rdvio_constraints.cpp`：无深度旋转残差；
 - `eskf/schur_vins_imu.cpp`：扩维状态下的交叉协方差传播。
 
+本文对关键等式同时给出纯文本和 LaTeX。GitHub、支持 MathJax/KaTeX 的 Markdown 阅读器会直接
+渲染 `$$...$$`；不支持数学渲染的终端仍可阅读相邻的 `text` 公式块。
+
 ## 1. 为什么采用混合结构
 
 标准 MSCKF 的优点是特征点不进入滤波状态。每条轨迹在生命周期结束时只使用一次，点变量通过
@@ -57,6 +60,17 @@ delta x_M = [delta x_I,
              delta x_C1, ..., delta x_Cm]
 ```
 
+对应的 LaTeX 写法为：
+
+$$
+\delta\mathbf{x}_M =
+\begin{bmatrix}
+\delta\mathbf{x}_I^\mathsf{T} &
+\delta\mathbf{x}_{C_1}^\mathsf{T} & \cdots &
+\delta\mathbf{x}_{C_m}^\mathsf{T}
+\end{bmatrix}^\mathsf{T}.
+$$
+
 对应协方差为 `P_MM`。工程中这部分固定占据协方差矩阵前 `COV_SIZE` 维。
 
 ### 2.2 加入少量持久点后的联合状态
@@ -68,12 +82,31 @@ delta chi = [delta x_M,
              delta p_L1, ..., delta p_LL]
 ```
 
+$$
+\delta\boldsymbol{\chi} =
+\begin{bmatrix}
+\delta\mathbf{x}_M^\mathsf{T} &
+\delta\mathbf{p}_{L_1}^\mathsf{T} & \cdots &
+\delta\mathbf{p}_{L_L}^\mathsf{T}
+\end{bmatrix}^\mathsf{T}.
+$$
+
 联合协方差为：
 
 ```text
 P = [P_MM  P_ML]
     [P_LM  P_LL]
 ```
+
+$$
+\mathbf{P} =
+\begin{bmatrix}
+\mathbf{P}_{MM} & \mathbf{P}_{ML}\\
+\mathbf{P}_{LM} & \mathbf{P}_{LL}
+\end{bmatrix},
+\qquad
+\mathbf{P}_{LM}=\mathbf{P}_{ML}^{\mathsf T}.
+$$
 
 其中：
 
@@ -102,6 +135,32 @@ P = [P_MM  P_ML]
 11. 删除本次消费的普通轨迹，再删除计划边缘化的 clone
 ```
 
+对应的单帧处理框图如下。矩形表示处理步骤，菱形表示条件分支，圆角框表示本帧结束时仍保留的
+长期状态：
+
+```mermaid
+flowchart TD
+    A[输入相机帧] --> B[R/N运动分类与关键帧判断]
+    B --> C[增广当前位姿clone<br/>复制与持久点的交叉协方差]
+    C --> D[复用历史低视差摘要<br/>仅更新影子候选]
+    D --> E[扫描普通轨迹并生成消费计划]
+    E --> F{当前关键帧观测到<br/>已有持久点?}
+    F -- 是 --> G[持久点联合EKF重投影更新]
+    F -- 否 --> H[低视差/深度轨迹分流]
+    G --> H
+    H --> I[无深度旋转约束<br/>延迟消费或丢失归档]
+    I --> J[普通轨迹三角化与重投影线性化]
+    J --> K[逐点Schur消元]
+    K --> L[用完整联合协方差<br/>更新导航、clone和已有持久点]
+    L --> M{候选、网格、预算<br/>及Hll检查通过?}
+    M -- 是 --> N[Schur回代与延迟初始化<br/>追加新持久Landmark]
+    M -- 否 --> O[只更新影子候选]
+    N --> P([保留联合状态与持久点])
+    O --> P
+    P --> Q[删除一次性轨迹与计划边缘化clone]
+    Q --> R([本帧结束])
+```
+
 这个顺序有两个重要含义：
 
 1. 已有持久点在本帧可能先接受自己的直接重投影更新，随后还会通过 `P_LM` 接收普通 MSCKF
@@ -120,11 +179,30 @@ z_i = pi(R_ic^T (R_wi^T (p_f-p_i)-t_ic)) + n_i
 r_i = z_i-z_hat_i
 ```
 
+$$
+\hat{\mathbf z}_i =
+\pi\!\left(
+\mathbf R_{ic}^{\mathsf T}
+\left[
+\mathbf R_{wi}^{\mathsf T}(\mathbf p_f-\mathbf p_i)-\mathbf t_{ic}
+\right]
+\right),
+\qquad
+\mathbf r_i=\mathbf z_i-\hat{\mathbf z}_i.
+$$
+
 线性化后：
 
 ```text
 r_i ≈ H_x,i delta x_M + H_f,i delta p_f + n_i
 ```
+
+$$
+\mathbf r_i \simeq
+\mathbf H_{x,i}\,\delta\mathbf x_M+
+\mathbf H_{f,i}\,\delta\mathbf p_f+
+\mathbf n_i.
+$$
 
 把同一轨迹的全部有效观测堆叠，并按 Huber 权重累加正规方程：
 
@@ -143,6 +221,36 @@ gx  = H_x^T W r
 gl  = H_f^T W r
 ```
 
+$$
+\begin{bmatrix}
+\mathbf H_{xx} & \mathbf H_{xl}\\
+\mathbf H_{lx} & \mathbf H_{ll}
+\end{bmatrix}
+\begin{bmatrix}
+\delta\mathbf x_M\\
+\delta\mathbf p_f
+\end{bmatrix}
+=
+\begin{bmatrix}
+\mathbf g_x\\
+\mathbf g_l
+\end{bmatrix},
+$$
+
+$$
+\mathbf H_{xx}=\mathbf H_x^{\mathsf T}\mathbf W\mathbf H_x,
+\quad
+\mathbf H_{xl}=\mathbf H_x^{\mathsf T}\mathbf W\mathbf H_f,
+\quad
+\mathbf H_{ll}=\mathbf H_f^{\mathsf T}\mathbf W\mathbf H_f,
+$$
+
+$$
+\mathbf g_x=\mathbf H_x^{\mathsf T}\mathbf W\mathbf r,
+\qquad
+\mathbf g_l=\mathbf H_f^{\mathsf T}\mathbf W\mathbf r.
+$$
+
 ### 4.2 Schur 消去临时点
 
 临时点不加入持久状态，而是被消去：
@@ -151,6 +259,16 @@ gl  = H_f^T W r
 H_s = Hxx-Hxl Hll^-1 Hlx
 g_s = gx -Hxl Hll^-1 gl
 ```
+
+$$
+\mathbf H_s=
+\mathbf H_{xx}-
+\mathbf H_{xl}\mathbf H_{ll}^{\dagger}\mathbf H_{lx},
+\qquad
+\mathbf g_s=
+\mathbf g_x-
+\mathbf H_{xl}\mathbf H_{ll}^{\dagger}\mathbf g_l.
+$$
 
 若 `Hll` 存在数值零空间，则只在通过相对特征值门限的有效子空间中使用伪逆。最终 `H_s/g_s`
 只包含原始 MSCKF 状态 `delta x_M`。
@@ -163,11 +281,27 @@ g_s = gx -Hxl Hll^-1 gl
 H_joint = [H_s_direction, 0_L]
 ```
 
+$$
+\mathbf h_{\mathrm{joint}}=
+\begin{bmatrix}
+\mathbf h_s & \mathbf 0_L
+\end{bmatrix}.
+$$
+
 对完整联合协方差计算卡尔曼增益：
 
 ```text
 K = P H_joint^T (H_joint P H_joint^T+R)^-1
 ```
+
+$$
+\mathbf K=
+\mathbf P\mathbf h_{\mathrm{joint}}^{\mathsf T}
+\left(
+\mathbf h_{\mathrm{joint}}\mathbf P
+\mathbf h_{\mathrm{joint}}^{\mathsf T}+R
+\right)^{-1}.
+$$
 
 展开可见：
 
@@ -175,6 +309,14 @@ K = P H_joint^T (H_joint P H_joint^T+R)^-1
 K_M ∝ P_MM H_s_direction^T
 K_L ∝ P_LM H_s_direction^T
 ```
+
+$$
+\mathbf K_M\propto
+\mathbf P_{MM}\mathbf h_s^{\mathsf T},
+\qquad
+\mathbf K_L\propto
+\mathbf P_{LM}\mathbf h_s^{\mathsf T}.
+$$
 
 因此普通 MSCKF 因子虽然没有直接观测某个持久点，但只要 `P_LM` 非零，它仍会按相关性同步修正
 已有持久点。代码会把 Schur 信息方向补零到完整联合维数，再对整个 `P` 做 Joseph 序贯更新，
@@ -230,6 +372,16 @@ b_j,pred = R_wc,j^T R_wc,i b_i
 alpha_k  = acos(clamp(b_j^T b_j,pred, -1, 1))
 ```
 
+$$
+\hat{\mathbf b}_j=
+\mathbf R_{wc,j}^{\mathsf T}\mathbf R_{wc,i}\mathbf b_i,
+\qquad
+\alpha_k=
+\arccos\!\left(
+\operatorname{clamp}(\mathbf b_j^{\mathsf T}\hat{\mathbf b}_j,-1,1)
+\right).
+$$
+
 取全部 `alpha_k` 的 70% 分位数作为 `misalignment_deg`。共同轨迹不少于 20，且该分位数小于
 `rdvio_rotation_threshold_deg=0.60°` 时，将当前帧标记为旋转主导帧 R；否则为普通帧 N。
 
@@ -245,6 +397,12 @@ d_w       = R_wc,i b_i
 b_j,pred  = R_wc,j^T d_w
 ```
 
+$$
+\mathbf d_w=\mathbf R_{wc,i}\mathbf b_i,
+\qquad
+\hat{\mathbf b}_j=\mathbf R_{wc,j}^{\mathsf T}\mathbf d_w.
+$$
+
 纯旋转或平移影响很小时，预测只依赖两帧姿态，不依赖点深度。令：
 
 ```text
@@ -257,6 +415,22 @@ B_j = [t_x, t_y]
 r_R = B_j^T (b_j-b_j,pred)
 ```
 
+$$
+\mathbf B_j=
+\begin{bmatrix}\mathbf t_x & \mathbf t_y\end{bmatrix},
+\qquad
+\mathbf B_j^{\mathsf T}\mathbf b_j=\mathbf 0,
+$$
+
+$$
+\mathbf r_R=
+\mathbf B_j^{\mathsf T}
+\left(
+\mathbf b_j-
+\mathbf R_{wc,j}^{\mathsf T}\mathbf R_{wc,i}\mathbf b_i
+\right).
+$$
+
 切平面投影去掉了单位球面的法向分量，所以残差维数为 2。
 
 ### 6.3 姿态雅可比
@@ -267,12 +441,27 @@ r_R = B_j^T (b_j-b_j,pred)
 C = B_j^T R_wc,j^T hat(R_wc,i b_i)
 ```
 
+$$
+\mathbf C=
+\mathbf B_j^{\mathsf T}
+\mathbf R_{wc,j}^{\mathsf T}
+\left[\mathbf R_{wc,i}\mathbf b_i\right]_{\times}.
+$$
+
 两帧 clone 的雅可比为：
 
 ```text
 J_i = [-C, 0_2x3]
 J_j = [ C, 0_2x3]
 ```
+
+$$
+\mathbf J_i=
+\begin{bmatrix}-\mathbf C & \mathbf 0_{2\times3}\end{bmatrix},
+\qquad
+\mathbf J_j=
+\begin{bmatrix}\mathbf C & \mathbf 0_{2\times3}\end{bmatrix}.
+$$
 
 该约束只写入两帧 clone 的姿态块，不写位置块，也不引入 Landmark 变量。
 
@@ -282,6 +471,12 @@ J_j = [ C, 0_2x3]
 ```text
 weight = 0.5 * depth_free_rotation_information_scale
 ```
+
+$$
+w_R=\frac{1}{2}\,s_R,
+\qquad
+s_R=\texttt{depth\_free\_rotation\_information\_scale}.
+$$
 
 默认 `depth_free_rotation_information_scale_=0.02`，用于保守吸收 R/N 误分类、IMU 旋转补偿误差、
 相邻观测相关性和非零微小平移。
@@ -340,6 +535,25 @@ b = sum_i (I-d_i d_i^T)c_i
 p = A^-1 b
 ```
 
+$$
+\mathbf p^*=\arg\min_{\mathbf p}
+\sum_i
+\left\|
+(\mathbf I-\mathbf d_i\mathbf d_i^{\mathsf T})
+(\mathbf p-\mathbf c_i)
+\right\|_2^2,
+$$
+
+$$
+\mathbf A=\sum_i
+(\mathbf I-\mathbf d_i\mathbf d_i^{\mathsf T}),
+\qquad
+\mathbf b=\sum_i
+(\mathbf I-\mathbf d_i\mathbf d_i^{\mathsf T})\mathbf c_i,
+\qquad
+\mathbf p^*=\mathbf A^{-1}\mathbf b.
+$$
+
 候选必须通过视差、矩阵秩、条件数、正深度、重投影误差和位置协方差检查。成功结果只送入影子
 候选池，不产生导航残差，也不能直接晋升。
 
@@ -366,6 +580,32 @@ s_geometry = 0.30 s_parallax
            + 0.20 s_reproj
            + 0.15 s_uncert
 ```
+
+$$
+s_{\alpha}=\operatorname{clamp}\!\left(
+\frac{\alpha_{\max}-\alpha_{\mathrm{thr}}}
+{\max(8^{\circ},\alpha_{\mathrm{thr}})},0,1
+\right),
+$$
+
+$$
+s_N=\operatorname{clamp}\!\left(\frac{N_{\mathrm{obs}}-2}{8},0,1\right),
+\quad
+s_{\kappa}=\frac{1}{1+\max(0,\log_{10}(\max(\kappa,1)))/4},
+$$
+
+$$
+s_e=\exp\!\left(
+-\frac{e_{\mathrm{rmse}}}{\max(3\sigma_{uv},10^{-8})}
+\right),
+\qquad
+s_{\sigma}=\frac{1}{1+\sigma_{\mathrm{position}}},
+$$
+
+$$
+s_{\mathrm{geometry}}=
+0.30s_{\alpha}+0.20s_N+0.15s_{\kappa}+0.20s_e+0.15s_{\sigma}.
+$$
 
 这里 `alpha_min` 表示当前三角化最小视差门限，不是轨迹的最小两两视差；
 `sigma_position=sqrt(trace(P_triangulation)/3)`。
@@ -398,6 +638,15 @@ r_c = p_m-p_c
 S_c = P_c+P_m
 NIS_c = r_c^T S_c^-1 r_c
 ```
+
+$$
+\mathbf r_c=\mathbf p_m-\mathbf p_c,
+\qquad
+\mathbf S_c=\mathbf P_c+\mathbf P_m,
+\qquad
+\operatorname{NIS}_c=
+\mathbf r_c^{\mathsf T}\mathbf S_c^{-1}\mathbf r_c.
+$$
 
 若 `NIS_c > 11.34`，即超过 3 自由度 99% 卡方门限，则候选重置到最新三角化结果，稳定计数重新
 开始；否则执行独立 3D Joseph 更新，并用 `alpha=0.25` 更新质量和 NIS 指数滑动平均。
@@ -444,6 +693,12 @@ P_ML = 0
 P_LL = P_c
 ```
 
+$$
+\mathbf P_{ML}=\mathbf 0,
+\qquad
+\mathbf P_{LL}=\mathbf P_c
+$$
+
 就会错误地宣称“候选点与估计它的历史位姿独立”。以后再用该点约束导航会重复计算历史信息。
 
 所以候选只给出晋升许可。正式点均值和协方差必须由**当前仍在滑窗内的活跃轨迹**重新线性化，
@@ -471,17 +726,37 @@ P_LL = P_c
 delta l_parameter = Hll^-1 (gl-Hlx delta x_M)
 ```
 
+$$
+\delta\boldsymbol\ell=
+\mathbf H_{ll}^{\dagger}
+\left(
+\mathbf g_l-\mathbf H_{lx}\delta\mathbf x_M
+\right).
+$$
+
 若当前采用的 Landmark 参数化不是世界 XYZ，令：
 
 ```text
 delta p_world = T delta l_parameter
 ```
 
+$$
+\delta\mathbf p_L=\mathbf T\,\delta\boldsymbol\ell.
+$$
+
 则晋升后的世界点均值为：
 
 ```text
 p_L = p_triangulation + T Hll^-1 (gl-Hlx delta x_M)
 ```
+
+$$
+\mathbf p_L^+=\mathbf p_{\mathrm{tri}}+
+\mathbf T\mathbf H_{ll}^{\dagger}
+\left(
+\mathbf g_l-\mathbf H_{lx}\delta\mathbf x_M
+\right).
+$$
 
 实现还会检查 `Hll` 的最小特征值相对门限和回代增量有限性，防止退化点进入状态。
 
@@ -496,6 +771,21 @@ J_x = -T Hll^-1 Hlx
 Cov(v_L) = T (sigma_visual^2 Hll^-1) T^T
 ```
 
+$$
+\delta\mathbf p_L=\mathbf J_x\delta\mathbf x_M+\mathbf v_L,
+\qquad
+\mathbf J_x=-\mathbf T\mathbf H_{ll}^{\dagger}\mathbf H_{lx},
+$$
+
+$$
+\operatorname{Cov}(\mathbf v_L)=
+\mathbf T
+\left(
+\sigma_{\mathrm{visual}}^2\mathbf H_{ll}^{\dagger}
+\right)
+\mathbf T^{\mathsf T}.
+$$
+
 这里 `Hll` 在实现中由鲁棒权重累加但没有除以像素方差，因此条件协方差需要显式乘本批次视觉
 方差 `sigma_visual^2`。
 
@@ -509,6 +799,19 @@ P_old,L = P_L,old^T
 P_L,L   = J_x P_MM J_x^T + Cov(v_L)
 ```
 
+$$
+\mathbf P_{L,\mathrm{old}}=
+\mathbf J_x\mathbf P_{M,\mathrm{old}},
+\qquad
+\mathbf P_{\mathrm{old},L}=\mathbf P_{L,\mathrm{old}}^{\mathsf T},
+$$
+
+$$
+\mathbf P_{LL}^{\mathrm{new}}=
+\mathbf J_x\mathbf P_{MM}\mathbf J_x^{\mathsf T}+
+\operatorname{Cov}(\mathbf v_L).
+$$
+
 注意 `P_M,old` 不只包含 `P_MM`，还包含原始 MSCKF 状态到已有持久点的交叉块。因此新点会通过
 公共导航状态自动获得与旧持久点的相关性，而不是只建立 `P_ML`、忽略点间相关性。
 
@@ -518,6 +821,14 @@ P_L,L   = J_x P_MM J_x^T + Cov(v_L)
 P_aug = [P_old    P_old,L]
         [P_L,old  P_L,L  ]
 ```
+
+$$
+\mathbf P_{\mathrm{aug}}=
+\begin{bmatrix}
+\mathbf P_{\mathrm{old}} & \mathbf P_{\mathrm{old},L}\\
+\mathbf P_{L,\mathrm{old}} & \mathbf P_{LL}^{\mathrm{new}}
+\end{bmatrix}.
+$$
 
 这一步才把点正式追加到 `persistent_landmarks_`，并删除对应影子候选。
 
@@ -534,12 +845,36 @@ z_hat = pi(d_c)
 r = z-z_hat
 ```
 
+$$
+\mathbf d_w=\mathbf p_L-\mathbf p_i,
+\qquad
+\mathbf d_c=
+\mathbf R_{ic}^{\mathsf T}
+\left(
+\mathbf R_{wi}^{\mathsf T}\mathbf d_w-\mathbf t_{ic}
+\right),
+$$
+
+$$
+\hat{\mathbf z}=\pi(\mathbf d_c),
+\qquad
+\mathbf r=\mathbf z-\hat{\mathbf z}.
+$$
+
 透视投影雅可比为：
 
 ```text
 J_pi = [1/z   0   -x/z^2]
        [ 0   1/z  -y/z^2]
 ```
+
+$$
+\mathbf J_{\pi}=\frac{\partial\pi}{\partial\mathbf d_c}=
+\begin{bmatrix}
+1/z & 0 & -x/z^2\\
+0 & 1/z & -y/z^2
+\end{bmatrix}.
+$$
 
 在 FEJ clone 位姿和持久点 FEJ 位置处构造：
 
@@ -550,11 +885,34 @@ H_p     = -H_L
 H_clone = [H_theta, H_p]
 ```
 
+$$
+\mathbf H_L=\mathbf J_{\pi}\mathbf R_{ic}^{\mathsf T}\mathbf R_{wi}^{\mathsf T},
+\qquad
+\mathbf H_{\theta}=\mathbf H_L[\mathbf p_L-\mathbf p_i]_{\times},
+\qquad
+\mathbf H_p=-\mathbf H_L,
+$$
+
+$$
+\mathbf H_{\mathrm{clone}}=
+\begin{bmatrix}\mathbf H_{\theta} & \mathbf H_p\end{bmatrix}.
+$$
+
 联合雅可比只有当前 clone 和该持久点的块非零：
 
 ```text
 H = [0 ... H_clone ... 0 | 0 ... H_L ... 0]
 ```
+
+$$
+\mathbf H=
+\left[
+\begin{array}{ccccc|ccccc}
+\mathbf 0 & \cdots & \mathbf H_{\mathrm{clone}} & \cdots & \mathbf 0 &
+\mathbf 0 & \cdots & \mathbf H_L & \cdots & \mathbf 0
+\end{array}
+\right].
+$$
 
 残差仍在当前名义状态计算，雅可比冻结在 FEJ 参考点，避免长期重复观测不断改变不可观方向。
 
@@ -568,11 +926,27 @@ K = P H^T S^-1
 delta chi = K r
 ```
 
+$$
+\mathbf S=\mathbf H\mathbf P\mathbf H^{\mathsf T}+\mathbf R,
+\qquad
+\mathbf K=\mathbf P\mathbf H^{\mathsf T}\mathbf S^{-1},
+\qquad
+\delta\boldsymbol\chi=\mathbf K\mathbf r.
+$$
+
 协方差采用 Joseph 形式的低秩等价展开：
 
 ```text
 P+ = (I-KH)P(I-KH)^T+K R K^T
 ```
+
+$$
+\mathbf P^+=
+(\mathbf I-\mathbf K\mathbf H)
+\mathbf P
+(\mathbf I-\mathbf K\mathbf H)^{\mathsf T}
++\mathbf K\mathbf R\mathbf K^{\mathsf T}.
+$$
 
 `delta chi` 同时注入：
 
@@ -600,6 +974,11 @@ Huber 权重：delta = 3 sigma_uv
 R_persistent = 64 sigma_uv^2 / robust_weight
 ```
 
+$$
+\mathbf R_{\mathrm{persistent}}=
+\frac{64\,\sigma_{uv}^2}{w_{\mathrm{robust}}}\mathbf I_2.
+$$
+
 64 倍不是延迟初始化协方差的替代，而是对长期重复观测额外保守：它吸收 FEJ 长期线性化误差、
 前端时间相关性、未建模地图过程噪声和偶发错误关联，避免少量持久点压过大量一次性 MSCKF 信息。
 
@@ -625,6 +1004,14 @@ F_joint = [F_M  0]
           [ 0   I]
 ```
 
+$$
+\mathbf F_{\mathrm{joint}}=
+\begin{bmatrix}
+\mathbf F_M & \mathbf 0\\
+\mathbf 0 & \mathbf I
+\end{bmatrix}.
+$$
+
 因此：
 
 ```text
@@ -632,6 +1019,15 @@ P_MM+ = F_M P_MM F_M^T+Q
 P_ML+ = F_M P_ML
 P_LL+ = P_LL
 ```
+
+$$
+\mathbf P_{MM}^+=
+\mathbf F_M\mathbf P_{MM}\mathbf F_M^{\mathsf T}+\mathbf Q,
+\qquad
+\mathbf P_{ML}^+=\mathbf F_M\mathbf P_{ML},
+\qquad
+\mathbf P_{LL}^+=\mathbf P_{LL}.
+$$
 
 代码只对实际随 IMU 演化的 INS 顶部块应用局部转移矩阵，同时左乘其到 clone/持久点的全部交叉
 列，避免构造完整大矩阵。
@@ -644,6 +1040,11 @@ P_LL+ = P_LL
 delta x_Cnew = J_clone delta x_I
 ```
 
+$$
+\delta\mathbf x_{C_{\mathrm{new}}}=
+\mathbf J_{\mathrm{clone}}\delta\mathbf x_I.
+$$
+
 对当前全部联合状态 `chi`：
 
 ```text
@@ -651,11 +1052,24 @@ P_Cnew,chi = J_clone P_I,chi
 P_Cnew,Cnew = J_clone P_II J_clone^T
 ```
 
+$$
+\mathbf P_{C_{\mathrm{new}},\chi}=
+\mathbf J_{\mathrm{clone}}\mathbf P_{I,\chi},
+\qquad
+\mathbf P_{C_{\mathrm{new}},C_{\mathrm{new}}}=
+\mathbf J_{\mathrm{clone}}\mathbf P_{II}\mathbf J_{\mathrm{clone}}^{\mathsf T}.
+$$
+
 因此新 clone 与持久点的交叉协方差必须同步复制：
 
 ```text
 P_Cnew,L = J_clone P_I,L
 ```
+
+$$
+\mathbf P_{C_{\mathrm{new}},L}=
+\mathbf J_{\mathrm{clone}}\mathbf P_{I,L}.
+$$
 
 缺少这一步会导致新关键帧观测持久点时错误地假设二者相关性更弱。
 
@@ -671,42 +1085,54 @@ P_Cnew,L = J_clone P_I,L
 
 ## 14. 完整状态机
 
-```text
-新观测形成普通轨迹
-        |
-        v
-达到 lost / 窗口边界 / 长度上限，准备一次性消费
-        |
-        +-- 三角化成功 ---------------------------------------+
-        |                                                     |
-        |                         普通 MSCKF Schur 更新并删除轨迹
-        |                                                     |
-        |                         几何质量合格？ -- 否 --> 更新/创建影子候选
-        |                                  |
-        |                                  是
-        |                                  |
-        |                         历史候选稳定 + 网格/预算通过？
-        |                                  |
-        |                           否 -----+----- 是
-        |                           |             |
-        |                      更新候选     当前正规方程延迟初始化
-        |                                         |
-        |                                         v
-        |                                   追加持久 Landmark
-        |
-        +-- 三角化失败
-               |
-               +-- 有可用 R 帧相邻观测 --> 无深度旋转约束
-               |
-               +-- 当前仍可见且未超延迟上限 --> 保留剩余观测等待平移
-               |
-               +-- 已丢失 --------------------> 保存首尾射线摘要并删除轨迹
-                                                    |
-                                                    v
-                                       同 ID 重现且三线几何合格
-                                                    |
-                                                    v
-                                              只更新影子候选
+下面的框图按“轨迹或点当前所处状态”组织。蓝色圆角框是会保留到下一帧的状态，黄色菱形是
+条件判定，绿色矩形会产生导航信息，灰色矩形只做筛选而不反馈导航。
+
+```mermaid
+flowchart TD
+    A([普通活动轨迹]) --> B{触发一次性消费?}
+    B -- 否 --> A
+    B -- 是 --> C{当前窗口三角化成功?}
+
+    C -- 否 --> D{存在尚未消费的<br/>R帧相邻观测对?}
+    D -- 是 --> E[无深度旋转约束<br/>只更新clone姿态信息]
+    D -- 否 --> F{轨迹当前仍可见<br/>且未超过延迟上限?}
+    E --> F
+    F -- 是 --> G([低视差延迟轨迹<br/>保留剩余新观测])
+    G --> A
+    F -- "否：已丢失或达到延迟上限" --> H([轨迹摘要<br/>首尾射线与位姿快照])
+    H --> I{同ID重新出现<br/>且三线形成有效基线?}
+    I -- 否 --> H
+    I -- 是 --> J([影子候选<br/>不反馈导航])
+
+    C -- 是 --> K[普通MSCKF Schur更新<br/>临时点仍被消去]
+    K --> L{几何评分合格<br/>且存在历史候选?}
+    L -- 否 --> J
+    L -- 是 --> M{跨轨迹NIS与稳定证据<br/>网格、预算、Hll均通过?}
+    M -- 否 --> J
+    M -- 是 --> N[当前正规方程回代<br/>延迟初始化P_xl和P_ll]
+    N --> O([持久Landmark<br/>进入联合状态])
+
+    J --> P{下一条独立轨迹证据到来?}
+    P -- "不一致" --> Q[重置候选均值、协方差<br/>和稳定计数]
+    Q --> J
+    P -- "一致但未成熟" --> J
+    P -- "已成熟，且当前活跃轨迹<br/>重新线性化通过" --> N
+
+    O --> R{关键帧再次观测?}
+    R -- 是 --> S[持久点直接联合EKF更新]
+    S --> O
+    R -- 否 --> T[保持静态点模型<br/>传播P_xl并保留P_ll<br/>普通MSCKF仍可经相关性修正]
+    T --> O
+
+    classDef retained fill:#dbeafe,stroke:#2563eb,color:#111827;
+    classDef decision fill:#fef3c7,stroke:#d97706,color:#111827;
+    classDef update fill:#dcfce7,stroke:#16a34a,color:#111827;
+    classDef screening fill:#f3f4f6,stroke:#6b7280,color:#111827;
+    class A,G,H,J,O retained;
+    class B,C,D,F,I,L,M,P,R decision;
+    class E,K,N,S update;
+    class Q,T screening;
 ```
 
 ## 15. 关键参数
