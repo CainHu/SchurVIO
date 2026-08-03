@@ -230,3 +230,21 @@ RMSE 分别从 0.3443、0.4179、0.2013、0.6688、8.4281 m 变为 0.3262、0.31
   先消费无深度旋转像素。
 - 明确已有持久点、普通 MSCKF 轨迹和历史摘要的互斥边界，说明 `P_LM` 传播与像素重复使用的区别。
 - 本次只修改注释和文档，不改变帧策略、轨迹集合、矩阵装配、浮点运算顺序或任何运行参数。
+
+### 无深度纯旋转约束专题
+
+新增 [DEPTH_FREE_ROTATION_CONSTRAINT.md](DEPTH_FREE_ROTATION_CONSTRAINT.md)，把此前分散在 Hybrid MSCKF、
+RD-VIO 调度和源码注释中的纯旋转内容整理为独立推导：
+
+- 从一般两视图模型 $p_{c_j}=\lambda R_{ji}b_i+t_{ji}$ 出发，证明 $t_{ji}=0$ 时深度在单位化中
+  自然约掉，而不是先建立 Landmark 后再做 Schur 消元；
+- 推导小平移的一阶切向偏差 $r_{R,\mathrm{bias}}\approx B_j^Tt_{ji}/\lambda_i$，解释近点、误分类
+  和非零平移为什么要求保守降权；
+- 补全单位球面二维切平面、两个 clone 的 FEJ 姿态雅可比、严格 bearing 噪声传播与当前常数
+  各向同性近似；
+- 写明旋转因子怎样直接累加到 `Hpp/gp`、怎样与普通 Schur 信息合并，以及为什么它不能观测
+  深度、平移、尺度和全局偏航；
+- 增加一次性像素生命周期、完整 Mermaid 流程图、公式到源码映射、实现不变量和后续改进边界。
+
+`README.md`、`SOURCE_LAYOUT.md`、`HYBRID_MSCKF.md`、`RDVIO_SCHEDULING.md` 和
+`VISUAL_UPDATE_SCHEDULING.md` 已统一链接到该专题。本次仅调整文档，不改变纯旋转约束实现。

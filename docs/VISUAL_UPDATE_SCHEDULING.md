@@ -287,7 +287,9 @@ The previous Legacy result was numerically stable but reused about 5.46 million 
 ## 代码结构
 
 - [HYBRID_MSCKF.md](HYBRID_MSCKF.md)：默认混合 MSCKF 的状态扩维、普通 Schur 因子、持久点
-  筛选/晋升、低视差延迟和无深度旋转约束完整推导；
+  筛选/晋升、低视差延迟和联合更新完整推导；
+- [DEPTH_FREE_ROTATION_CONSTRAINT.md](DEPTH_FREE_ROTATION_CONSTRAINT.md)：一般两视图模型到无深度
+  旋转因子的完整推导、小平移近似误差、切平面噪声、正规方程和一次性像素边界；
 - `eskf/visual_update_scheduler.h`：视觉后端与量测生命周期；
 - `eskf/frame_selection_policy.h/.cpp`：关键帧判定、帧策略和统一 clone 预算；
 - `SchurVINS::updateVisual`：轨迹触发条件、一次性消费和帧删除计划；

@@ -178,6 +178,10 @@ flowchart TD
 
 ## 6. 无深度旋转约束
 
+本节保留 RD-VIO 调度语境下的简要公式。关于该因子为什么不需要 Landmark 深度、非零小平移
+为什么产生约为 $B_j^Tt/\lambda$ 的模型偏差、切平面最小残差、FEJ 雅可比、噪声近似和一次性
+像素生命周期，见 [无深度纯旋转约束](DEPTH_FREE_ROTATION_CONSTRAINT.md)。
+
 对尚无深度、即将一次性消费的 R 轨迹，设
 
 \[

@@ -31,6 +31,7 @@
 | [QR_VS_SCHUR.md](QR_VS_SCHUR.md) | 理论：为什么 QR 比 Schur 慢 5 倍；两条失败的优化尝试 |
 | [VISUAL_UPDATE_SCHEDULING.md](VISUAL_UPDATE_SCHEDULING.md) | Legacy / SchurVINS / MSCKF / VINS-Mono 调度、一次性观测生命周期与宏切换 |
 | [HYBRID_MSCKF.md](HYBRID_MSCKF.md) | **默认混合 MSCKF 专题**：状态扩维、持久点四层筛选、Schur 延迟初始化、联合 EKF、低视差延迟与无深度旋转约束 |
+| [DEPTH_FREE_ROTATION_CONSTRAINT.md](DEPTH_FREE_ROTATION_CONSTRAINT.md) | **纯旋转专题**：深度自然约消、小平移偏差、球面切平面残差、FEJ 雅可比、噪声与 EKF 接入 |
 | [RDVIO_SCHEDULING.md](RDVIO_SCHEDULING.md) | RD-VIO 的 RR/NN/RN/NR、延迟三角化、无深度旋转因子、R 子窗压缩与严格结果 |
 | [LANDMARK_PARAMETERIZATION.md](LANDMARK_PARAMETERIZATION.md) | World/锚定 XYZ、3-DOF 逆深度与 log-depth 的完整雅可比和数值消融 |
 | [ANALYSIS_REPORT.md](ANALYSIS_REPORT.md) | **精度分析**：视觉后验的修正作用、噪声敏感度、协方差问题（配套 `out/report.html` 交互图表） |
@@ -56,8 +57,9 @@ flowchart LR
     C --> D["Schur 与 QR 等价性"]
     D --> E["Hll/Hpp 零空间"]
     E --> F["FEJ 与一致有效子空间"]
-    F --> G["视觉调度与 RD-VIO"]
-    G --> H["消融和报告指标"]
+    F --> G["无深度纯旋转约束"]
+    G --> H["视觉调度与 RD-VIO"]
+    H --> I["消融和报告指标"]
 ```
 
 ## 路径切换
