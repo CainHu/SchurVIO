@@ -168,6 +168,368 @@ flowchart TD
 2. 新持久点只在本次普通 MSCKF 状态后验完成后追加，因此可以使用同一批正规方程做严格回代和
    延迟初始化。
 
+### 3.1 当前帧视觉观测被分成哪些集合
+
+为了判断是否重复使用，不能只看“都是视觉观测”，而要看**具体像素样本进入了哪个量测集合**。
+令第 k 帧可用的视觉数据分成：
+
+$$
+\mathcal Z_k=
+\mathcal Z_k^{P}\cup
+\mathcal Z_k^{M}\cup
+\mathcal Z_k^{R}\cup
+\mathcal Z_k^{A},
+$$
+
+其中：
+
+- `Z^P`：ID 已经位于 `persistent_landmark_indices_` 中的当前关键帧像素，进入持久点直接联合 EKF；
+- `Z^M`：普通临时轨迹中尚未消费的像素，进入 MSCKF 重投影和 Schur 消元；
+- `Z^R`：低视差轨迹中被选中的一对像素，进入无深度旋转残差；
+- `Z^A`：历史轨迹摘要和当前 bearing，只用于影子候选筛选，不进入导航滤波似然。
+
+实现保持以下不变量：
+
+$$
+\mathcal Z_k^{P}\cap\mathcal Z_k^{M}=\varnothing,
+\qquad
+\mathcal Z_k^{R}\cap\mathcal Z_k^{M}=\varnothing
+\quad\text{（按具体像素样本计）},
+$$
+
+并且：
+
+$$
+\mathcal Z_k^{A}\not\subset\text{导航量测集合}.
+$$
+
+因此，“持久点先更新、普通 MSCKF 后更新”是对两组不相交的像素集合做序贯条件化，不是把同一
+像素重复写入两次滤波器。
+
+### 3.2 源码中的观测分流顺序
+
+下面的伪代码保持了 `SchurVINS::updateVisual()` 中的真实顺序和关键变量名：
+
+```cpp
+pushFrame(cam_data, is_keyframe);
+map_.addObservations(current_frame, cam_data);
+
+for (const auto &[id, landmark] : map_.lmk_map) {
+    if (isPersistentLandmark(id)) {
+        // 当前像素只允许进入持久点直接 EKF。
+        persistent_tracks_to_clear.push_back(id);
+        continue;  // 不加入普通 MSCKF 的 ids。
+    }
+
+    if (ordinaryTrackShouldBeConsumed(*landmark)) {
+        triangulateOrDeferOrArchive(*landmark);
+    }
+
+    if (landmark->is_triangulated) {
+        ids.emplace_back(id, landmark);  // 普通 MSCKF 集合 Z^M。
+    }
+}
+
+// 只遍历 cam_data 中已经是持久 ID 的关键帧像素 Z^P。
+updatePersistentLandmarks(cam_data, current_frame, is_keyframe);
+
+// 这里只遍历 ids，因此不包含任何已有持久 ID。
+buildOrdinaryMsckfNormalEquation(ids);
+schurEliminateTemporaryLandmarks();
+applyJointStateCorrection(dx_joint);
+
+// 对 ids 中少量成熟候选做条件初始化，不再进行第二次导航量测更新。
+promotePersistentLandmark(...);
+
+// 帧末删除持久 ID 在 Map::lmk_map 中临时创建的 Feature/Observation，
+// 避免它在下一帧累积成普通 MSCKF 轨迹。
+for (LandmarkID id : persistent_tracks_to_clear) {
+    map_.removeLandmark(id);
+}
+```
+
+对应的当前像素分流框图为：
+
+```mermaid
+flowchart TD
+    A[cam_data.measurements中的当前像素] --> B[Map::addObservations<br/>建立临时Feature与Observation]
+    B --> C{ID已经位于<br/>persistent_landmark_indices_?}
+
+    C -- 是 --> D[加入persistent_tracks_to_clear]
+    D --> E[continue<br/>不加入普通ids]
+    E --> F{当前帧是关键帧?}
+    F -- 是 --> G[updatePersistentLandmarks<br/>进入持久点直接联合EKF]
+    F -- 否 --> H[本帧不使用该持久点像素]
+    G --> I[帧末Map::removeLandmark<br/>清理临时Map轨迹]
+    H --> I
+
+    C -- 否 --> J{普通轨迹触发消费?}
+    J -- 否 --> K([保留轨迹等待新观测])
+    J -- 是 --> L{三角化成功?}
+    L -- 是 --> M[加入ids<br/>进入普通MSCKF Schur]
+    L -- 否 --> N{存在可用R帧像素对?}
+    N -- 是 --> O[进入无深度旋转因子<br/>标记像素已消费]
+    N -- 否 --> P{仍可见且可延迟?}
+    O --> P
+    P -- 是 --> K
+    P -- 否 --> Q[归档摘要或删除轨迹]
+
+    classDef persistent fill:#dcfce7,stroke:#16a34a,color:#111827;
+    classDef ordinary fill:#dbeafe,stroke:#2563eb,color:#111827;
+    classDef decision fill:#fef3c7,stroke:#d97706,color:#111827;
+    classDef cleanup fill:#f3f4f6,stroke:#6b7280,color:#111827;
+    class G persistent;
+    class M,O ordinary;
+    class C,F,J,L,N,P decision;
+    class B,D,E,H,I,Q cleanup;
+```
+
+对应源码位置为：
+
+| 步骤 | 源码入口 |
+|---|---|
+| 所有当前图像观测先临时加入 `Map` | `Map::addObservations()` |
+| 已有持久 ID 被识别并 `continue` | `SchurVINS::updateVisual()` 中的 `isPersistentLandmark(id)` 分支 |
+| 持久点直接联合 EKF | `SchurVINS::updatePersistentLandmarks()` |
+| 普通轨迹 Schur 与完整联合状态修正 | `SchurVINS::updateVisual()` 中的 `ids/Hpp/Hpl/Hll` 和 `applyJointStateCorrection(dx_joint)` |
+| 晋升时条件初始化 | `SchurVINS::promotePersistentLandmark()` |
+| 清理持久 ID 的临时 Map 轨迹 | `persistent_tracks_to_clear` 与 `Map::removeLandmark()` |
+
+### 3.3 为什么先持久点 EKF、再普通 MSCKF 不算重复
+
+设帧开始时联合状态先验为：
+
+```text
+p(chi)
+```
+
+已有持久点像素集合为 `Z^P`，普通临时轨迹像素集合为 `Z^M`。若两组量测噪声在模型中独立，则：
+
+$$
+p(\boldsymbol\chi\mid\mathcal Z^P,\mathcal Z^M)
+\propto
+p(\mathcal Z^M\mid\boldsymbol\chi)
+p(\mathcal Z^P\mid\boldsymbol\chi)
+p(\boldsymbol\chi).
+$$
+
+代码执行的是：
+
+$$
+p_1(\boldsymbol\chi)=
+p(\boldsymbol\chi\mid\mathcal Z^P),
+$$
+
+$$
+p_2(\boldsymbol\chi)=
+p_1(\boldsymbol\chi\mid\mathcal Z^M)
+=p(\boldsymbol\chi\mid\mathcal Z^P,\mathcal Z^M).
+$$
+
+在线性模型、固定线性化点和独立噪声假设下，这与把两组雅可比堆叠后做一次批量 EKF 更新等价。
+当前系统是非线性的，所以先后顺序会带来高阶线性化差异，但这属于序贯 EKF 的线性化顺序问题，
+不是量测重复计数。
+
+两种雅可比的非零位置也不同：
+
+```text
+持久点直接因子：H_P = [0 ... H_clone ... 0 | 0 ... H_L ... 0]
+普通 MSCKF 因子：H_M = [      H_s             |         0_L       ]
+```
+
+普通 MSCKF 因子虽然在持久点列上为零，但它使用更新后的完整协方差：
+
+$$
+\mathbf K_L^M=
+\mathbf P_{LM}\mathbf H_s^{\mathsf T}
+\left(
+\mathbf H_s\mathbf P_{MM}\mathbf H_s^{\mathsf T}+\mathbf R_M
+\right)^{-1}.
+$$
+
+所以已有持久点可能在同一帧发生两次均值变化：
+
+1. 由自己的新像素 `Z^P` 直接修正；
+2. 由其他普通特征 `Z^M` 通过 `P_LM` 间接修正。
+
+第二项没有再次使用该持久点的像素，它只是联合高斯状态在获得其他传感信息后必须执行的相关性
+传播。
+
+### 3.4 已有持久点像素为什么不会进入普通 MSCKF
+
+`map_.addObservations()` 会先为当前图像的所有 ID 创建临时 `Landmark/Feature/Observation`，包括
+已经晋升的持久 ID。这一步只是统一前端数据结构，还没有构造量测方程。
+
+轨迹扫描时首先执行：
+
+```cpp
+if (isPersistentLandmark(id)) {
+    if (cam_data.measurements.find(id) != cam_data.measurements.end()) {
+        persistent_tracks_to_clear.push_back(id);
+    }
+    continue;
+}
+```
+
+因此该 ID：
+
+- 不会进入普通轨迹数组 `ids`；
+- 不会分配自己的 `Hpl/Hll/gl` 临时点块；
+- 不会参与普通重投影线性化或 Schur 消元；
+- 帧末通过 `Map::removeLandmark(id)` 删除在 `Map` 中临时创建的轨迹对象。
+
+持久点直接更新则从 `cam_data.measurements` 读取当前二维像素，并通过
+`persistent_landmark_indices_` 找到联合状态中的三维点块。也就是说，`Map::lmk_map` 中的同 ID
+对象只是暂存当前帧前端引用，真正的持久点均值保存在 `persistent_landmarks_`。
+
+### 3.5 晋升帧为什么允许同一条轨迹既做 Schur 又初始化点
+
+晋升帧与“已有持久点直接更新”是不同情况。准备晋升的点此时仍是普通临时点，它的轨迹像素
+确实先用于普通 MSCKF Schur 更新，随后同一组 `Hll/Hpl/gl` 又用于生成新点均值和协方差。
+
+这看起来像重复使用，实际上是在恢复同一个联合后验的两个部分。对当前轨迹量测 `Z_f`：
+
+$$
+p(\delta\mathbf x,\delta\mathbf l\mid\mathcal Z_f)
+=
+p(\delta\mathbf l\mid\delta\mathbf x,\mathcal Z_f)
+p(\delta\mathbf x\mid\mathcal Z_f).
+$$
+
+Schur 补计算的是边缘状态后验：
+
+$$
+p(\delta\mathbf x\mid\mathcal Z_f),
+$$
+
+而 `promotePersistentLandmark()` 计算的是在该状态条件下的新点分布：
+
+$$
+p(\delta\mathbf l\mid\delta\mathbf x,\mathcal Z_f).
+$$
+
+具体顺序为：
+
+```text
+1. H_s/g_s 对导航和已有持久点执行一次卡尔曼更新；
+2. 保存更新后的 P，不再用这条轨迹执行第二次 K=P H^T S^-1；
+3. 用 delta_l=Hll^-1(gl-Hlx delta_x) 回代点均值；
+4. 用 J_x=-T Hll^-1 Hlx 建立新点与旧状态的交叉协方差；
+5. 扩维 P，追加条件点协方差。
+```
+
+关键证据是：`promotePersistentLandmark()` 不会再次缩小原有 `P_old`。扩维时：
+
+$$
+\mathbf P_{\mathrm{aug}}=
+\begin{bmatrix}
+\mathbf P_{\mathrm{old}} & \mathbf P_{\mathrm{old},L}\\
+\mathbf P_{L,\mathrm{old}} & \mathbf P_{LL}
+\end{bmatrix},
+$$
+
+左上角 `P_old` 原样复制；新增的只有交叉块和新点块。因此同一轨迹量测只对旧状态执行了一次
+信息更新，后续步骤是联合后验的条件补全，而不是第二个视觉因子。
+
+### 3.6 同一持久点跨关键帧重复观测是否合理
+
+合理。第 k 个关键帧和第 k+1 个关键帧看到的是两个不同时间、不同相机位姿下的新像素样本：
+
+$$
+\mathbf z_k^L\neq\mathbf z_{k+1}^L.
+$$
+
+它们可以依次更新同一个持久点，类似 EKF-SLAM 持续观测地图点。与错误做法的区别是：
+
+- 持久点始终保留在联合状态中；
+- `P_ML/P_LL` 始终随 IMU 传播、clone 增广和视觉后验维护；
+- 旧观测不会重新从历史 Feature 列表中进入 Schur；
+- 长期观测方差默认放大 64 倍，保守吸收时间相关性和线性化误差。
+
+所以“重复观测同一物理点”是允许的，“重复使用同一个历史像素样本”是不允许的。
+
+### 3.7 非关键帧上的持久点观测
+
+`updatePersistentLandmarks()` 当前明确要求 `is_keyframe=true`。若某种帧策略保存了非关键帧 clone，
+该帧中的持久 ID 仍会被排除出普通 MSCKF，并在帧末清理，但不会执行持久点直接更新。
+
+默认 `MSCKF + AUTO/KeyframeOnly` 路径只为关键帧保存对应视觉 clone，因此正常默认运行不会因为
+这一规则丢失已存帧中的持久点量测。若以后让默认后端对每张图像都增广 clone，需要明确决定：
+
+1. 继续只在关键帧使用持久点，以降低时间相关性和计算量；或
+2. 允许非关键帧直接更新，并重新标定长期噪声倍率和 NIS 门限。
+
+### 3.8 一次性使用审计表
+
+| 情况 | 当前像素进入持久 EKF | 进入普通 MSCKF | 进入旋转因子 | 是否反馈导航 |
+|---|---:|---:|---:|---:|
+| 已有持久 ID 的关键帧新像素 | 是 | 否 | 否 | 是 |
+| 已有持久 ID 的非关键帧新像素 | 否 | 否 | 否 | 否 |
+| 普通成功三角化轨迹的未消费像素 | 否 | 是 | 否 | 是 |
+| 低视差轨迹被选择的一对 R 帧像素 | 否 | 后续 Schur 主动跳过 | 是 | 是 |
+| 丢失轨迹摘要中的历史 bearing | 否 | 否 | 否 | 否，只筛选候选 |
+| 晋升轨迹像素 | 不执行第二次直接 EKF | 是一次；已被旋转因子消费的样本会跳过 | 可能已有部分历史样本进入 | 是，并条件初始化新点 |
+
+运行回归时，普通一次性像素的核心审计量仍必须满足：
+
+```text
+reused_observations = 0
+duplicate_observations_blocked = 0
+```
+
+这两个计数器审计的是普通一次性 `Observation`。持久点直接更新从 `cam_data.measurements` 读取，
+不依赖 `visual_update_count` 防重；它依靠“持久 ID 不进入 `ids`”这一结构分流保证不与普通 Schur
+重复。
+
+### 3.9 按代码阶段观察状态和协方差变化
+
+下表可用于单步调试 `updateVisual()`。`P_old` 表示进入该阶段前已有的完整联合协方差。
+
+| 阶段 | 主要变量/函数 | 使用的视觉数据 | 状态均值变化 | 协方差变化 |
+|---|---|---|---|---|
+| 1. 当前帧入图 | `pushFrame()`、`Map::addObservations()` | 当前图像全部 ID | clone 名义位姿由当前 INS 复制 | clone 增广，并复制与持久点的交叉块 |
+| 2. 轨迹分流 | `isPersistentLandmark()`、`ids`、`persistent_tracks_to_clear` | 只分类，不建因子 | 无 | 无 |
+| 3. 已有持久点直接更新 | `updatePersistentLandmarks()` | `Z^P` | 导航、clone、全部相关持久点都可能变化 | 对 `P_old` 做联合 Joseph 更新 |
+| 4. 普通轨迹 Schur 更新 | `Hpp/Hpl/Hll/gp/gl`、`applyJointStateCorrection(dx_joint)` | `Z^M` 和可选 `Z^R` | 导航、clone、已有持久点都可能变化 | 再对当前完整 `P` 做序贯 Joseph 更新 |
+| 5. 新点晋升 | `promotePersistentLandmark()` | 复用阶段 4 已建立的正规方程块，不新增因子 | 只创建新点均值 | `P_old` 左上角不变，只追加交叉块和新点块 |
+| 6. 生命周期清理 | `Map::removeLandmark()`、`popFrame()` | 不使用量测 | 无 | 删除 clone 时由固定 slot/ordering 管理窗口；持久点块保留 |
+
+因此同一帧可能观察到持久点均值发生两类变化：阶段 3 是自己的新像素直接更新，阶段 4 是其他
+普通视觉约束通过交叉协方差带来的间接变化。阶段 5 只扩维，不会第三次更新旧状态。
+
+### 3.10 当前非线性实现的精确顺序
+
+为了理解数值细节，还要注意“选择/三角化”和“真正构造普通 Schur 方程”不是紧挨着执行的：
+
+```text
+普通轨迹消费判断与三角化
+        ↓
+记录 ids、track_qualities 和当前三角化点位置
+        ↓
+已有持久点直接联合 EKF，clone 名义位姿和协方差可能变化
+        ↓
+使用更新后的 clone 位姿构造普通轨迹重投影 H/g
+        ↓
+使用此前得到的三角化点初值完成 Schur 更新
+```
+
+也就是说：
+
+- 普通轨迹的三角化初值和几何评分在持久点直接更新之前计算；
+- 普通轨迹的重投影残差、FEJ 雅可比和 `Hpp/Hpl/Hll` 在持久点直接更新之后构造；
+- 点初值不会因为前面的持久点直接更新立即重新三角化；
+- 晋升回代使用的是后续真正构造出的 `Hll/Hpl/gl`，所以交叉协方差仍对应当前 Schur 线性化。
+
+这是当前序贯非线性实现的工程折中，不是重复量测问题。若以后进一步追求严格的同一线性化点，
+可以比较三种改法：
+
+1. 在轨迹三角化前先完成已有持久点更新；
+2. 持久点更新后只对准备消费/晋升的轨迹重新三角化；
+3. 将持久点直接因子和普通 Schur 因子统一装入同一个批量线性系统。
+
+其中第 3 种最接近固定线性化点的批量更新，但会显著增加视觉更新上下文和矩阵装配复杂度；任何
+调整都必须重新检查 ATE、NIS/NEES、负协方差和一次性观测计数。
+
 ## 4. 普通轨迹仍然怎样执行 MSCKF
 
 ### 4.1 临时点线性化

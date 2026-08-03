@@ -215,6 +215,9 @@ RMSE 分别从 0.3443、0.4179、0.2013、0.6688、8.4281 m 变为 0.3262、0.31
 - 记录 IMU 传播与 clone 增广如何维护追加点状态后的交叉协方差。
 - 为主要状态、Schur、旋转残差、候选 NIS、延迟初始化、联合 EKF 和传播公式增加纯文本与 LaTeX
   双版本，并将单帧流程和完整轨迹状态机绘制为 Mermaid 框图。
+- 补充持久点直接观测、普通 MSCKF 观测、旋转观测和历史摘要的集合分区，逐行对应
+  `persistent_tracks_to_clear`、`ids`、`updatePersistentLandmarks()`、`applyJointStateCorrection()`
+  和 `promotePersistentLandmark()`，并证明晋升帧的 Schur 更新与条件初始化不是重复量测更新。
 
 `README.md`、`SOURCE_LAYOUT.md`、`VISUAL_UPDATE_SCHEDULING.md` 和 `SHADOW_LANDMARKS.md` 已统一指向
 该专题，后续修改默认混合后端时应同步更新此文档。
