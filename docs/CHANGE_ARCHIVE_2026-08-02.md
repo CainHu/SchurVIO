@@ -200,3 +200,19 @@ VINS-Mono 的三角化重试不再依赖观测数量，而记录最新观测帧 
 100 s / 600 点回归中，Circle-out、Circle-in、Helix-3D、Stop-go、Rotation/translation 的位置
 RMSE 分别从 0.3443、0.4179、0.2013、0.6688、8.4281 m 变为 0.3262、0.3124、0.0867、
 0.0604、7.3984 m；所有场景保持 `reused=0`、`blocked=0`。
+
+## 2026-08-03：混合 MSCKF 数学文档补全
+
+新增 [HYBRID_MSCKF.md](HYBRID_MSCKF.md)，把此前分散在影子点、调度和源码注释中的内容整理为
+一条完整概率流程：
+
+- 明确原始 `IMU + clone` MSCKF 状态如何追加固定预算的持久点，并定义 `P_MM/P_ML/P_LL`；
+- 推导普通临时点 Schur 消元后，零填充雅可比如何通过 `P_LM` 同步修正已有持久点；
+- 写明几何评分、跨独立轨迹 3D NIS、稳定证据、4×3 网格和总预算组成的四层筛选；
+- 推导当前滑窗正规方程回代、`J_x=-T Hll^-1 Hlx`、新旧状态交叉协方差和协方差扩维；
+- 给出持久点直接重投影的 FEJ 雅可比、联合 Joseph 更新、门控和 64 倍长期方差；
+- 补全低视差延迟消费的触发条件、R/N 分类、球面切平面旋转残差、一次性像素标记和丢失摘要边界；
+- 记录 IMU 传播与 clone 增广如何维护追加点状态后的交叉协方差。
+
+`README.md`、`SOURCE_LAYOUT.md`、`VISUAL_UPDATE_SCHEDULING.md` 和 `SHADOW_LANDMARKS.md` 已统一指向
+该专题，后续修改默认混合后端时应同步更新此文档。

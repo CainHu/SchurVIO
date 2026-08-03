@@ -70,9 +70,10 @@ flowchart TD
 | IMU 积分与协方差传播 | `schur_vins_imu.cpp` | [MATHEMATICAL_PIPELINE.md](MATHEMATICAL_PIPELINE.md) |
 | 三角化与初始协方差 | `schur_vins_triangulation.cpp` | [TRIANGULATION.md](TRIANGULATION.md) |
 | 帧选择与轨迹生命周期 | `frame_selection_policy.cpp`、`schur_vins_visual.cpp` | [VISUAL_UPDATE_SCHEDULING.md](VISUAL_UPDATE_SCHEDULING.md) |
-| 纯旋转约束与轨迹摘要 | `rdvio_constraints.cpp`、`schur_vins_track_archive.cpp` | [SHADOW_LANDMARKS.md](SHADOW_LANDMARKS.md)、[RDVIO_SCHEDULING.md](RDVIO_SCHEDULING.md) |
+| 混合 MSCKF 状态扩维、筛选、晋升和联合更新 | `schur_vins_visual.cpp`、`schur_vins_persistent.cpp`、`schur_vins_imu.cpp` | [HYBRID_MSCKF.md](HYBRID_MSCKF.md) |
+| 纯旋转约束与轨迹摘要 | `rdvio_constraints.cpp`、`schur_vins_track_archive.cpp` | [HYBRID_MSCKF.md](HYBRID_MSCKF.md)、[RDVIO_SCHEDULING.md](RDVIO_SCHEDULING.md) |
 | Schur、有效子空间与 Joseph 更新 | `schur_vins_visual.cpp` | [MATHEMATICAL_PIPELINE.md](MATHEMATICAL_PIPELINE.md) |
-| 影子候选与持久 Landmark | `schur_vins_persistent.cpp`、`schur_vins_shadow.cpp` | [SHADOW_LANDMARKS.md](SHADOW_LANDMARKS.md) |
+| 独立影子地图与候选/持久点边界 | `schur_vins_persistent.cpp`、`schur_vins_shadow.cpp` | [SHADOW_LANDMARKS.md](SHADOW_LANDMARKS.md)、[HYBRID_MSCKF.md](HYBRID_MSCKF.md) |
 
 ## 6. 维护约定
 

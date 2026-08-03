@@ -30,6 +30,7 @@
 | [OPT_LDLT.md](OPT_LDLT.md) | `Hpp` 分解改用 LDLT，11.9 s → 9.7 s |
 | [QR_VS_SCHUR.md](QR_VS_SCHUR.md) | 理论：为什么 QR 比 Schur 慢 5 倍；两条失败的优化尝试 |
 | [VISUAL_UPDATE_SCHEDULING.md](VISUAL_UPDATE_SCHEDULING.md) | Legacy / SchurVINS / MSCKF / VINS-Mono 调度、一次性观测生命周期与宏切换 |
+| [HYBRID_MSCKF.md](HYBRID_MSCKF.md) | **默认混合 MSCKF 专题**：状态扩维、持久点四层筛选、Schur 延迟初始化、联合 EKF、低视差延迟与无深度旋转约束 |
 | [RDVIO_SCHEDULING.md](RDVIO_SCHEDULING.md) | RD-VIO 的 RR/NN/RN/NR、延迟三角化、无深度旋转因子、R 子窗压缩与严格结果 |
 | [LANDMARK_PARAMETERIZATION.md](LANDMARK_PARAMETERIZATION.md) | World/锚定 XYZ、3-DOF 逆深度与 log-depth 的完整雅可比和数值消融 |
 | [ANALYSIS_REPORT.md](ANALYSIS_REPORT.md) | **精度分析**：视觉后验的修正作用、噪声敏感度、协方差问题（配套 `out/report.html` 交互图表） |
@@ -41,7 +42,7 @@
 | [LANDMARK_UPDATE_STRATEGIES.md](LANDMARK_UPDATE_STRATEGIES.md) | 固定点、重三角化、Schur 回代与旧独立 EKF 的数学边界和严格对比 |
 | [HLL_STRUCTURE.md](HLL_STRUCTURE.md) | 理论：`Hll` 的零特征值 = 深度方向；`Hll` 换 LDLT |
 | [CONSISTENT_SUBSPACE_AND_LANDMARK_COVARIANCE.md](CONSISTENT_SUBSPACE_AND_LANDMARK_COVARIANCE.md) | `Hll/Hpp/gp` 同域投影、Landmark 协方差与影子地图实验 |
-| [SHADOW_LANDMARKS.md](SHADOW_LANDMARKS.md) | 独立影子地图、候选池、低视差归档、无深度旋转约束、持久点延迟初始化与完整交叉协方差 |
+| [SHADOW_LANDMARKS.md](SHADOW_LANDMARKS.md) | 独立影子地图与影子候选的概念边界、历史实验和回归结果；混合主流程以 `HYBRID_MSCKF.md` 为准 |
 | [archive/legacy_debug/README.md](archive/legacy_debug/README.md) | 早期坐标系、发散和状态增广调试文档；仅用于历史追溯 |
 
 各文档都记录了**失败的尝试和被数据推翻的判断**，不只记成功的部分。
