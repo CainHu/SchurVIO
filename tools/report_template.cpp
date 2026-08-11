@@ -173,9 +173,9 @@ code{background:#0b0d12;padding:1px 5px;border-radius:3px;font-size:12px}
     <div class="panel"><h3>NIS / 自由度（创新一致性）</h3><canvas id="cnis" height="330"></canvas></div>
   </div>
   <div class="grid g2" style="margin-top:16px">
-    <div class="panel"><h3>位置误差 vs 3√trace(P)</h3><canvas id="cerrp" height="330"></canvas></div>
-    <div class="panel"><h3>姿态误差 vs 3√trace(P)</h3><canvas id="cerra" height="330"></canvas></div>
-    <div class="panel"><h3>速度误差 vs 3√trace(P)</h3><canvas id="cerrv" height="330"></canvas></div>
+    <div class="panel"><h3>位置误差 vs 3×√trace(P)（启发式）</h3><canvas id="cerrp" height="330"></canvas></div>
+    <div class="panel"><h3>姿态误差 vs 3×√trace(P)（启发式）</h3><canvas id="cerra" height="330"></canvas></div>
+    <div class="panel"><h3>速度误差 vs 3×√trace(P)（启发式）</h3><canvas id="cerrv" height="330"></canvas></div>
     <div class="panel"><h3>位置误差三轴分量</h3><canvas id="cxyz" height="330"></canvas></div>
   </div>
   <div id="consistency"></div>
@@ -536,7 +536,7 @@ function drawScenarioOverview(scenario){
     const stable=metrics.every(m=>m.row.max_err_p<10&&m.row.neg_cov===0);
     document.getElementById('scenarioNotes').innerHTML=
       `<div class="note ${stable?'ok':'bad'}"><b>跨场景稳定性</b>：`+
-      `${stable?'四类轨迹均未发散，且未检测到负协方差。':'存在发散或协方差异常。'}`+
+      `${stable?'四类轨迹均未发散，且 Q/P/V 联合谱检查未检测到显著负特征值。':'存在发散或协方差异常。'}`+
       `绝对位置包含 VIO 的全局平移 gauge 漂移，应结合 1 秒相对位移 RMSE 判断局部融合。`+
       `最难场景为 ${worst.s.label}，位置 RMSE ${fmt(worst.row.rmse_p,4)} m。`+
       `降权/拒绝比例用于判断鲁棒核是否频繁介入；比例过高通常意味着量测噪声、三角化或数据关联仍需检查。</div>`;
@@ -988,6 +988,9 @@ function triangulationScatter(id, rows, xKey, yKey, xLabel, yLabel, options={}){
   const neesNorm=T.map(r=>r.nees_qpv/9);
   const meanNEES=mean(neesNorm), p95NEES=quantile(neesNorm,0.95);
   const meanNIS=mean(nisRows.map(r=>r.nis_mean));
+  const finiteCovEig=T.filter(r=>Number.isFinite(r.cov_qpv_min_eig));
+  const minCovEig=finiteCovEig.length
+    ? Math.min(...finiteCovEig.map(r=>r.cov_qpv_min_eig)):NaN;
   const coverage=k=>100*T.filter(r=>r[k[0]]>0&&r[k[1]]<=3*r[k[0]]).length/Math.max(T.length,1);
   const covP=coverage(['sigma_p','err_p']);
   const covQ=coverage(['sigma_q','err_att']);
@@ -997,7 +1000,8 @@ function triangulationScatter(id, rows, xKey, yKey, xLabel, yLabel, options={}){
     ['平均联合 NEES/9',fmt(meanNEES,3),'理论期望约 1',cls(meanNEES)],
     ['联合 NEES/9 P95',fmt(p95NEES,3),'查看偶发过度自信',cls(p95NEES)],
     ['平均 NIS/自由度',fmt(meanNIS,3),`有效更新 ${nisRows.length} 次`,cls(meanNIS)],
-    ['3√trace 覆盖率',`${fmt(covP,1)}% / ${fmt(covQ,1)}% / ${fmt(covV,1)}%`,'位置 / 姿态 / 速度',''],
+    ['3×√trace 包含率',`${fmt(covP,1)}% / ${fmt(covQ,1)}% / ${fmt(covV,1)}%`,'启发式：位置 / 姿态 / 速度',''],
+    ['最小 λ(P_qpv)',fmt(minCovEig,3),'相对阈值谱健康度',''],
   ];
   document.getElementById('kpiConsistency').innerHTML=cards.map(c=>
     `<div class="kpi"><div class="k">${c[0]}</div>`+
@@ -1006,15 +1010,15 @@ function triangulationScatter(id, rows, xKey, yKey, xLabel, yLabel, options={}){
 
 linePlot('cerrp',{logY:true,series:[
   {name:'位置误差', color:C('--err'), data:T.map(r=>[r.t,Math.max(r.err_p,1e-9)]),lw:1.4},
-  {name:'3√trace(P)', color:C('--bad'), dash:[6,4], data:T.map(r=>[r.t,Math.max(3*r.sigma_p,1e-9)])},
+  {name:'3×√trace(P)', color:C('--bad'), dash:[6,4], data:T.map(r=>[r.t,Math.max(3*r.sigma_p,1e-9)])},
 ]});
 linePlot('cerra',{logY:true,series:[
   {name:'姿态误差', color:C('--err'), data:T.map(r=>[r.t,Math.max(r.err_att,1e-9)]),lw:1.4},
-  {name:'3√trace(P)', color:C('--bad'), dash:[6,4], data:T.map(r=>[r.t,Math.max(3*r.sigma_q,1e-9)])},
+  {name:'3×√trace(P)', color:C('--bad'), dash:[6,4], data:T.map(r=>[r.t,Math.max(3*r.sigma_q,1e-9)])},
 ]});
 linePlot('cerrv',{logY:true,series:[
   {name:'速度误差', color:C('--err'), data:T.map(r=>[r.t,Math.max(r.err_v,1e-9)]),lw:1.4},
-  {name:'3√trace(P)', color:C('--bad'), dash:[6,4], data:T.map(r=>[r.t,Math.max(3*r.sigma_v,1e-9)])},
+  {name:'3×√trace(P)', color:C('--bad'), dash:[6,4], data:T.map(r=>[r.t,Math.max(3*r.sigma_v,1e-9)])},
 ]});
 linePlot('cxyz',{series:[
   {name:'ex', color:'#ff5c7a', data:T.map(r=>[r.t,r.ex])},
@@ -1023,7 +1027,7 @@ linePlot('cxyz',{series:[
 ]});
 
 (function(){
-  // 一致性判据: err 应大致落在 3σ 内且不应远小于 σ
+  // √trace(P) 是三维总标准差半径；以下 3 倍包络只是直观启发式，正式统计看 NEES。
   const last=T[T.length-1];
   const rP=last.err_p/(last.sigma_p||1e-12);
   const rQ=last.err_att/(last.sigma_q||1e-12);
@@ -1054,20 +1058,30 @@ linePlot('cxyz',{series:[
   html+=judge('姿态',rQ,last.sigma_q,last.err_att);
   html+=judge('速度',rV,last.sigma_v,last.err_v);
 
-  // 协方差正定性检查(负 trace 在导出时写成负值而非 nan)
+  // 新 CSV 对 Q/P/V 联合 9x9 协方差做相对阈值谱检查；旧 CSV 回退到 trace 报警。
   let nneg=0, tneg=-1;
+  const hasSpectralCov=T.some(r=>Number.isFinite(r.cov_qpv_min_eig));
+  const finiteCovEig=T.filter(r=>Number.isFinite(r.cov_qpv_min_eig));
+  const minCovEig=finiteCovEig.length
+    ? Math.min(...finiteCovEig.map(r=>r.cov_qpv_min_eig)):NaN;
   for(const r of T){
-    if(r.sigma_p<0||r.sigma_q<0||r.sigma_v<0){ nneg++; if(tneg<0) tneg=r.t; }
+    const spectralBad=Number.isFinite(r.cov_qpv_min_eig)&&
+      r.cov_qpv_min_eig < -1e-10*Math.max(1,Number(r.cov_qpv_scale)||1);
+    const traceBad=!hasSpectralCov&&(r.sigma_p<0||r.sigma_q<0||r.sigma_v<0);
+    if(spectralBad||traceBad){ nneg++; if(tneg<0) tneg=r.t; }
   }
   if(nneg){
-    html+=`<div class="note bad"><b>协方差正定性</b>：共 <b>${nneg}/${T.length}</b> 帧的协方差 trace 为负`+
-          `（首次出现在 t=${fmt(tneg,1)} s）。对称矩阵的 trace 为负意味着至少有一个负特征值，`+
-          `协方差已<b>失去正定性</b>。需要分别检查预测传播、增广互协方差与后验更新，`+
+    html+=`<div class="note bad"><b>协方差半正定性</b>：共 <b>${nneg}/${T.length}</b> 帧`+
+          `${hasSpectralCov?'的 Q/P/V 联合协方差出现显著负特征值':'触发旧 trace 级报警'}`+
+          `（首次出现在 t=${fmt(tneg,1)} s）。需要分别检查预测传播、增广互协方差与后验更新，`+
           `不能仅凭该现象归因于 Joseph 形式。</div>`;
   }else{
-    html+=`<div class="note ok"><b>协方差正定性</b>：全部 ${T.length} 帧的 `+
-          `位置/姿态/速度协方差块 trace 均非负，未发现 trace 级异常。`+
-          `离线完整特征值诊断的最小值约为 -2e-12，属于浮点舍入量级。</div>`;
+    const spectralMessage=hasSpectralCov
+      ? `最小特征值为 ${fmt(minCovEig,3)}；该检查不覆盖固定空槽和全部持久点的完整联合矩阵。`
+      : `重新生成报告可获得更严格的联合谱检查。`;
+    html+=`<div class="note ok"><b>协方差半正定性</b>：全部 ${T.length} 帧`+
+          `${hasSpectralCov?'通过 Q/P/V 联合 9×9 相对阈值谱检查':'未发现旧 trace 级异常'}。`+
+          `${spectralMessage}</div>`;
   }
   document.getElementById('consistency').innerHTML=html;
 })();

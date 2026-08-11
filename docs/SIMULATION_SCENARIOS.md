@@ -8,7 +8,7 @@
 | [Circle-in](SIM_CIRCLE_IN.md) | 10 m 匀速圆周 | 朝圆心 | 长 track、内向几何、重复观测 |
 | [Helix-3D](SIM_HELIX_3D.md) | 三维起伏圆周 | 朝中心并滚转 | 完整三轴激励、最大误差检查 |
 | [Stop-go](SIM_STOP_GO.md) | 往返与静止交替 | 朝走廊前方 | 弱激励、低视差、鲁棒性 |
-| Rotation-translation | 4 s 纯旋转 / 6 s 平移周期交替 | 连续偏航与轻微俯仰/滚转 | 覆盖 RD-VIO 的 RR/NN/RN/NR 与慢平移误判 |
+| [Rotation-translation](SIM_ROTATION_TRANSLATION.md) | 4 s 纯旋转 / 6 s 平移周期交替 | 连续偏航与轻微俯仰/滚转 | 覆盖 RD-VIO 的 RR/NN/RN/NR 与慢平移误判 |
 
 `rotation_translation` 的位置在纯旋转段严格不动，平移段用余弦速度轮廓在 `x=-4 m` 与
 `x=4 m` 之间往返；姿态在全部阶段连续变化。特征点分布在轨迹周围 5–13 m 的三维环带，

@@ -252,7 +252,8 @@ RD-VIO 调度和源码注释中的纯旋转内容整理为独立推导：
 
 ## 2026-08-11：数学文档复核与重实现路线
 
-本轮仅修改文档和坐标含义注释，不改变算法参数、矩阵装配或浮点运算顺序。复核范围以
+本轮不改变估计器参数、矩阵装配或浮点运算顺序；除文档和坐标含义注释外，只修正离线
+分析报告的联合姿态误差坐标与协方差谱报警。复核范围以
 Windows 工程 `E:\GithubProject\SchurVIO` 和 SchurVIO-Pro 对话中的 Windows 演进为准，
 不包含后续 WSL 迁移改动。
 
@@ -267,6 +268,14 @@ Windows 工程 `E:\GithubProject\SchurVIO` 和 SchurVIO-Pro 对话中的 Windows
 - [REIMPLEMENTATION_GUIDE_137BFEA_TO_HEAD.md](REIMPLEMENTATION_GUIDE_137BFEA_TO_HEAD.md)：
   从提交 `137bfeada23c123e8` 到算法端点 `ebab4a0` 的分阶段重实现说明，
   以问题、公式、流程图、不变量和验收为主，附完整提交映射。
+- [INITIALIZATION_AND_TIME_SYNCHRONIZATION.md](INITIALIZATION_AND_TIME_SYNCHRONIZATION.md)：
+  区分仿真真值 Q/P/V 初值与真实冷启动，写明首条 IMU、相机时刻、ZOH 和 P0/Q/R 边界。
+- [CLONE_REMOVAL_AND_SLOT_REUSE.md](CLONE_REMOVAL_AND_SLOT_REUSE.md)：
+  区分协方差边缘化、条件化和信息矩阵 Schur，证明固定空槽的逻辑删除与完整覆盖语义。
+- [EVALUATION_METRICS_AND_GAUGE_ALIGNMENT.md](EVALUATION_METRICS_AND_GAUGE_ALIGNMENT.md)：
+  统一左乘 NEES、序贯 NIS、ATE/RPE、Landmark 四自由度 gauge 和协方差谱检查。
+- [SIM_ROTATION_TRANSLATION.md](SIM_ROTATION_TRANSLATION.md)：
+  给出 Rotation/translation 分段轨迹、解析速度、特征分布和 RR/RN/NN/NR 覆盖目标。
 
 同步更正：
 
@@ -286,13 +295,14 @@ Windows 工程 `E:\GithubProject\SchurVIO` 和 SchurVIO-Pro 对话中的 Windows
 tools/run_multi_scenario_analysis.ps1 -Duration 100 -Features 600
 ~~~
 
-| 场景 | 位置 RMSE | 最大位置误差 | mean NIS | neg_cov |
-|---|---:|---:|---:|---:|
-| Circle-out | 0.3262 m | 0.6316 m | 0.982 | 0 |
-| Circle-in | 0.3124 m | 0.6157 m | 0.955 | 0 |
-| Helix-3D | 0.0867 m | 0.3025 m | 0.921 | 0 |
-| Stop-go | 0.0604 m | 0.1543 m | 0.602 | 0 |
+| 场景 | 位置 RMSE | 最大位置误差 | 左乘 mean NEES | mean NIS | min \(\lambda(P_{qpv})\) | neg_cov |
+|---|---:|---:|---:|---:|---:|---:|
+| Circle-out | 0.3262 m | 0.6316 m | 1.056 | 0.982 | \(2.20\times10^{-6}\) | 0 |
+| Circle-in | 0.3124 m | 0.6157 m | 0.707 | 0.955 | \(8.19\times10^{-7}\) | 0 |
+| Helix-3D | 0.0867 m | 0.3025 m | 0.343 | 0.921 | \(1.12\times10^{-6}\) | 0 |
+| Stop-go | 0.0604 m | 0.1543 m | 0.282 | 0.602 | \(2.40\times10^{-6}\) | 0 |
 
 四场景 reused=0、blocked=0。Stop-go 触发 5772 个无深度旋转约束。当前 HEAD 没有复现
 “100 秒基本都发散”；历史发散根因仍是 10 clone 与 8° 一次性三角化门限共同造成视觉
-饥饿，修复为 20 clone + 2° 后已消除。
+饥饿，修复为 20 clone + 2° 后已消除。左乘 NEES 修正前后的轨迹数据完全相同；四场景
+联合 9×9 Q/P/V 协方差在全部 2001 个相机采样点上均未发现显著负特征值。

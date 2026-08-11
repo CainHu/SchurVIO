@@ -23,6 +23,8 @@
 #include "../vio_representative_simulator.h"
 #include "../eskf/schur_vins.h"
 
+#include <Eigen/Eigenvalues>
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -34,10 +36,14 @@
 
 namespace {
 
-// 四元数误差 -> 轴角向量(弧度)，用于姿态误差
+// 左乘姿态误差模型下，P_Q 位于世界系切空间：
+//   R_est = Exp(e_theta) R_gt，e_theta = Log(R_est R_gt^T)。
+// 这里返回与位置/速度 est-gt 同号的估计误差，保证联合 Q/P/V NEES
+// 的误差向量和协方差交叉块处于同一坐标系。只看旋转角范数时，旧的
+// Log(R_gt^T R_est) 会给出相同角度，但不能与左乘 P_Q 的交叉项混用。
 Eigen::Vector3d attitudeError(const Eigen::Quaterniond &gt,
                               const Eigen::Quaterniond &est) {
-    return slam::quat2vec((gt.inverse() * est).normalized());
+    return slam::quat2vec((est * gt.inverse()).normalized());
 }
 
 template<int N>
@@ -273,6 +279,7 @@ int main(int argc, char **argv) {
         Eigen::Vector3d bg_gt, bg_est, ba_gt, ba_est, g_est;
         double cov_p, cov_q, cov_v;   // trace
         double nees_p, nees_q, nees_v, nees_qpv;
+        double cov_qpv_min_eig, cov_qpv_scale;
         size_t n_meas;
     };
     std::vector<TrajRow> traj;
@@ -331,6 +338,15 @@ int main(int argc, char **argv) {
             }
         }
         r.nees_qpv = computeNEES<9>(error_qpv, cov_qpv);
+        const Eigen::Matrix<double, 9, 9> cov_qpv_sym =
+            0.5 * (cov_qpv + cov_qpv.transpose());
+        const Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 9, 9>>
+            cov_qpv_es(cov_qpv_sym, Eigen::EigenvaluesOnly);
+        r.cov_qpv_scale = std::max(
+            1.0, cov_qpv_sym.diagonal().cwiseAbs().maxCoeff());
+        r.cov_qpv_min_eig = cov_qpv_es.info() == Eigen::Success
+            ? cov_qpv_es.eigenvalues().minCoeff()
+            : std::numeric_limits<double>::quiet_NaN();
         r.n_meas = cam.measurements.size();
         traj.emplace_back(r);
     }
@@ -349,7 +365,8 @@ int main(int argc, char **argv) {
                         "bgx_gt,bgy_gt,bgz_gt,bgx,bgy,bgz,"
                         "bax_gt,bay_gt,baz_gt,bax,bay,baz,gx,gy,gz,"
                         "sigma_p,sigma_q,sigma_v,"
-                        "nees_p,nees_q,nees_v,nees_qpv,n_meas\n");
+                        "nees_p,nees_q,nees_v,nees_qpv,"
+                        "cov_qpv_min_eig,cov_qpv_scale,n_meas\n");
         for (const auto &r : traj) {
             const Eigen::Vector3d dp = r.p_est - r.p_gt;
             const Eigen::Vector3d dv = r.v_est - r.v_gt;
@@ -363,7 +380,7 @@ int main(int argc, char **argv) {
                 "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
                 "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
                 "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
-                "%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%zu\n",
+                "%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e,%zu\n",
                 r.t,
                 r.p_gt.x(), r.p_gt.y(), r.p_gt.z(), r.p_est.x(), r.p_est.y(), r.p_est.z(),
                 r.v_gt.x(), r.v_gt.y(), r.v_gt.z(), r.v_est.x(), r.v_est.y(), r.v_est.z(),
@@ -376,12 +393,14 @@ int main(int argc, char **argv) {
                 r.ba_gt.x(), r.ba_gt.y(), r.ba_gt.z(),
                 r.ba_est.x(), r.ba_est.y(), r.ba_est.z(),
                 r.g_est.x(), r.g_est.y(), r.g_est.z(),
-                // 协方差 trace 可能因数值问题变负；此时输出负的 sqrt(|.|) 作为标记,
-                // 而不是 nan —— 让下游能看见"协方差失去正定性"这个事实。
+                // 单块 trace 若变负，输出负的 sqrt(|.|) 作为显眼标记而不是 nan。
+                // trace 为正并不能证明半正定；更严格的 Q/P/V 联合谱检查见
+                // cov_qpv_min_eig 和汇总 neg_cov。
                 (r.cov_p >= 0 ? std::sqrt(r.cov_p) : -std::sqrt(-r.cov_p)),
                 (r.cov_q >= 0 ? std::sqrt(r.cov_q) : -std::sqrt(-r.cov_q)),
                 (r.cov_v >= 0 ? std::sqrt(r.cov_v) : -std::sqrt(-r.cov_v)),
                 r.nees_p, r.nees_q, r.nees_v, r.nees_qpv,
+                r.cov_qpv_min_eig, r.cov_qpv_scale,
                 r.n_meas);
         }
         std::fclose(f);
@@ -539,14 +558,19 @@ int main(int argc, char **argv) {
         double sp = 0, sv = 0, sa = 0, sbg = 0, sba = 0, mp = 0;
         double nees_sum = 0;
         size_t nees_count = 0;
-        // 统计协方差失去正定性的帧数(trace < 0)，这是数值健康度指标
+        // 对 Q/P/V 联合 9x9 协方差做谱检查。只看三个 3x3 块的 trace 会漏掉
+        // “trace 仍为正但某个方向已经出现负特征值”的情况。阈值按矩阵尺度设为
+        // -1e-10，避免把浮点舍入量级的小负值误报成真正的不定性。
         size_t n_neg_cov = 0;
         for (const auto &r : traj) {
-            if (r.cov_p < 0 || r.cov_q < 0 || r.cov_v < 0) ++n_neg_cov;
+            if (!std::isfinite(r.cov_qpv_min_eig) ||
+                r.cov_qpv_min_eig < -1e-10 * r.cov_qpv_scale) {
+                ++n_neg_cov;
+            }
         }
         if (n_neg_cov) {
             std::fprintf(stderr,
-                "[%s] WARNING: %zu/%zu 帧的协方差 trace 为负(失去正定性)\n",
+                "[%s] WARNING: %zu/%zu 帧的 Q/P/V 联合协方差显著非半正定\n",
                 tag.c_str(), n_neg_cov, traj.size());
         }
         for (const auto &r : traj) {

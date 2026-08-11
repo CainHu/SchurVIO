@@ -169,7 +169,7 @@ flowchart LR
 姿态误差使用四元数差的对数映射，避免直接相减欧拉角的跳变：
 
 $$
-e_R=\operatorname{Log}(R_{gt}^TR_{est}),
+e_R=\operatorname{Log}(R_{est}R_{gt}^T),
 \qquad
 \operatorname{RMSE}_R=
 \sqrt{\frac1N\sum_i\|e_{R,i}\|^2}.
@@ -178,17 +178,20 @@ $$
 对状态误差 $e_x$ 和对应协方差块 $P_x$，归一化估计误差平方为
 
 $$
-\operatorname{NEES}=e_x^TP_x^{+}e_x.
+\operatorname{NEES}=e_x^TP_x^{-1}e_x.
 $$
 
-对量测创新 $r$、雅可比 $H$ 和创新协方差 $S=HP^-H^T+R$，归一化创新平方为
+对 Schur 分解后的第 \(i\) 个一维序贯创新和创新方差，归一化创新平方为
 
 $$
-\operatorname{NIS}=r^TS^{+}r.
+\operatorname{NIS}_i=e_i^2/S_i.
 $$
 
-这里使用伪逆是为了兼容视觉 gauge 和被主动截断的退化方向。NEES/NIS 应与其**实际有效
-自由度**的卡方分布比较；只看均值或把名义矩阵维数直接当自由度，会误判一致性。
+实现中的 NEES 对 Q/P/V 或联合 9 维协方差做 LDLT，非正定时返回 `NaN`；并不使用伪逆。
+Hpp 的 gauge/退化方向在形成伪量测前已经按相对阈值删除，所以 NIS 只统计实际保留方向。
+`mean_nees` 是 9 维联合 NEES 除以 9 后的时间平均；`mean_nis` 是每次更新内部标量 NIS
+均值的等权时间平均。完整坐标约定、权重和统计限制见
+[EVALUATION_METRICS_AND_GAUGE_ALIGNMENT.md](EVALUATION_METRICS_AND_GAUGE_ALIGNMENT.md)。
 
 报告中的多场景汇总正是为避免只凭一条“好看”的圆周轨迹判断算法正确。
 
@@ -197,14 +200,19 @@ $$
 2026-08-11 重新构建并运行默认 Schur + LDLT + MSCKF + AUTO(KeyframeOnly) +
 WORLD_XYZ + Hybrid 配置：
 
-| 场景 | 位置 RMSE | 最大位置误差 | 速度 RMSE | 姿态 RMSE | mean NEES | mean NIS |
-|---|---:|---:|---:|---:|---:|---:|
-| Circle-out | 0.3262 m | 0.6316 m | 0.0585 | 0.00423 | 1.235 | 0.982 |
-| Circle-in | 0.3124 m | 0.6157 m | 0.0531 | 0.00431 | 0.986 | 0.955 |
-| Helix-3D | 0.0867 m | 0.3025 m | 0.0492 | 0.00413 | 0.449 | 0.921 |
-| Stop-go | 0.0604 m | 0.1543 m | 0.0581 | 0.00578 | 0.588 | 0.602 |
+| 场景 | 位置 RMSE | 最大位置误差 | 速度 RMSE | 姿态 RMSE | mean NEES | mean NIS | min \(\lambda(P_{qpv})\) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Circle-out | 0.3262 m | 0.6316 m | 0.0585 | 0.00423 | 1.056 | 0.982 | \(2.20\times10^{-6}\) |
+| Circle-in | 0.3124 m | 0.6157 m | 0.0531 | 0.00431 | 0.707 | 0.955 | \(8.19\times10^{-7}\) |
+| Helix-3D | 0.0867 m | 0.3025 m | 0.0492 | 0.00413 | 0.343 | 0.921 | \(1.12\times10^{-6}\) |
+| Stop-go | 0.0604 m | 0.1543 m | 0.0581 | 0.00578 | 0.282 | 0.602 | \(2.40\times10^{-6}\) |
 
-四个场景均满足 neg_cov=0、reused=0、blocked=0。Stop-go 触发 5772 个无深度旋转约束，
+四个场景均满足 neg_cov=0、reused=0、blocked=0。表中的 NEES 已使用与滤波器一致的左乘
+世界系姿态误差；旧报告用右乘机体系姿态误差与左乘协方差交叉块拼成联合误差，因此旧
+mean NEES 不能用于判断联合一致性。该修正只改变报告指标，不改变滤波状态、轨迹或调度。
+`neg_cov` 也已由三个 trace 报警加强为 Q/P/V 联合 9×9 协方差的相对阈值谱检查；本次
+2001 个相机采样点/场景的最小特征值仍全部为正。
+Stop-go 触发 5772 个无深度旋转约束，
 说明纯旋转/低视差降级路径确实参与了长期回归，而不是只在文档中存在。当前
 out/report.html 对应这组结果；早期 30 秒重复窗口表不再作为默认基线。
 
@@ -221,8 +229,15 @@ P'_{ci}=P_{ic}'^T,\qquad P'_{cc}=P_{cc}.
 三条固定尺寸预测实现路径现均补全该传播；默认使用不显式构造 `A` 的优化分块路径：
 `CONFIG_DEBUG=false`、`USE_STABLE_COVARIANCE_PREDICTION=false`。已有持久点使协方差
 动态扩维时，代码自动使用局部 15×15 的 A 同时传播全部 \(P_{xL}\)。视觉标量更新保留
-Joseph 等价形式。多场景汇总中的 `neg_cov` 必须为 0；机器精度量级的小负特征值需按
-相对阈值判断，不能与真实不定混为一谈。
+Joseph 等价形式。多场景汇总中的 `neg_cov` 现在统计对称化 \(P_{qpv}\) 的显著负特征值：
+
+\[
+\lambda_{min}(P_{qpv})<-10^{-10}
+\max(1,\max_i|P_{ii}|).
+\]
+
+它必须为 0；机器精度量级的小负值按相对阈值忽略。该检查比旧 trace 报警严格，但仍不是
+包含固定空槽和全部持久点的完整联合矩阵谱证明。
 
 当前姿态误差注入后尚未显式应用 reset Jacobian，采用小修正下 \(G_{reset}\approx I\)
 的近似。它不是本次负协方差修复的根因，但属于后续若提高严格一致性时需要单独验证的边界。
@@ -252,3 +267,7 @@ clone 协方差的鲁棒重投影优化、质量门限和初始 landmark 协方�
   `uv_var` 的三种噪声语义
 - [ESKF_STATE_PROPAGATION_AND_AUGMENTATION.md](ESKF_STATE_PROPAGATION_AND_AUGMENTATION.md)：
   坐标、传播、增广、Joseph 与 reset 边界
+- [INITIALIZATION_AND_TIME_SYNCHRONIZATION.md](INITIALIZATION_AND_TIME_SYNCHRONIZATION.md)：
+  仿真 Q/P/V 初值、先验协方差和时间同步边界
+- [EVALUATION_METRICS_AND_GAUGE_ALIGNMENT.md](EVALUATION_METRICS_AND_GAUGE_ALIGNMENT.md)：
+  ATE/RPE、四自由度 gauge、左乘联合 NEES、序贯 NIS 和协方差谱报警

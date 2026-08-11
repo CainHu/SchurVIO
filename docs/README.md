@@ -29,7 +29,10 @@
 | [SOURCE_LAYOUT.md](SOURCE_LAYOUT.md) | 当前 `schur_vins_*.cpp` 拆分、调用流程、数学文档映射和维护约定 |
 | [MATHEMATICAL_PIPELINE.md](MATHEMATICAL_PIPELINE.md) | 从 IMU 传播、clone 增广、三角化到 Schur/Joseph 后验的数学总流程 |
 | [ESKF_STATE_PROPAGATION_AND_AUGMENTATION.md](ESKF_STATE_PROPAGATION_AND_AUGMENTATION.md) | **ESKF 专题**：坐标系、左乘误差、IMU 转移、联合 cross covariance、clone 增广、Joseph 与 reset 边界 |
+| [INITIALIZATION_AND_TIME_SYNCHRONIZATION.md](INITIALIZATION_AND_TIME_SYNCHRONIZATION.md) | **启动专题**：初始均值/协方差、仿真 oracle Q/P/V 边界、首条 IMU 与相机时刻同步、真实设备初始化缺口 |
+| [CLONE_REMOVAL_AND_SLOT_REUSE.md](CLONE_REMOVAL_AND_SLOT_REUSE.md) | **删帧专题**：协方差主子块、信息形式 Schur、固定物理槽正确性、完整行列覆盖和紧凑化边界 |
 | [VISUAL_RESIDUAL_NOISE_MODEL.md](VISUAL_RESIDUAL_NOISE_MODEL.md) | **视觉统计专题**：归一化方差、Huber/硬门限、一次性 MSCKF、持久点与历史 `uv_var` 的不同语义 |
+| [EVALUATION_METRICS_AND_GAUGE_ALIGNMENT.md](EVALUATION_METRICS_AND_GAUGE_ALIGNMENT.md) | **评估专题**：左乘误差、ATE/RPE、四自由度 gauge 对齐、NEES/NIS 的真实归一化与协方差谱检查 |
 | [REIMPLEMENTATION_GUIDE_137BFEA_TO_HEAD.md](REIMPLEMENTATION_GUIDE_137BFEA_TO_HEAD.md) | **重实现路线**：从 `137bfea` 按问题、数学依赖、流程图和验收逐阶段重建当前算法 |
 | [OPT_QR_PATH.md](OPT_QR_PATH.md) | QR 路径 203.5 s → 61.8 s |
 | [OPT_SCHUR_PATH.md](OPT_SCHUR_PATH.md) | Schur 路径 18.3 s → 11.9 s |
@@ -43,7 +46,8 @@
 | [LANDMARK_PARAMETERIZATION.md](LANDMARK_PARAMETERIZATION.md) | World/锚定 XYZ、3-DOF 逆深度与 log-depth 的完整雅可比和数值消融 |
 | [ANALYSIS_REPORT.md](ANALYSIS_REPORT.md) | **精度分析**：视觉后验的修正作用、噪声敏感度、协方差问题（配套 `out/report.html` 交互图表） |
 | [TRIANGULATION.md](TRIANGULATION.md) | 多视图三角化、失败门限、初始 landmark 协方差和真值离线评估 |
-| [SIMULATION_SCENARIOS.md](SIMULATION_SCENARIOS.md) | Circle-out / Circle-in / Helix-3D / Stop-go 场景与统一噪声模型 |
+| [SIMULATION_SCENARIOS.md](SIMULATION_SCENARIOS.md) | Circle-out / Circle-in / Helix-3D / Stop-go / Rotation-translation 场景与统一噪声模型 |
+| [SIM_ROTATION_TRANSLATION.md](SIM_ROTATION_TRANSLATION.md) | **调度压力场景**：R/N 解析分段、RR/RN/NN/NR 覆盖、持续姿态和三维环带特征 |
 | [ABLATION_STUDY.md](ABLATION_STUDY.md) | 四场景严格消融：三角化、landmark 修正、IMU 白噪声离散化与偏置随机游走 |
 | [HPP_NULLSPACE.md](HPP_NULLSPACE.md) | 理论：当前零空间如何随活跃 clone 数变化、历史 31 的来源、LDLT 主元与空槽压缩机会 |
 | [OBSERVABILITY_CONSTRAINT.md](OBSERVABILITY_CONSTRAINT.md) | FEJ 可观性约束：四维 VIO gauge、Schur 实现、硬投影反例与四场景 A/B |
@@ -59,15 +63,17 @@
 
 ```mermaid
 flowchart LR
-    A["坐标与 ESKF 传播"] --> B["数学总流程"]
-    B --> C["三角化"]
-    C --> D["Landmark 参数化"]
-    D --> E["Schur 与 QR 等价性"]
-    E --> F["Hll/Hpp 零空间"]
-    F --> G["FEJ 与一致有效子空间"]
-    G --> H["无深度纯旋转约束"]
-    H --> I["视觉调度与 RD-VIO"]
-    I --> J["消融和报告指标"]
+    A["初始化、时间同步"] --> B["坐标与 ESKF 传播"]
+    B --> C["clone 增广、删帧与槽位"]
+    C --> D["数学总流程"]
+    D --> E["三角化"]
+    E --> F["Landmark 参数化"]
+    F --> G["Schur 与 QR 等价性"]
+    G --> H["Hll/Hpp 零空间"]
+    H --> I["FEJ 与一致有效子空间"]
+    I --> J["无深度纯旋转约束"]
+    J --> K["视觉调度与 RD-VIO"]
+    K --> L["评估定义、消融与报告"]
 ```
 
 ## 路径切换

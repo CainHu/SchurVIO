@@ -386,8 +386,11 @@ b_a^+=b_a^-+\delta b_a.
 - [Hll 结构](HLL_STRUCTURE.md)
 - [QR 与 Schur](QR_VS_SCHUR.md)
 - [Landmark 后续修正](LANDMARK_UPDATE_STRATEGIES.md)
+- [初始化、先验协方差与时间同步](INITIALIZATION_AND_TIME_SYNCHRONIZATION.md)
 - [ESKF 状态传播、协方差与增广](ESKF_STATE_PROPAGATION_AND_AUGMENTATION.md)
+- [Clone 删除、协方差边缘化与固定槽复用](CLONE_REMOVAL_AND_SLOT_REUSE.md)
 - [视觉残差、鲁棒权重与噪声语义](VISUAL_RESIDUAL_NOISE_MODEL.md)
+- [评估指标、Gauge 对齐与一致性统计](EVALUATION_METRICS_AND_GAUGE_ALIGNMENT.md)
 - [从 137bfea 重实现当前版本](REIMPLEMENTATION_GUIDE_137BFEA_TO_HEAD.md)
 
 ## 12. 公式来源与实现关系

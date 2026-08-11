@@ -177,6 +177,11 @@ flowchart TD
 
 删除 clone 时释放的是物理 slot；状态注入和雅可比写块必须始终使用 `Frame::ordering`，不能用当前时间序号代替。
 
+这里的“删除/边缘化 clone”是生命周期简称。当前后端保存协方差：轨迹因子先进入后验后，
+丢弃 clone 的概率操作是取保留变量的协方差主子块；实现用固定槽位逻辑忽略旧块，不会再
+对协方差做 Schur 补。信息形式边缘化、条件化和槽位完整覆盖的区别见
+[CLONE_REMOVAL_AND_SLOT_REUSE.md](CLONE_REMOVAL_AND_SLOT_REUSE.md)。
+
 ## 宏与构建方式
 
 视觉后端公共数值宏定义在 `eskf/visual_update_scheduler.h`；独立帧策略宏定义在 `eskf/frame_selection_policy.h`。

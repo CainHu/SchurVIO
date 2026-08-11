@@ -297,6 +297,11 @@ NEES 则依赖选取的状态误差块和相应协方差。单目 VIO 存在 gau
 误差与局部协方差并不总能直接按满秩卡方分布解释，所以报告同时提供 raw RMSE、
 SE(3) 对齐 ATE 和固定时间间隔 RPE。
 
+当前汇总还有两个容易忽略的实现细节：`mean_nis` 对“每次更新的方向均值”等权，而不是
+按全部有效方向数加权；`mean_nees` 是左乘世界系 Q/P/V 9 维联合 NEES 除以 9 后的时间
+平均。姿态误差坐标、gauge 对齐和协方差谱检查的完整定义见
+[EVALUATION_METRICS_AND_GAUGE_ALIGNMENT.md](EVALUATION_METRICS_AND_GAUGE_ALIGNMENT.md)。
+
 还要注意：
 
 - 硬门限会截断创新分布，门后 NIS 不是未经选择的原始高斯样本；
