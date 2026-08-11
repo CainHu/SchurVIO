@@ -80,10 +80,10 @@ void SchurVINS::predict(const slam::IMUData &imu_data, const double dt) {
         accel_corr_world_ = Rnb_ * accel_corr_;
         a_world_ = accel_corr_world_ + state_.gravity;
 
-        // SO(3) 积分中的两个解析矩阵：
-        //   J1(phi)=sum_{n>=0} phi^n/(n+1)!，用于积分旋转后的加速度；
-        //   J2(phi)=sum_{n>=0} phi^n/(n+2)!，用于二次积分到位置。
-        // 这里保留到二阶，phi=omega*dt 很小时比直接数值积分更稳定。
+        // SO(3) 加速度积分的两个小角度工程近似。当前二阶项使用 phi*phi^T；
+        // 严格 Taylor 项应是 hat(phi)^2，因此还差 -||phi||^2*I 的各向同性项。
+        // 200 Hz 下该差异很小，现有长期回归保持稳定；若改成严格 J1/J2，应把
+        // 名义积分、误差转移和回归作为一项独立算法修改，不能在重构中静默替换。
         const Vec3 delta_ang = gyro_corr_ * dt;
         const Mat3_3 J1 = Mat3_3::Identity() + hat(delta_ang / 2.) + (delta_ang / 6) * delta_ang.transpose();
         const Mat3_3 J2 = 0.5 * Mat3_3::Identity() + hat(delta_ang / 6.) + (delta_ang / 24.) * delta_ang.transpose();

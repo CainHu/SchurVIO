@@ -94,7 +94,9 @@ namespace slam {
 
         Tus timestamp{0};
 
-        Quat orientation; // 全局坐标系到机体坐标系的姿态
+        // R_wi：把 IMU/机体系向量旋转到世界系。仿真与视觉模型都按
+        // p_w = R_wi p_i + p_wi 使用；不要把它解释成 R_iw。
+        Quat orientation;
         Vec3 position;    // 全局坐标系下的位置 (m)
         Vec3 velocity;    // 全局坐标系下的速度 (m/s)
 
@@ -150,7 +152,8 @@ namespace slam {
     struct AugState {
         Tus timestamp{0};
 
-        Quat orientation; // 全局坐标系到机体坐标系的姿态
+        // clone 保存对应相机时刻的 R_wi（IMU 系到世界系）和 p_wi。
+        Quat orientation;
         Vec3 position;    // 全局坐标系下的位置 (m)
 
         Mat6_6 cov;
@@ -175,6 +178,8 @@ namespace slam {
         constexpr static int P = Q + 3;
         constexpr static int SIZE = P + 3;
 
+        // R_ic 把相机系向量旋转到 IMU 系；t_ic 是“IMU 原点指向相机原点”
+        // 的向量，并在 IMU 系表达。因此 p_wc=p_wi+R_wi*t_ic。
         Quat q_ic = Quat::Identity();
         Vec3 t_ic = Vec3::Zero();
     };

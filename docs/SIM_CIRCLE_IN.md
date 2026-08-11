@@ -23,7 +23,7 @@ flowchart RL
 ## 主要验证目标
 
 - `VIOFrontendSimulator1` 的坐标轴/光轴约定是否与后端一致；
-- 长 track 下 Hll 的深度弱方向和 LDLT 跳过策略；
+- 长 track 下 Hll 的深度弱方向和带阈值伪逆策略；
 - 重复滑窗观测下 `uv_var` 是否过小、后验是否过度自信；
 - inward-looking 几何对三角化精度的改善。
 

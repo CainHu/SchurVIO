@@ -112,10 +112,16 @@ p_c=R_{wc}^T(p_f-p_{wc}),\qquad
 \begin{bmatrix}f_xx_c/z_c+c_x\\f_yy_c/z_c+c_y\end{bmatrix}+n_{pix}.
 $$
 
-代码先按像素边界和 $z_c>0.05\,\mathrm m$ 做可见性筛选，再把含噪像素转换成归一化
-coordinates before VIO. One-shot MSCKF/RD-VIO tracks use the normalized image variance converted directly from camera pixel noise:
-$\sigma_u^2=\sigma_{pix}^2/f_x^2$ and $\sigma_v^2=\sigma_{pix}^2/f_y^2$.
-`uv_var` retains the historical information-density meaning only for repeated-window modes. The multi-scenario script therefore skips the `uv_var` sweep for MSCKF/RD-VIO instead of producing duplicate rows.
+代码先按像素边界和 \(z_c>0.05\,\mathrm m\) 做可见性筛选，再把含噪像素转换成归一化
+坐标。一次性 MSCKF/RD-VIO 直接使用由像素噪声换算的归一化方差：
+
+\[
+\sigma_u^2=\sigma_{pix}^2/f_x^2,\qquad
+\sigma_v^2=\sigma_{pix}^2/f_y^2.
+\]
+
+`uv_var` 只在重复窗口对照中保留历史信息密度语义。因此 MSCKF/RD-VIO 下多场景
+脚本跳过 `uv_var` 扫描，避免生成标签不同但实际后验完全相同的重复行。
 
 特征几何、偏置随机游走、IMU 白噪声和图像噪声使用四个相互独立的固定随机数流。因此改变
 特征点数量不会改变 IMU 噪声，参数扫描的每一行也使用完全相同的输入随机序列，便于做
@@ -133,13 +139,17 @@ tools/run_multi_scenario_analysis.ps1 -Duration 30 -Features 600
 
 结果写入 `out/*.csv` 和 `out/report.html`。
 
-Long-duration stability regression:
+100 秒长时稳定性回归：
 
 ```powershell
 tools/run_multi_scenario_analysis.ps1 -Duration 100 -Features 600
 ```
 
-The default MSCKF configuration uses keyframe-only clone selection, retains 20 clones, and uses a 2-degree minimum triangulation parallax. The 2026-08-02 deterministic regression produced position RMSE values of 0.3443 m, 0.4179 m, 0.2013 m, and 0.6688 m for Circle-out, Circle-in, Helix-3D, and Stop-go, with zero reused or blocked observations.
+默认 MSCKF 使用 KeyframeOnly、保留 20 个 clone、一次性轨迹最小三角化视差 2°，并启用
+Hybrid 持久点与无深度旋转约束。2026-08-11 在当前算法端点重新运行后，Circle-out、
+Circle-in、Helix-3D、Stop-go 的位置 RMSE 分别为 0.3262、0.3124、0.0867、0.0604 m；
+四个场景的 reused 和 blocked 均为 0，neg_cov 均为 0。Stop-go 产生 5772 个无深度旋转
+约束。
 
 固定 MSCKF 后端的帧策略对比：
 

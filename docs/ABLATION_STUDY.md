@@ -9,10 +9,14 @@
 3. IMU 连续白噪声密度是否按正确规则离散化；
 4. 仿真真值中的 IMU 偏置是否随机游走。
 
-所有配置固定使用：Schur 路径、LDLT、`uv_var=1e-2`、过程噪声倍率 1、
+以下是引入一次性调度前的**历史严格消融**。所有配置固定使用：Schur 路径、LDLT、
+`uv_var=1e-2`、过程噪声倍率 1、
 `ESTIMATE_GRAVITY=false`、30 s、600 个特征点、相机 20 Hz、IMU 200 Hz，以及各场景
 固定且相互独立的随机数流。单因素配置相对 `abl_full` 只改变一项。`abl_old_pipeline`
 同时改变三项，仅检查交互效应，不参与单因素因果归因。
+
+这里的 `uv_var` 属于当时的重复窗口噪声语义；当前默认一次性 MSCKF 使用
+`triangulation_uv_std^2 * msckf_visual_noise_scale`，二者不能直接横向调参。
 
 ```mermaid
 flowchart TD

@@ -77,7 +77,8 @@ struct EKFState {
     // 系统状态
     Eigen::Vector3d position;    // 全局坐标系下的位置 (m)
     Eigen::Vector3d velocity;    // 全局坐标系下的速度 (m/s)
-    Eigen::Quaterniond orientation; // 全局坐标系到机体坐标系的姿态
+    // 机体/IMU 系到全局系；predict() 用它把去偏加速度旋转到世界系。
+    Eigen::Quaterniond orientation;
 
     // IMU零偏
     Eigen::Vector3d accel_bias;  // 加速度计零偏
@@ -548,4 +549,3 @@ private:
 };
 
 #endif // MULTI_SENSOR_EKF_H
-    

@@ -27,6 +27,7 @@ Landmark 后处理集中在 `eskf/schur_vins.cpp`。这种组织方式的问题�
 | `eskf/rdvio_scheduler.{h,cpp}` | 与后验解耦的 R/N 运动分类、RD-VIO 四 Case 和压窗计划 | `decideRDVIOFrame()`、`planRDVIOFrameRemovals()` |
 | `eskf/rdvio_constraints.{h,cpp}` | 无深度旋转约束和 RD-VIO 可选零平移约束 | `accumulateRDVIOConstraints()` |
 | `eskf/visual_update_scheduler.h` | 一次性/重复窗口视觉后验语义 | 编译期枚举与辅助函数 |
+| `eskf/landmark_parameterization.{h,cpp}` | 四种 3-DOF 点参数化、局部到世界增量和锚帧雅可比 | `linearizeLandmarkParameterization()` |
 
 ## 3. 调用流程
 
@@ -38,13 +39,15 @@ flowchart TD
     POLICY --> CLONE[pushFrame: clone 增广]
     CLONE --> VIS[updateVisual]
     VIS --> TRACK[轨迹筛选与消费]
-    TRACK --> ROT[低视差无深度旋转约束]
-    TRACK --> TRI[triangulateLandmark]
-    TRI --> LIN[重投影线性化]
+    TRACK --> SPLIT[持久 ID / 普通轨迹分流]
+    SPLIT --> PREP[普通轨迹三角化<br/>低视差旋转候选准备]
+    SPLIT -->|无普通轨迹| PUPDATE[已有持久点联合 EKF]
+    PREP --> PUPDATE
+    PUPDATE --> LIN[普通重投影与旋转约束线性化]
     LIN --> SCHUR[逐点 Schur 消元]
     SCHUR --> POST[序贯 Joseph 后验]
     POST --> MAP[Landmark 修正与候选评分]
-    MAP --> PERSIST[少量持久点延迟初始化]
+    MAP --> PERSIST[少量持久点条件初始化]
     TRACK --> ARCHIVE[丢失低视差轨迹摘要]
     ARCHIVE --> MAP
     MAP --> SHADOW[可选影子地图]
@@ -67,13 +70,14 @@ flowchart TD
 
 | 数学主题 | 源码 | 文档 |
 |---|---|---|
-| IMU 积分与协方差传播 | `schur_vins_imu.cpp` | [MATHEMATICAL_PIPELINE.md](MATHEMATICAL_PIPELINE.md) |
+| IMU 积分、联合协方差传播与 clone 增广 | `schur_vins_imu.cpp`、`schur_vins_visual.cpp` | [ESKF_STATE_PROPAGATION_AND_AUGMENTATION.md](ESKF_STATE_PROPAGATION_AND_AUGMENTATION.md)、[MATHEMATICAL_PIPELINE.md](MATHEMATICAL_PIPELINE.md) |
 | 三角化与初始协方差 | `schur_vins_triangulation.cpp` | [TRIANGULATION.md](TRIANGULATION.md) |
 | 帧选择与轨迹生命周期 | `frame_selection_policy.cpp`、`schur_vins_visual.cpp` | [VISUAL_UPDATE_SCHEDULING.md](VISUAL_UPDATE_SCHEDULING.md)、[KEYFRAME_REDUNDANCY_POLICY.md](KEYFRAME_REDUNDANCY_POLICY.md) |
 | 混合 MSCKF 状态扩维、筛选、晋升和联合更新 | `schur_vins_visual.cpp`、`schur_vins_persistent.cpp`、`schur_vins_imu.cpp` | [HYBRID_MSCKF.md](HYBRID_MSCKF.md) |
 | 无深度纯旋转约束 | `rdvio_constraints.cpp`、`rdvio_scheduler.cpp`、`schur_vins_visual.cpp` | [DEPTH_FREE_ROTATION_CONSTRAINT.md](DEPTH_FREE_ROTATION_CONSTRAINT.md) |
 | 低视差延迟与轨迹摘要 | `schur_vins_visual.cpp`、`schur_vins_track_archive.cpp` | [HYBRID_MSCKF.md](HYBRID_MSCKF.md)、[RDVIO_SCHEDULING.md](RDVIO_SCHEDULING.md) |
-| Schur、有效子空间与 Joseph 更新 | `schur_vins_visual.cpp` | [MATHEMATICAL_PIPELINE.md](MATHEMATICAL_PIPELINE.md) |
+| Schur、有效子空间、视觉噪声与 Joseph 更新 | `schur_vins_visual.cpp` | [MATHEMATICAL_PIPELINE.md](MATHEMATICAL_PIPELINE.md)、[VISUAL_RESIDUAL_NOISE_MODEL.md](VISUAL_RESIDUAL_NOISE_MODEL.md) |
+| 从基线按依赖重实现全部阶段 | 上述全部模块 | [REIMPLEMENTATION_GUIDE_137BFEA_TO_HEAD.md](REIMPLEMENTATION_GUIDE_137BFEA_TO_HEAD.md) |
 | 独立影子地图与候选/持久点边界 | `schur_vins_persistent.cpp`、`schur_vins_shadow.cpp` | [SHADOW_LANDMARKS.md](SHADOW_LANDMARKS.md)、[HYBRID_MSCKF.md](HYBRID_MSCKF.md) |
 
 ## 6. 维护约定

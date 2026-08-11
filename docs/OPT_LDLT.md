@@ -2,8 +2,9 @@
 
 对应分支：`ldlt_experiment`（从 `optimized` 切出）
 
-> 本文的 `198 = INS(18) + 30×6` 是历史性能配置。当前默认关闭重力估计，矩阵为
-> `195 = 15 + 30×6`；LDLT 相对特征分解的数学等价性和性能方向不受这 3 维差异影响。
+> 本文的 `198 = INS(18) + 30×6`、29 个活跃 clone 和 31 个结构零方向都是历史
+> 性能配置。当前默认矩阵为 `195 = 15 + 30×6`，通常只活跃 20–21 个 clone，
+> 因此接近零方向显著更多；LDLT 的数学等价性不变，但绝对计数不能沿用 31。
 
 ## 结论
 
@@ -62,7 +63,7 @@ flowchart TD
     M -- "Eigen" --> E["Hpp = V diag(lambda) V^T"]
     M -- "LDLT 默认" --> L["P Hpp P^T = L D L^T"]
     E --> TE["lambda_i > tau lambda_max"]
-    L --> TL["D_i > tau max abs(D)"]
+    L --> TL["D_i > tau max(D)"]
     TE --> PE["h_i=V_i, z_i=(V^T gp)_i/lambda_i"]
     TL --> PL["三角回代得到 h_i 与 z_i"]
     PE --> K["逐方向 Joseph EKF 更新"]
@@ -97,8 +98,9 @@ flowchart TD
 > 详见 **[HPP_NULLSPACE.md](HPP_NULLSPACE.md)**。
 
 `Hpp` 半正定且秩亏，对 LDLT 是良性的：秩亏的对称半正定矩阵，
-LDLT 会给出 `D` 中约 31 个 ≈0 的元素，与特征分解给出 31 个 ≈0 特征值
-是同一件事。Eigen 的 LDLT 带主元置换，对半正定矩阵数值稳定。
+LDLT 会在 `D` 中给出相应近零主元。当前数量应按活跃 clone 数和固定空槽动态
+解释；D 主元也不是特征值，所以两者计数不要求逐位相等。Eigen 的 LDLT 带主元置换，
+适合当前半正定系统。
 
 ### 实现上的一个差别
 
@@ -131,7 +133,7 @@ constexpr static bool USE_LDLT_FOR_HPP = true;   // false = 回到特征分解
 本文档早先版本把"18 % 的方向被判为零空间"列为遗留隐患，怀疑 `Hll` 病态
 或 Schur 补数值不稳。**后续测量表明这个怀疑不成立**，已删除该结论。
 
-真实情况：`Hpp` 的零空间恒为 **31 维**，完全由问题结构决定：
+历史真实情况：当时 `Hpp` 的零空间稳定为 **31 维**，完全由问题结构决定：
 
 ```
 31 = INS 18 维（视觉量测根本不涉及 INS 状态）
@@ -139,8 +141,10 @@ constexpr static bool USE_LDLT_FOR_HPP = true;   // false = 回到特征分解
    +  7 维（纯视觉 gauge：全局平移3 + 旋转3 + 尺度1）
 ```
 
-与 landmark 数量无关（实测 306~331 个 landmark，零空间始终 31 维），
-也不是数值缺陷。完整推导和实测证据见 **[HPP_NULLSPACE.md](HPP_NULLSPACE.md)**。
+与 landmark 数量无关（实测 306~331 个 landmark，零空间始终 31 维），也不是数值缺陷。
+当前默认 \(k=20\) 或 21 个活跃 clone 时，典型结构值改为
+\(15+6(30-k)+7\)，约 82 或 76。完整推导和实测证据见
+**[HPP_NULLSPACE.md](HPP_NULLSPACE.md)**。
 
 ## 相关
 

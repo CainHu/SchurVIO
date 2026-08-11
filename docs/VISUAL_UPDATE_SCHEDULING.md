@@ -250,22 +250,32 @@ tools/run_frame_policy_analysis.ps1 -Duration 100 -Features 600 -RetainedClones 
 
 这个短实验只用于验证调度和信息生命周期，不能按位置 RMSE 给算法排名。Legacy/VINS-Mono 风格的重复后验会人为增强信息，而且为保留历史行为仍使用 `uv_var/dt` 信息密度；MSCKF/SchurVINS 使用归一化图像观测方差。不同噪声语义下的单个 RMSE 不是严格同变量消融。
 
-### 100-second starvation regression
+### 100 秒视觉饥饿回归
 
-The first one-shot MSCKF default combined a 10-clone track limit with the 8-degree parallax gate inherited from persistent-window experiments. At 20 Hz, tracks were consumed after about 0.5 s before most low-parallax features became usable.
+第一版一次性 MSCKF 把 10-clone 轨迹上限与重复窗口实验遗留的 8° 三角化门限组合起来。
+20 Hz 下轨迹约 0.5 s 就会触窗并永久结算，多数低视差特征尚未形成可用深度。
 
-| Scenario | Old RMSE / m | Fixed RMSE / m | Fixed max error / m | Drop rate | Mean NIS |
+下表是修复当时、尚未加入后续 Hybrid 持久点的历史对比：
+
+| 场景 | 旧 RMSE / m | 修复后 RMSE / m | 修复后最大误差 / m | 丢弃率 | mean NIS |
 |---|---:|---:|---:|---:|---:|
 | Circle-out | 238.9374 | 0.6409 | 1.7504 | 3.4% | 0.981 |
 | Circle-in | 70.0672 | 2.8183 | 4.5911 | 0.1% | 0.994 |
 | Helix-3D | 1.8628 | 0.6934 | 1.0568 | 0.0% | 0.950 |
 | Stop-go | 409.8012 | 0.4838 | 1.0600 | 42.1% | 0.930 |
 
-The fixed default retains 20 clones and uses a 2-degree one-shot parallax gate. All four 100 s / 600 feature runs keep `reused=0` and `blocked=0`. `VinsAnalysis` now warns when more than 80% of one-shot tracks are dropped before an update.
+修复后的默认保留 20 个 clone，并对一次性轨迹使用 2° 视差门限。四个 100 s / 600 点场景
+均保持 `reused=0`、`blocked=0`；若超过 80% 轨迹未更新便被丢弃，分析程序会报警。
 
-The previous Legacy result was numerically stable but reused about 5.46 million historical observations and had mean NIS near 0.001, so it is not a valid replacement for the corrected one-shot lifecycle.
+旧 Legacy 结果虽然数值稳定，却重复使用约 546 万个历史像素，mean NIS 接近 0.001，不能
+替代正确的一次性生命周期。
 
-### 固定 MSCKF 后端的帧策略消融
+2026-08-11 在当前 Hybrid MSCKF 算法端点重新回归，Circle-out、Circle-in、Helix-3D、
+Stop-go 的位置 RMSE 已分别为 0.3262、0.3124、0.0867、0.0604 m，四场景仍保持
+`reused=0`、`blocked=0`、`neg_cov=0`。因此用户观察到的 100 秒发散属于上述
+历史中间版本，当前 HEAD 未复现。
+
+### 历史固定 MSCKF 后端的帧策略消融
 
 条件：100 s、600 点、WORLD_XYZ、20 retained clones、2° 三角化门限，所有策略保持 `reused=0`、`blocked=0`。
 
@@ -277,7 +287,10 @@ The previous Legacy result was numerically stable but reused about 5.46 million 
 | VINS-Mono deletion | 8.4877 | 81.4191 | 8.2053 | 818.0468 | 657.2634 | 314.6845 | 96.8% |
 | Keyframe-priority | 305.8914 | 331.3672 | 17.2669 | 1138.3720 | 460.4144 | 450.6624 | 99.4% |
 
-因此默认 MSCKF 改用 Keyframe-only，而不是 FIFO。它在四个常规场景的平均 RMSE 为 0.4081 m，已接近此前 3° 调度实验中的 Legacy 参考 0.3698 m；两者不是严格同噪声/同门限比较，但新默认同时保持严格的一次性量测生命周期。VINS-Mono/Keyframe-priority 在 MSCKF 下的失败不是“关键帧思想无效”，而是它们持续删除次新/时间帧，使尚未形成足够基线的 one-shot 轨迹提前触碰边界并被消费。
+这组实验发生在 Hybrid 持久点加入之前，用于决定默认 MSCKF 改用 Keyframe-only 而不是
+FIFO；绝对 RMSE 不应与当前报告直接拼表。VINS-Mono/Keyframe-priority 在 MSCKF 下的失败
+不是“关键帧思想无效”，而是它们持续删除次新/时间帧，使尚未形成足够基线的一次性轨迹
+提前触碰边界并被消费。
 
 ### VINS-Mono 三角化重试修复
 

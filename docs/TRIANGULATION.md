@@ -37,8 +37,17 @@ J_l=J_\pi R_{wc}^T.
 \sigma_{uv}=\sigma_{px}/f\approx 0.0054.
 ```
 
-这对应 `triangulation_uv_std=0.0054`，不能直接使用 Schur 更新中的 `uv_var`；后者是
-序贯伪量测噪声密度，更新时还会除以信息特征值和 `dt`。
+这对应 `triangulation_uv_std=0.0054`。当前一次性 MSCKF/RD-VIO 路径统一以
+
+```math
+R_{uv}=\texttt{triangulation\_uv\_std}^2
+       \max(\texttt{msckf\_visual\_noise\_scale},1)I_2
+```
+
+作为普通轨迹原始残差方差；Schur 特征方向上的伪量测方差还会按该方向的信息特征值缩放，
+但**不除以**相机周期。`uv_var/dt` 只属于 Legacy/VINS-Mono 等重复窗口历史对照，不能拿来
+解释默认 MSCKF。完整的调度分支语义见
+[视觉残差与噪声模型](VISUAL_RESIDUAL_NOISE_MODEL.md)。
 
 ## 2. 射线最小二乘初值
 
@@ -63,8 +72,9 @@ e_i=(I-d_i d_i^T)(p_w-C_i).
 \theta_{max}=\max_{i,j}\arccos(\operatorname{clamp}(d_i^Td_j,-1,1)),
 ```
 
-默认要求 `theta_max >= 8°`，并检查 `H_ray` 的最小特征值和条件数。使用所有观测对而
-不只比较首末帧，可正确处理轨迹回头和中间观测中断。
+门限由调度器决定：当前默认 MSCKF/RD-VIO 为 2°，Legacy/SchurVINS/VINS-Mono
+兼容模式为 8°。此外还检查 `H_ray` 的最小特征值和条件数。使用所有观测对而不只比较
+首末帧，可正确处理轨迹回头和中间观测中断。
 
 ## 3. 带位姿不确定度的鲁棒 Gauss–Newton
 
@@ -166,7 +176,7 @@ flowchart TD
 | 状态 | 触发条件 | 后续行为 |
 |---|---|---|
 | `insufficient_views` | 有效关键帧观测少于 2 | 等新观测 |
-| `low_parallax` | 最大视差小于配置门限（默认 8°） | 等基线增大 |
+| `low_parallax` | 最大视差小于调度器门限（默认 MSCKF 为 2°） | 等基线增大 |
 | `ill_conditioned` | 射线/重投影信息矩阵病态 | 等几何改善 |
 | `negative_depth` | 任一参与视图深度小于 0.05 m | 拒绝本次初始化 |
 | `high_reprojection_error` | 归一化 RMSE 大于 0.03 | 拒绝疑似误匹配/坏初值 |
@@ -208,12 +218,20 @@ $$
 
 以及条件点协方差向世界系传播时使用的绝对锚点协方差。这样既利用了对深度最敏感的基线，也消除了结果对哈希遍历顺序的依赖。
 
-## Scheduler-aware parallax default
+## 9. 调度感知的视差默认值
 
-The earlier 30 s Circle-out sweep selected 8 degrees under a persistent-window measurement lifecycle. That threshold cannot be transferred unchanged to one-shot MSCKF tracks: once a track reaches the clone boundary, rejecting it permanently discards the measurement batch.
+早期 30 秒 Circle-out 扫描在持续窗口量测生命周期下选择了 8°。该门限不能原样搬到
+一次性 MSCKF：轨迹触及 clone 边界后若被拒绝，整批像素会永久丢弃。
 
-The current defaults are 2 degrees for MSCKF/RD-VIO and 8 degrees for the historical Legacy/SchurVINS/VINS-Mono comparison modes. An explicit command-line value still overrides the scheduler default. MSCKF also retains 20 rather than 10 clones, giving about one second of baseline at 20 Hz.
+当前 MSCKF/RD-VIO 默认使用 2°，Legacy/SchurVINS/VINS-Mono 兼容模式仍保留 8°；
+显式命令行值可以覆盖调度默认值。一次性路径还把 clone 预算从 10 增至 20，在 20 Hz 下
+提供约 1 秒基线。
 
-In the 100 s / 600 feature Circle-out regression, 10 clones plus 8 degrees accepted only 488 of 20739 triangulation candidates and produced 238.94 m position RMSE. The corrected 20-clone plus 2-degree configuration accepted 10342 of 10680 candidates and reduced RMSE to 0.64 m. Reprojection, positive-depth, conditioning, and position-uncertainty gates still reject weak geometry.
+历史 100 秒 / 600 点 Circle-out 回归中，10 clone + 8° 只接受 488/20739 个三角化候选，
+位置 RMSE 达 238.94 m；修正为 20 clone + 2° 后接受 10342/10680 个候选，RMSE 降到
+约 0.64 m。后续 Hybrid MSCKF 的 2026-08-11 当前回归进一步降到 0.3262 m。
+重投影、正深度、条件数和位置不确定度门限仍继续拒绝弱几何，降低视差门限并不等于无条件
+接受所有点。
 
-扫描可通过 `tools/run_triangulation_threshold_analysis.ps1` 复现，汇总写入 `out/triangulation_threshold_summary.csv`。
+扫描可通过 `tools/run_triangulation_threshold_analysis.ps1` 复现，汇总写入
+`out/triangulation_threshold_summary.csv`。

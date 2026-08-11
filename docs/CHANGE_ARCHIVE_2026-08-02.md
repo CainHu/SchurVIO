@@ -7,7 +7,8 @@
 - `USE_SCHUR` 路径；
 - `MSCKF` 一次性轨迹调度；
 - `WORLD_XYZ` 三自由度 Landmark 参数化；
-- `Hpp/Hll` 默认使用 LDLT，并保留特征分解开关；
+- `Hpp` 默认使用 LDLT 并保留特征分解开关；Schur 的 3×3 `Hll` 使用带阈值
+  特征伪逆，旧 Independent EKF 消融另保留 Hll LDLT 开关；
 - FEJ 可观性约束开启，硬投影实验关闭；
 - 重力和相机-IMU 外参默认不加入状态，`J_ext` 代码继续保留并由编译期分支屏蔽。
 
@@ -248,3 +249,50 @@ RD-VIO 调度和源码注释中的纯旋转内容整理为独立推导：
 
 `README.md`、`SOURCE_LAYOUT.md`、`HYBRID_MSCKF.md`、`RDVIO_SCHEDULING.md` 和
 `VISUAL_UPDATE_SCHEDULING.md` 已统一链接到该专题。本次仅调整文档，不改变纯旋转约束实现。
+
+## 2026-08-11：数学文档复核与重实现路线
+
+本轮仅修改文档和坐标含义注释，不改变算法参数、矩阵装配或浮点运算顺序。复核范围以
+Windows 工程 `E:\GithubProject\SchurVIO` 和 SchurVIO-Pro 对话中的 Windows 演进为准，
+不包含后续 WSL 迁移改动。
+
+新增：
+
+- [ESKF_STATE_PROPAGATION_AND_AUGMENTATION.md](ESKF_STATE_PROPAGATION_AND_AUGMENTATION.md)：
+  明确 \(R_{wi}/R_{ic}/t_{ic}\)、左乘误差、当前 J1/J2 工程近似、误差转移、对角 Qd
+  近似、联合 cross covariance、固定槽 clone 增广和未显式实现的 reset Jacobian；
+- [VISUAL_RESIDUAL_NOISE_MODEL.md](VISUAL_RESIDUAL_NOISE_MODEL.md)：
+  区分默认一次性 MSCKF 的归一化单帧方差、持久点 64 倍长期方差和历史
+  `uv_var/dt` 信息密度；
+- [REIMPLEMENTATION_GUIDE_137BFEA_TO_HEAD.md](REIMPLEMENTATION_GUIDE_137BFEA_TO_HEAD.md)：
+  从提交 `137bfeada23c123e8` 到算法端点 `ebab4a0` 的分阶段重实现说明，
+  以问题、公式、流程图、不变量和验收为主，附完整提交映射。
+
+同步更正：
+
+- 当前默认保留 20 个 clone，而固定物理容量仍为 30；Hpp 典型结构零空间应按
+  \(15+6(30-k)+7\) 计算，历史 31 只属于 18 维 INS、29/30 活跃 clone；
+- `USE_LDLT_FOR_HLL` 只控制旧 Independent EKF 消融，默认 Schur 的 Hll 伪逆仍用
+  3×3 特征分解显式判秩；
+- 当前 Hybrid MSCKF 的普通轨迹不读取 `uv_var`，旧噪声扫描不能当作默认像素标定；
+- 数学总流程补入已有持久点先更新、普通 Schur 后更新、条件初始化新持久点的真实顺序；
+- `common.h` 中姿态旧注释由“世界到机体”修正为实际的“IMU 到世界”。
+
+### 当前 100 秒长期回归
+
+在 Release 下重新运行：
+
+~~~powershell
+tools/run_multi_scenario_analysis.ps1 -Duration 100 -Features 600
+~~~
+
+| 场景 | 位置 RMSE | 最大位置误差 | mean NIS | neg_cov |
+|---|---:|---:|---:|---:|
+| Circle-out | 0.3262 m | 0.6316 m | 0.982 | 0 |
+| Circle-in | 0.3124 m | 0.6157 m | 0.955 | 0 |
+| Helix-3D | 0.0867 m | 0.3025 m | 0.921 | 0 |
+| Stop-go | 0.0604 m | 0.1543 m | 0.602 | 0 |
+
+四场景 reused=0、blocked=0。Stop-go 触发 5772 个无深度旋转约束。当前 HEAD 没有复现
+“100 秒基本都发散”；历史发散根因仍是 10 clone 与 8° 一次性三角化门限共同造成视觉
+饥饿，修复为 20 clone + 2° 后已消除。

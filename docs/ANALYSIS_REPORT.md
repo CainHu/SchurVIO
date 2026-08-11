@@ -1,7 +1,8 @@
 # SchurVIO 视觉后验、噪声参数与多场景分析
 
-配套交互报告：`out/report.html`。当前分析统一使用 `USE_SCHUR`，`Hpp/Hll` 默认 LDLT，
-外参雅可比保留但由 `ESTIMATE_EXTRINSIC=false` 屏蔽。
+配套交互报告：`out/report.html`。当前分析统一使用 `USE_SCHUR`；`Hpp` 默认
+LDLT，Schur 消元中的 3×3 `Hll` 使用带阈值特征伪逆。外参雅可比保留但由
+`ESTIMATE_EXTRINSIC=false` 屏蔽。
 
 ## 1. 生成方法
 
@@ -20,44 +21,50 @@ tools/run_multi_scenario_analysis.ps1 -Duration 30 -Features 600
 - 三角化成功率、误差、视差、条件数与耗时；
 - landmark 最终 NEES、95% 置信椭球覆盖率和解耦影子地图误差；
 - 一致硬投影的零空间泄漏、秩、删除梯度能量和耗时；
-- `uv_var` 和过程噪声倍率扫描。
+- 过程噪声倍率扫描，以及兼容模式历史 `uv_var` 扫描；一次性 MSCKF 会跳过无效的
+  `uv_var` 重复行。
 
 场景定义和传感器噪声见 [SIMULATION_SCENARIOS.md](SIMULATION_SCENARIOS.md)。
 
-## 2. `uv_var` 的含义与默认值
+## 2. 当前视觉噪声与历史 `uv_var`
 
-Schur 路径先把 landmark 消元，得到状态信息矩阵 `Hpp`。对每个有效分解方向
-`Hpp h_i=d_i h_i`，序贯伪量测使用
+当前默认是一次性 Hybrid MSCKF。普通轨迹每个像素样本最多使用一次，公共量测方差为
 
-```math
-R_i=\frac{\texttt{uv_var}}{d_i\,dt}.
-```
+\[
+\sigma_v^2=
+\texttt{triangulation\_uv\_std}^2
+\max(\texttt{msckf\_visual\_noise\_scale},1).
+\]
 
-因此 `uv_var` 不是像素方差，也不是归一化像平面单帧方差。旧默认值 `400` 会让视觉后验
-极度保守。归一化图像噪声约为 `(1/184.75)^2=2.93e-5`，但由于滑窗重复观测、线性化误差
-和 Schur 序贯模型，不能把该单帧方差直接代入。
+仿真中
+\(\texttt{triangulation\_uv\_std}\approx1/184.75=0.0054\)，单轴归一化方差约
+\(2.93\times10^{-5}\)。对 Hpp 的有效信息方向 \(d_i\)，序贯伪量测使用
 
-### 含真实 IMU/图像噪声的多阶段扫描
+\[
+R_i=\frac{\sigma_v^2}{d_i}.
+\]
 
-15 秒、300 点快速扫描中，加入正深度/重投影硬门限和 3-sigma Huber 后，`1e-4` 在四类
-轨迹上都未发散。但扩展到 30 秒、600 点后，滑窗被充分填满并经历更多 landmark 重用，
-`1e-4` 在 Circle-out 上出现约 `6.23 m` 的位置 RMSE。短测试据此被判定不足，不能作为
-默认参数依据。
+这里不除以相机周期；同一幅图像的样本方差不会因相机频率提高而自动下降。
 
-30 秒 Circle-out 长时扫描的关键结果为：
+`uv_var=1e-2` 只保留给 Legacy/VINS-Mono 等历史重复窗口对照，其旧语义是
 
-| `uv_var` | 位置 RMSE | 最大位置误差 | 判断 |
-|---:|---:|---:|---|
-| `1e-4` | 1.87 m | 3.42 m | 过度相信视觉伪量测 |
-| `1e-3` | 2.28 m | 3.84 m | 仍有较大漂移 |
-| `3e-3` | 1.24 m | 2.11 m | 接近稳定区 |
-| `1e-2` | **1.20 m** | 2.12 m | 长时 RMSE 最低 |
-| `3e-2` | 1.24 m | 2.11 m | 稍偏保守 |
-| `1e-1` | 1.31 m | **2.04 m** | 视觉约束偏弱 |
+\[
+R_i=\frac{\texttt{uv\_var}}{d_i\Delta t}.
+\]
 
-默认最终采用 `uv_var=1e-2`。这不是每个场景的单独最优值，而是长时最坏误差与视觉约束
-强度的稳健折中。Circle-out/Circle-in 的绝对位置仍会沿 VIO 全局平移 gauge 漂移，所以
-报告同时增加 1 秒相对位移误差；真实数据仍应按重投影残差、数据关联质量和 NIS 标定。
+所以 `uv_var` 不是当前默认 MSCKF 的像素方差。一次性模式下扫描它不会改变普通轨迹
+后验，多场景脚本会主动跳过这类无效扫描。
+
+早期 30 秒 Circle-out 的 `uv_var` 扫描仍有历史价值：它证明重复窗口模式下短测试会
+掩盖过度自信，最终在该旧语义中选择了 `1e-2`。但这些 RMSE 不能用于标定当前一次性
+MSCKF。当前还要单独考虑已晋升持久点；它们跨关键帧重复观测，使用
+
+\[
+R_{persistent}=64\,\sigma_v^2I/w
+\]
+
+的保守方差和二维 NIS 门控。完整分层见
+[VISUAL_RESIDUAL_NOISE_MODEL.md](VISUAL_RESIDUAL_NOISE_MODEL.md)。
 
 ## 3. Schur 视觉鲁棒门控
 
@@ -69,10 +76,10 @@ R_i=\frac{\texttt{uv_var}}{d_i\,dt}.
 4. 一个 landmark 至少保留两个有效观测，否则不参与 Schur 消元和更新。
 
 Huber 权重同时作用于 `Hpp/Hll/Hpl/gp/gl`，保证正规方程内部一致。日志记录每次更新的
-`obs_used/obs_downweighted/obs_rejected`，报告按场景显示降权率和硬拒绝率。门控稳定了旧扫描
-中 Helix-3D 的偶发尖峰，但无法让很小的 `uv_var` 在长时滑窗中可靠，因此量测噪声仍需
-保留足够裕量。仅剩一条有效观测的 landmark 不写入 Hessian；第一条先暂存，第二条到来后
-再一起累计，避免把未消元点错误当成固定地图约束。
+`obs_used/obs_downweighted/obs_rejected`，报告按场景显示降权率和硬拒绝率。门控稳定了
+Helix-3D 的偶发尖峰，但不能替代正确的单帧方差、一次性生命周期和持久点长期噪声模型。
+仅剩一条有效观测的 landmark 不写入 Hessian；第一条先暂存，第二条到来后再一起累计，
+避免把未消元点错误当成固定地图约束。
 
 ## 4. IMU 噪声离散化与过程噪声
 
@@ -96,10 +103,18 @@ Huber 权重同时作用于 `Hpp/Hll/Hpl/gp/gl`，保证正规方程内部一致
 | accel bias RW | 0.0005 | 0.0010 | 2 倍裕量 |
 | 位置直接 RW | — | 0.0003 | 小量模型裕度 |
 
-在长时 `uv_var=1e-2` 下，Circle-out 的 `proc_scale={0.5,1,2}` 位置 RMSE 分别约为
-`{1.64,1.20,1.00} m`，但 Circle-in 从 scale=1 的 `0.62 m` 变为 scale=2 的
-`0.69 m`。默认仍保留 `proc_scale=1`，不为单条轨迹重复放大过程噪声。真实 IMU 应以
-Allan 方差为主，仿真扫描只验证数量级和稳定区间。
+早期重复窗口模式曾得到另一组过程噪声敏感度，它只应作为历史记录。2026-08-11 当前默认
+Hybrid MSCKF 的 100 秒 Circle-out 严格扫描为：
+
+| `proc_scale` | 位置 RMSE | 最大位置误差 |
+|---:|---:|---:|
+| 0.5 | 0.3344 m | 0.6811 m |
+| 1.0 | **0.3262 m** | **0.6316 m** |
+| 2.0 | 0.3772 m | 0.6845 m |
+
+默认保留 `proc_scale=1`。这只是确定性仿真中的稳定区间；真实 IMU 应以 Allan 方差为
+主。当前 Qd 还是直接状态空间对角密度近似，而不是完整 \(GQ_cG^T\) 离散积分，详见 ESKF
+传播专题。
 
 ## 5. 为什么关闭重力估计
 
@@ -177,18 +192,21 @@ $$
 
 报告中的多场景汇总正是为避免只凭一条“好看”的圆周轨迹判断算法正确。
 
-### 最终 30 秒 / 600 点基线
+### 当前默认 100 秒 / 600 点基线
 
-| 场景 | 绝对位置 RMSE | 1 s 相对位移 RMSE | 最大位置误差 | 后验改善率 | Huber 降权 | 硬拒绝 |
+2026-08-11 重新构建并运行默认 Schur + LDLT + MSCKF + AUTO(KeyframeOnly) +
+WORLD_XYZ + Hybrid 配置：
+
+| 场景 | 位置 RMSE | 最大位置误差 | 速度 RMSE | 姿态 RMSE | mean NEES | mean NIS |
 |---|---:|---:|---:|---:|---:|---:|
-| Circle-out | 1.203 m | 0.241 m | 2.119 m | 39.0% | 46.85% | 15.89% |
-| Circle-in | 0.621 m | 0.151 m | 1.365 m | 72.1% | 26.50% | 4.56% |
-| Helix-3D | 0.058 m | 0.023 m | 0.098 m | 64.1% | 4.37% | 0.007% |
-| Stop-go | 0.114 m | 0.051 m | 0.207 m | 74.0% | 4.92% | 0.010% |
+| Circle-out | 0.3262 m | 0.6316 m | 0.0585 | 0.00423 | 1.235 | 0.982 |
+| Circle-in | 0.3124 m | 0.6157 m | 0.0531 | 0.00431 | 0.986 | 0.955 |
+| Helix-3D | 0.0867 m | 0.3025 m | 0.0492 | 0.00413 | 0.449 | 0.921 |
+| Stop-go | 0.0604 m | 0.1543 m | 0.0581 | 0.00578 | 0.588 | 0.602 |
 
-Circle-out/Circle-in 的绝对误差明显大于局部相对误差，符合平面圆周轨迹下全局平移 gauge
-和弱激励累积。Circle-out 的降权/拒绝比例仍偏高，说明短 track、重三角化与滑窗线性化是
-当前前端/后端最值得继续改进的部分；报告保留该诊断，不用放宽门限掩盖问题。
+四个场景均满足 neg_cov=0、reused=0、blocked=0。Stop-go 触发 5772 个无深度旋转约束，
+说明纯旋转/低视差降级路径确实参与了长期回归，而不是只在文档中存在。当前
+out/report.html 对应这组结果；早期 30 秒重复窗口表不再作为默认基线。
 
 ## 7. 协方差负值结论
 
@@ -200,10 +218,16 @@ P'_{ii}=AP_{ii}A^T+Q,\qquad P'_{ic}=AP_{ic},\qquad
 P'_{ci}=P_{ic}'^T,\qquad P'_{cc}=P_{cc}.
 ```
 
-三条预测实现路径现均补全该传播；默认使用不显式构造 `A` 的优化分块路径：
-`CONFIG_DEBUG=false`、`USE_STABLE_COVARIANCE_PREDICTION=false`。视觉标量更新保留 Joseph
-等价形式。多场景汇总中的 `neg_cov` 必须为 0；机器精度量级的小负特征值需按相对阈值判断，
-不能与真实不定混为一谈。
+三条固定尺寸预测实现路径现均补全该传播；默认使用不显式构造 `A` 的优化分块路径：
+`CONFIG_DEBUG=false`、`USE_STABLE_COVARIANCE_PREDICTION=false`。已有持久点使协方差
+动态扩维时，代码自动使用局部 15×15 的 A 同时传播全部 \(P_{xL}\)。视觉标量更新保留
+Joseph 等价形式。多场景汇总中的 `neg_cov` 必须为 0；机器精度量级的小负特征值需按
+相对阈值判断，不能与真实不定混为一谈。
+
+当前姿态误差注入后尚未显式应用 reset Jacobian，采用小修正下 \(G_{reset}\approx I\)
+的近似。它不是本次负协方差修复的根因，但属于后续若提高严格一致性时需要单独验证的边界。
+完整传播、增广和 reset 推导见
+[ESKF_STATE_PROPAGATION_AND_AUGMENTATION.md](ESKF_STATE_PROPAGATION_AND_AUGMENTATION.md)。
 
 ## 8. 三角化与真值隔离
 
@@ -219,8 +243,12 @@ clone 协方差的鲁棒重投影优化、质量门限和初始 landmark 协方�
 - [TRIANGULATION.md](TRIANGULATION.md)：多视图三角化与初始协方差
 - [ABLATION_STUDY.md](ABLATION_STUDY.md)：24 组严格单因素/组合消融、SE(3) 对齐 ATE 与 1 秒 RPE
 - [OPT_SCHUR_PATH.md](OPT_SCHUR_PATH.md)：Schur 性能优化
-- [OPT_LDLT.md](OPT_LDLT.md)：Hpp/Hll LDLT 开关与验证
+- [OPT_LDLT.md](OPT_LDLT.md)：Hpp LDLT 开关、历史性能与退化验证
 - [HPP_NULLSPACE.md](HPP_NULLSPACE.md)：Hpp 结构性零空间
 - [HLL_STRUCTURE.md](HLL_STRUCTURE.md)：landmark 深度弱方向
 - [CONSISTENT_SUBSPACE_AND_LANDMARK_COVARIANCE.md](CONSISTENT_SUBSPACE_AND_LANDMARK_COVARIANCE.md)：
   `Hll/Hpp/gp` 同域投影、landmark NEES/覆盖率、协方差膨胀与影子地图严格实验
+- [VISUAL_RESIDUAL_NOISE_MODEL.md](VISUAL_RESIDUAL_NOISE_MODEL.md)：当前 MSCKF、持久点与历史
+  `uv_var` 的三种噪声语义
+- [ESKF_STATE_PROPAGATION_AND_AUGMENTATION.md](ESKF_STATE_PROPAGATION_AND_AUGMENTATION.md)：
+  坐标、传播、增广、Joseph 与 reset 边界

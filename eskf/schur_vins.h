@@ -54,9 +54,10 @@ namespace slam {
     // 对比数据见 docs/OPT_LDLT.md。
     constexpr static bool USE_LDLT_FOR_HPP = true;
 
-    // Hll (每个 landmark 的 3x3 块) 的分解方式，含义同上。
-    // 注意 Hll 恒有 1 个接近 0 的特征值(深度/视线方向)，
-    // 无论用哪种分解都必须做零空间过滤。详见 docs/HLL_STRUCTURE.md。
+    // 旧 Independent EKF 后处理里，每个 landmark 3x3 Hll 的分解方式。
+    // 低视差时最弱方向通常接近视线/深度方向，但充分平移基线下 Hll 可以满秩；
+    // 无论用哪种分解都必须按相对尺度判秩。默认 Schur 消元固定使用带阈值
+    // 特征伪逆，不受这个宏控制。详见 docs/HLL_STRUCTURE.md。
     constexpr static bool USE_LDLT_FOR_HLL = true;
 
     // 联合协方差的实现方式：true 显式构造 A；false 按 A 的分块结构传播，
@@ -317,9 +318,9 @@ namespace slam {
         static_assert(framePolicyRetainedCloneCount(frame_selection_policy) < WIN_SIZE,
                       "frame policy must leave one slot for the incoming clone");
 
-        // Schur 序贯伪量测的噪声密度。更新中使用 R_i=uv_var/(d_i*dt)，
-        // 因此它不是像素方差。30 s / 600 点四场景长时扫描后取 1e-2：
-        // 1e-4 在滑窗充分运行后会放大线性化/gauge 漂移，1e-2 的最坏误差更稳健。
+        // Legacy/VINS-Mono 重复窗口对照的历史噪声密度；这些路径使用
+        // R_i=uv_var/(d_i*dt)，所以它不是像素方差。默认一次性 MSCKF 不读取它。
+        // 30 s / 600 点旧四场景扫描取 1e-2，用于保留可复现的历史行为。
         TYPE uv_var = TYPE(1e-2);
         // MSCKF 一次性轨迹对应真实像素样本批次，其协方差为
         // triangulation_uv_std^2 乘以该鲁棒缩放，不按相机 dt 重复积分。
@@ -336,12 +337,13 @@ namespace slam {
         Tus vins_mono_max_keyframe_interval_us = 1000000;
         // 过程噪声整体缩放因子(1.0 = 使用 INSState 中配置的原值)，用于敏感度扫描
         TYPE proc_noise_scale_ = TYPE(1);
-        // 严格消融开关。生产默认使用真实三角化与 Landmark 修正；真值初始化
-        // 只允许分析程序使用，不能进入默认算法。
+        // 生产默认使用真实三角化；真值初始化只允许分析程序显式启用。
         LandmarkInitializationMode landmark_initialization_mode_ =
             LandmarkInitializationMode::Triangulation;
+        // 下列后处理模式只对重复窗口调度生效。默认一次性 MSCKF 会把普通点
+        // 强制设为 Fixed，长期修正由维护完整 P_xL 的持久点联合状态承担。
         LandmarkUpdateMode landmark_update_mode_ = LandmarkUpdateMode::Retriangulate;
-        // 历史消融命令兼容开关；false 时无条件使用 Fixed，不读取 update mode。
+        // 历史消融命令兼容开关；false 时无条件使用 Fixed。
         bool refine_landmarks_ = true;
         // 基于 FEJ 的可观性约束，保护 VIO 的四维 gauge：全局平移 3 维和绕
         // 重力方向的全局偏航 1 维。默认开启，仅在严格 A/B 中允许关闭。

@@ -1,8 +1,9 @@
 # 一致有效子空间与 Landmark 协方差实验
 
-本文记录两组实现与严格实验：Schur 视觉更新的一致有效子空间硬投影，以及不维护完整
-`Pxl` 时可用的 landmark 协方差/地图后处理策略。生产默认仍为 `FEJ + Retriangulate`；
-硬投影、独立 EKF 膨胀和影子地图均为显式实验开关。
+本文记录两组历史实现与严格实验：Schur 视觉更新的一致有效子空间硬投影，以及尚未维护
+完整 `Pxl` 时可用的 landmark 协方差/地图后处理策略。这些实验最终推动了当前
+`FEJ + 一次性 MSCKF + 完整联合持久点子集`：硬投影默认关闭，普通一次性轨迹不再做
+独立点后处理；独立 EKF 膨胀、重三角化和影子地图仍保留为显式消融能力。
 
 ## 1. 为什么旧硬投影会失败
 
@@ -112,8 +113,9 @@ flowchart LR
 
 ## 4. 硬投影严格实验
 
-配置：30 s、600 特征、`uv_var=0.01`、密度型 IMU 噪声、偏置随机游走开启、
-三角化最小视差 8°、landmark 使用 `Retriangulate`。
+本表是持久 Hybrid MSCKF 形成前的历史重复窗口配置：30 s、600 特征、
+`uv_var=0.01`、密度型 IMU 噪声、偏置随机游走开启、三角化最小视差 8°、landmark 使用
+`Retriangulate`。
 
 | 场景 | FEJ RMSE / 投影 RMSE (m) | 投影后平均泄漏 | Hpp 平均删除方向 | 删除梯度比例最大值 | FEJ / 投影耗时 (s) |
 |---|---:|---:|---:|---:|---:|
@@ -123,13 +125,19 @@ flowchart LR
 | Stop-go | 0.1208 / 0.1222 | 1.11e-17 | 38.60 | 4.29e-4 | 6.41 / 55.46 |
 
 结论：新投影已消除旧实现的灾难性退化，泄漏从约 `1e-3~1e-2` 降到机器精度，同时轨迹
-基本持平。但当前默认 195 维状态的白化和特征分解使视觉后验耗时增加约 8～14 倍，所以
+基本持平。但该实验中 195 维状态的白化和特征分解使视觉后验耗时增加约 8～14 倍，所以
 `project_observability_constraint_` 继续默认关闭，生产只启用 FEJ。
 
-Hpp 删除方向多于“四维 gauge”是正常的。当前矩阵维数固定为 195（历史开启重力估计的
-性能实验为 198），视觉 Hessian 不直接约束
-核心 IMU 状态，启动阶段还含未激活 clone；再叠加视差、特征分布和几何退化，完整实验平均约
-39～42 个低信息方向。真正需要检查的是被删除梯度比例，而不是要求删除数量固定等于 4 或 31。
+Hpp 删除方向多于“四维 gauge”是正常的。表中旧配置接近填满 30 个 clone，视觉 Hessian
+又不直接约束核心 IMU 状态；再叠加少量空槽和局部几何退化，平均约 39～42 个低信息方向。
+当前默认虽仍是固定 195 维，却通常只活跃 20～21 个 clone；其结构零方向基线应按
+
+```math
+15+6(30-k)+7
+```
+
+计算，典型为 82 或 76，而不是沿用表中的 39～42。真正需要检查的是活跃维数、秩阈值、
+被删除梯度比例和更新后的半正定性，而不是要求删除数量固定等于 4、31 或任一历史均值。
 
 ## 5. 为什么给独立 landmark 加 Q 不能补出 Pxl
 
@@ -189,9 +197,9 @@ $$
 覆盖率仍不足，说明它依然不是严格联合滤波。建议把它用于“需要更好地图输出、但不让地图
 协方差反馈导航”的后处理场景，不用于宣称严格一致的 landmark 概率估计。
 
-## 7. 默认选择与复现
+## 7. 历史默认、当前默认与复现
 
-默认配置保持：
+下列配置是本实验形成时的**历史重复窗口默认**：
 
 ```cpp
 enforce_observability_constraint_ = true;
@@ -199,6 +207,16 @@ project_observability_constraint_ = false;
 landmark_update_mode_ = LandmarkUpdateMode::Retriangulate;
 enable_shadow_landmark_postprocessor_ = false;
 ```
+
+当前默认仍保持 FEJ 开、硬投影关，但调度器为一次性 MSCKF。有效普通点模式由调度生命周期
+强制为 `Fixed`；最多 20 个持久点追加到动态联合状态，并显式维护
+
+```math
+P=\begin{bmatrix}P_{xx}&P_{xL}\\P_{Lx}&P_{LL}\end{bmatrix}.
+```
+
+因此 `landmark_update_mode_ = Retriangulate` 只在 Legacy/SchurVINS/VINS-Mono 等
+重复窗口对照中生效，不代表当前 Hybrid 路径。
 
 复现命令：
 
@@ -213,5 +231,7 @@ enable_shadow_landmark_postprocessor_ = false;
 - `out/landmark_consistency_summary.csv`：最终点误差、NEES、95%覆盖率和影子地图指标；
 - `out/triangulation_<scenario>_<tag>.csv`：逐点最终/影子位置、协方差、NEES 与覆盖结果。
 
-若未来要求 landmark 概率严格一致，下一步应实现活动 landmark 子集的完整 `Pxl` 基准，
-而不是继续调大 `Ql`。该改动会改变状态增广、边缘化和存储复杂度，应该作为独立架构实验。
+本实验提出的“活动 landmark 子集完整 `Pxl`”已经在后续 Hybrid MSCKF 中实现：普通点
+继续采用结构无关的一次性 Schur 约束，只有通过长期质量、空间覆盖和预算筛选的点才进入联合
+状态。若还要提高严格一致性，下一步应比较持久点边缘化/再锚定、reset Jacobian 和紧凑活跃
+坐标，而不是继续给独立点调大 `Ql`。

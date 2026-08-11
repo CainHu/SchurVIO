@@ -2,9 +2,12 @@
 
 本目录记录 SchurVIO 的源码结构、数学推导、视觉后验策略、精度消融与历史问题归档。
 
-## 整体结果
+## 历史求解器优化结果
 
-从最初的 203.5 s 到现在的 11.9 s，**总体 17 倍**，精度全程逐位不变。
+下表记录早期同一数据流中的求解器交错 A/B：Schur 优化先从 203.5 s 降到 11.9 s
+（约 17 倍），Hpp LDLT 再降到 9.7 s（累计约 21 倍），精度全程基本不变。后续加入真实
+三角化、多场景、一次性调度和 Hybrid 持久点后，工作量已经变化，不能把这些绝对秒数
+当成当前 100 秒报告的耗时基线。
 
 | 阶段 | 路径 | 耗时 | 说明 |
 |---|---|---|---|
@@ -25,6 +28,9 @@
 |---|---|
 | [SOURCE_LAYOUT.md](SOURCE_LAYOUT.md) | 当前 `schur_vins_*.cpp` 拆分、调用流程、数学文档映射和维护约定 |
 | [MATHEMATICAL_PIPELINE.md](MATHEMATICAL_PIPELINE.md) | 从 IMU 传播、clone 增广、三角化到 Schur/Joseph 后验的数学总流程 |
+| [ESKF_STATE_PROPAGATION_AND_AUGMENTATION.md](ESKF_STATE_PROPAGATION_AND_AUGMENTATION.md) | **ESKF 专题**：坐标系、左乘误差、IMU 转移、联合 cross covariance、clone 增广、Joseph 与 reset 边界 |
+| [VISUAL_RESIDUAL_NOISE_MODEL.md](VISUAL_RESIDUAL_NOISE_MODEL.md) | **视觉统计专题**：归一化方差、Huber/硬门限、一次性 MSCKF、持久点与历史 `uv_var` 的不同语义 |
+| [REIMPLEMENTATION_GUIDE_137BFEA_TO_HEAD.md](REIMPLEMENTATION_GUIDE_137BFEA_TO_HEAD.md) | **重实现路线**：从 `137bfea` 按问题、数学依赖、流程图和验收逐阶段重建当前算法 |
 | [OPT_QR_PATH.md](OPT_QR_PATH.md) | QR 路径 203.5 s → 61.8 s |
 | [OPT_SCHUR_PATH.md](OPT_SCHUR_PATH.md) | Schur 路径 18.3 s → 11.9 s |
 | [OPT_LDLT.md](OPT_LDLT.md) | `Hpp` 分解改用 LDLT，11.9 s → 9.7 s |
@@ -39,10 +45,10 @@
 | [TRIANGULATION.md](TRIANGULATION.md) | 多视图三角化、失败门限、初始 landmark 协方差和真值离线评估 |
 | [SIMULATION_SCENARIOS.md](SIMULATION_SCENARIOS.md) | Circle-out / Circle-in / Helix-3D / Stop-go 场景与统一噪声模型 |
 | [ABLATION_STUDY.md](ABLATION_STUDY.md) | 四场景严格消融：三角化、landmark 修正、IMU 白噪声离散化与偏置随机游走 |
-| [HPP_NULLSPACE.md](HPP_NULLSPACE.md) | 理论：为什么 `Hpp` 恒有 ~31 维零空间；跳过策略是否正确 |
+| [HPP_NULLSPACE.md](HPP_NULLSPACE.md) | 理论：当前零空间如何随活跃 clone 数变化、历史 31 的来源、LDLT 主元与空槽压缩机会 |
 | [OBSERVABILITY_CONSTRAINT.md](OBSERVABILITY_CONSTRAINT.md) | FEJ 可观性约束：四维 VIO gauge、Schur 实现、硬投影反例与四场景 A/B |
 | [LANDMARK_UPDATE_STRATEGIES.md](LANDMARK_UPDATE_STRATEGIES.md) | 固定点、重三角化、Schur 回代与旧独立 EKF 的数学边界和严格对比 |
-| [HLL_STRUCTURE.md](HLL_STRUCTURE.md) | 理论：`Hll` 的零特征值 = 深度方向；`Hll` 换 LDLT |
+| [HLL_STRUCTURE.md](HLL_STRUCTURE.md) | 理论：`Hll` 的弱深度方向；Schur 伪逆为何保留特征分解、历史独立点 LDLT 的边界 |
 | [CONSISTENT_SUBSPACE_AND_LANDMARK_COVARIANCE.md](CONSISTENT_SUBSPACE_AND_LANDMARK_COVARIANCE.md) | `Hll/Hpp/gp` 同域投影、Landmark 协方差与影子地图实验 |
 | [SHADOW_LANDMARKS.md](SHADOW_LANDMARKS.md) | 独立影子地图与影子候选的概念边界、历史实验和回归结果；混合主流程以 `HYBRID_MSCKF.md` 为准 |
 | [archive/legacy_debug/README.md](archive/legacy_debug/README.md) | 早期坐标系、发散和状态增广调试文档；仅用于历史追溯 |
@@ -53,14 +59,15 @@
 
 ```mermaid
 flowchart LR
-    A["数学总流程"] --> B["三角化"]
-    B --> C["Landmark 参数化"]
-    C --> D["Schur 与 QR 等价性"]
-    D --> E["Hll/Hpp 零空间"]
-    E --> F["FEJ 与一致有效子空间"]
-    F --> G["无深度纯旋转约束"]
-    G --> H["视觉调度与 RD-VIO"]
-    H --> I["消融和报告指标"]
+    A["坐标与 ESKF 传播"] --> B["数学总流程"]
+    B --> C["三角化"]
+    C --> D["Landmark 参数化"]
+    D --> E["Schur 与 QR 等价性"]
+    E --> F["Hll/Hpp 零空间"]
+    F --> G["FEJ 与一致有效子空间"]
+    G --> H["无深度纯旋转约束"]
+    H --> I["视觉调度与 RD-VIO"]
+    I --> J["消融和报告指标"]
 ```
 
 ## 路径切换
@@ -81,7 +88,7 @@ flowchart LR
 | `INSState::ESTIMATE_GRAVITY` | `common.h` | `false` | 仿真重力已知时固定；真实设备可重新开启 |
 | `ExtState::ESTIMATE_EXTRINSIC` | `common.h` | `false` | 是否估计相机-IMU 外参 |
 | `USE_LDLT_FOR_HPP` | `eskf/schur_vins.h` | `true` | `Hpp` 分解：`true`=LDLT，`false`=特征分解 |
-| `USE_LDLT_FOR_HLL` | `eskf/schur_vins.h` | `true` | `Hll` 分解，同上（性能上两者无差别） |
+| `USE_LDLT_FOR_HLL` | `eskf/schur_vins.h` | `true` | 仅控制旧 Independent EKF 消融；默认 Schur 的 3×3 `Hll` 伪逆固定用特征分解判秩 |
 | `SCHUR_VIO_VISUAL_SCHEDULER` | `CMakeLists.txt` / `eskf/visual_update_scheduler.h` | `MSCKF` | 视觉调度：Legacy、SchurVINS、MSCKF 或 VINS-Mono 风格 |
 | `SCHUR_VIO_FRAME_POLICY` | `CMakeLists.txt` / `eskf/frame_selection_policy.h` | `AUTO` | 帧选择：默认 MSCKF 下解析为 `KEYFRAME_ONLY`；可显式选择实验性 `KEYFRAME_REDUNDANCY` |
 | `SCHUR_VIO_FRAME_WINDOW_SIZE` | `CMakeLists.txt` | `0` | `0` 使用策略默认预算，非零时固定 clone 数用于公平消融 |
